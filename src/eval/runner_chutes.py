@@ -17,8 +17,13 @@ from core.constants import CHUTE_NAME, CHUTE_USERNAME, REFERENCE_SKU
 from eval.runner import ArtifactRef, ResourceCaps, RunnerError, StreamInput
 from eval.scoring import StreamResult
 
-# The public invocation URL pattern should be confirmed on first deploy; override via
-# --chute-url / GLYPH_CHUTE_URL.
+# Confirmed live invocation contract (validated against the Chutes API; pinned offline by
+# tests/test_chute_contract.py and exercised live by scripts/smoke_chute.py):
+#   URL     f"https://{username}-{name}.chutes.ai{public_api_path}"  -> here .../run_stream
+#   method  POST, JSON body == chute_app.RunStreamRequest
+#   auth    Authorization: Basic <cpk_...>            (the bare key 401s)
+#   reply   JSON == chute_app.StreamResultModel dump  (a cord returns a dict, not a model)
+# Override the base URL per deployment via --chute-url / GLYPH_CHUTE_URL.
 DEFAULT_BASE_URL = f"https://{CHUTE_USERNAME}-{CHUTE_NAME}.chutes.ai"
 
 
@@ -112,8 +117,17 @@ class ChutesRunner:
         except Exception as exc:  # network/HTTP errors are dispatch failures
             raise RunnerError(f"chute dispatch failed: {exc}") from exc
 
+        return self._parse_response(data, stream)
+
+    @staticmethod
+    def _parse_response(data: dict, stream: StreamInput) -> StreamResult:
+        """Map the chute's JSON reply (a ``StreamResultModel`` dump) to a ``StreamResult``.
+
+        A worker-side codec failure (``error`` set) is an invalid stream, not a dispatch
+        error -- score it as a failed (non-bit-exact) round-trip rather than raising.
+        """
+
         if data.get("error"):
-            # A worker-side codec failure is an invalid stream, not a dispatch error.
             return StreamResult(
                 stream_id=stream.stream_id,
                 raw_bytes=int(data.get("raw_bytes", stream.raw_len)),

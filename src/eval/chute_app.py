@@ -7,9 +7,15 @@ so every validator measures identical compressed bytes.
 
 Deploy with:  chutes deploy eval.chute_app:chute --accept-fee
 
-NOTE: the exact cord request/response binding and the public invocation URL should be
-confirmed against the live Chutes API on first deploy; the boundaries are isolated in
-``_evaluate`` (here) and in ``runner_chutes.ChutesRunner`` (dispatch).
+Invocation contract (validated against the live Chutes API):
+- ``POST {base}/run_stream`` with ``Authorization: Basic <cpk_...>``; the request body is
+  ``RunStreamRequest`` and the reply is a JSON dump of ``StreamResultModel``.
+- A cord MUST return a JSON-serializable dict, not a pydantic model -- returning a model
+  raises ``TypeError: Type is not JSON serializable`` in the response serializer, which the
+  gateway surfaces as a misleading 500 "No infrastructure available".
+``tests/test_chute_contract.py`` pins this binding offline (no GPU); ``scripts/smoke_chute.py``
+runs a live round-trip (inline + url/range) against a deployed instance. The boundaries stay
+isolated in ``_evaluate`` (here) and ``runner_chutes.ChutesRunner`` (dispatch).
 """
 
 from __future__ import annotations
