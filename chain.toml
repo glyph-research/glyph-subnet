@@ -14,7 +14,7 @@ commit_reveal_enabled = true
 tempo = 360
 
 [scoring]
-win_margin = 0.005          # epsilon: relative ratio improvement required to dethrone
+win_margin = 0.05           # epsilon: 5% relative ratio improvement required to dethrone
 baseline_zstd_level = 19    # vacant-crown floor
 throughput_floor_bps = 10240
 max_artifact_bytes = 10737418240   # 10 GiB

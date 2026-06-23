@@ -13,28 +13,36 @@ def entry(hotkey, ratio, block=0):
     return WinnerEntry(hotkey=hotkey, repo=f"{hotkey}/codec", revision="rev123456", ratio=ratio, commit_block=block)
 
 
-# --- should_promote: lower ratio is better, strict epsilon to dethrone -----------
+# --- should_promote: lower ratio is better, 5% epsilon to dethrone ---------------
 
 def test_vacant_crown_promotes():
-    assert should_promote(0.90, None, 0.005) is True
+    assert should_promote(0.90, None, 0.05) is True
 
 
-def test_strict_epsilon_beat_promotes():
-    # 0.6% better than incumbent 0.85 -> 0.845 <= 0.85*0.995 (=0.84575)
-    assert should_promote(0.845, 0.85, 0.005) is True
+def test_five_percent_beat_promotes():
+    # ~5.9% better than incumbent 0.85 -> 0.80 <= 0.85*0.95 (=0.8075)
+    assert should_promote(0.80, 0.85, 0.05) is True
 
 
 def test_within_epsilon_does_not_promote():
-    # 0.846 is better than 0.85 but not by the full 0.5% margin
-    assert should_promote(0.846, 0.85, 0.005) is False
+    # 0.83 is better than 0.85 but not by the full 5% margin (0.83 > 0.8075)
+    assert should_promote(0.83, 0.85, 0.05) is False
+
+
+def test_five_percent_boundary_is_inclusive():
+    # acceptance: a challenger dethrones iff challenger_ratio <= current_ratio * 0.95
+    incumbent = 0.85
+    threshold = incumbent * (1.0 - 0.05)  # exact dethrone line (== incumbent * 0.95)
+    assert should_promote(threshold, incumbent, 0.05) is True  # exactly at the line dethrones
+    assert should_promote(threshold * 1.0001, incumbent, 0.05) is False  # just above does not
 
 
 def test_exact_tie_does_not_dethrone():
-    assert should_promote(0.85, 0.85, 0.005) is False
+    assert should_promote(0.85, 0.85, 0.05) is False
 
 
 def test_worse_ratio_does_not_promote():
-    assert should_promote(0.90, 0.85, 0.005) is False
+    assert should_promote(0.90, 0.85, 0.05) is False
 
 
 # --- tie-break ordering ----------------------------------------------------------

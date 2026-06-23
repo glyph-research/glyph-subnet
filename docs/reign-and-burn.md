@@ -7,9 +7,9 @@ beacon-seeded streams (paired comparison kills sampling variance). Rules:
 
 - Score = compressed ÷ raw bytes (lower is better), gated on bit-exact round-trip on every
   stream, a 10 KiB/s decompress floor, and the compress budget.
-- A challenger takes the crown only by beating the incumbent's ratio by **ε = 0.5%**
-  (relative). Ties go to the **earliest commit block**, so copying a public codec is
-  worthless.
+- A challenger takes the crown only by beating the incumbent's ratio by **ε = 5%**
+  (relative; launch setting `win_margin = 0.05`). Ties go to the **earliest commit block**,
+  so copying a public codec is worthless.
 - A challenger that does not win is **excluded forever** (one shot). The registration burn
   is therefore the spam-proof submission fee.
 - The previous winner is a hot standby: if the incumbent's artifact vanishes or fails
