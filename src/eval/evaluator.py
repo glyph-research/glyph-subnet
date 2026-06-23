@@ -7,6 +7,7 @@ runs as one same-worker job via a ``CodecRunner``.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -33,15 +34,19 @@ def _prepare_stream(runner: CodecRunner, provider: CorpusProvider, spec: StreamS
     """Build the stream input for ``spec``: a remote range source or inline bytes.
 
     A runner that fetches bytes itself (``prefers_remote_source``) gets a ``RangeSource`` when
-    the corpus exposes one, so the validator never materializes the 256 MiB sample. Otherwise
-    (local runner, or no published corpus URL) the bytes are read and inlined as before.
+    the corpus exposes one, so the heavy stream bytes are not re-uploaded. Either way the
+    validator computes ``expected_sha256`` from the trusted corpus locally and pins it on the
+    input -- that anchors the round-trip target so the split compress/decompress workers can't
+    fake bit-exactness (#14). Hashing is a local read, not an upload.
     """
 
+    data = provider.materialize(spec)
+    expected_sha256 = hashlib.sha256(data).hexdigest()
     if getattr(runner, "prefers_remote_source", False):
         source = provider.stream_source(spec)
         if source is not None:
-            return StreamInput(spec.stream_id, source=source)
-    return StreamInput(spec.stream_id, data=provider.materialize(spec))
+            return StreamInput(spec.stream_id, source=source, expected_sha256=expected_sha256)
+    return StreamInput(spec.stream_id, data=data, expected_sha256=expected_sha256)
 
 
 def evaluate_artifact(

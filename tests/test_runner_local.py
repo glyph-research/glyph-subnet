@@ -115,3 +115,60 @@ def test_strict_runner_fails_closed_without_network_isolation(monkeypatch, tmp_p
     artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
     with pytest.raises(RunnerError, match="network isolation unavailable"):
         runner.run_stream(artifact, StreamInput("s0", b"data" * 100), caps=ResourceCaps())
+
+
+# --- split compress/decompress: separate sandboxes defeat the stash cheat (#14) --
+
+def test_compress_then_decompress_reconstructs_via_blob_only(tmp_path):
+    runner = LocalSubprocessRunner()
+    artifact = ArtifactRef(repo="glyph/ref", rev="local", local_path=str(REFERENCE_CODEC))
+    raw = b"the quick brown fox " * 2000
+    comp = runner.compress(artifact, raw, caps=ResourceCaps())
+    assert comp.raw_bytes == len(raw)
+    assert 0 < comp.compressed_bytes < len(raw)
+    assert comp.source_hash and comp.blob_hash
+    # the blob alone (no shared state with the compress sandbox) reconstructs the original
+    decomp = runner.decompress(artifact, comp.blob, caps=ResourceCaps())
+    assert decomp.output_hash == comp.source_hash
+    assert decomp.raw_bytes == len(raw)
+
+
+def test_filesystem_stash_across_compress_decompress_is_defeated(tmp_path):
+    # A codec that stashes the raw input to $HOME during compress and reads it back during
+    # decompress would fake a ~zero ratio if both phases shared a sandbox. With the split they
+    # get separate $HOME dirs, so the stash is gone and the cheat fails the bit-exact gate.
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "stash-cheat",
+                "entrypoints": {
+                    "compress": ["python3", "compress.py", "--input", "{input}", "--output", "{output}"],
+                    "decompress": ["python3", "decompress.py", "--input", "{input}", "--output", "{output}"],
+                },
+                "license": "MIT",
+            }
+        )
+    )
+    (tmp_path / "compress.py").write_text(
+        "import argparse, os\n"
+        "p=argparse.ArgumentParser();p.add_argument('--input');p.add_argument('--output')\n"
+        "a=p.parse_args()\n"
+        "raw=open(a.input,'rb').read()\n"
+        "open(os.path.join(os.environ['HOME'],'glyph_stash.bin'),'wb').write(raw)\n"
+        "open(a.output,'wb').write(b'X')\n"  # 1-byte blob: ratio ~0 if the stash were readable
+    )
+    (tmp_path / "decompress.py").write_text(
+        "import argparse, os\n"
+        "p=argparse.ArgumentParser();p.add_argument('--input');p.add_argument('--output')\n"
+        "a=p.parse_args()\n"
+        "stash=os.path.join(os.environ['HOME'],'glyph_stash.bin')\n"
+        "data=open(stash,'rb').read() if os.path.exists(stash) else open(a.input,'rb').read()\n"
+        "open(a.output,'wb').write(data)\n"
+    )
+    runner = LocalSubprocessRunner()
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    raw = b"secret payload " * 500
+    result = runner.run_stream(artifact, StreamInput("s0", raw), caps=ResourceCaps())
+    assert result.compressed_bytes == 1  # the cheat produced a 1-byte blob...
+    assert result.roundtrip_ok is False  # ...but the isolated decompress can't recover the raw

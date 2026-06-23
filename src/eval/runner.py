@@ -51,6 +51,10 @@ class StreamInput:
     stream_id: str
     data: bytes | None = None  # inline bytes: local runner, tests, small/smoke streams
     source: RangeSource | None = None  # production: bytes range-fetched by the remote worker
+    # sha256 of the raw stream, computed by the validator from the trusted corpus. The
+    # round-trip target: anchoring it here (not on the untrusted worker's report) stops a
+    # codec from faking bit-exactness across the split compress/decompress workers.
+    expected_sha256: str | None = None
 
     @property
     def raw_len(self) -> int:
@@ -61,6 +65,23 @@ class StreamInput:
         if self.source is not None:
             return self.source.length
         return 0
+
+
+@dataclass
+class CompressOutcome:
+    blob: bytes  # the compressed artifact, handed to a *separate* decompress worker
+    compressed_bytes: int
+    compress_secs: float
+    blob_hash: str
+    source_hash: str  # sha256 of the raw input as seen by the compress worker
+    raw_bytes: int
+
+
+@dataclass
+class DecompressOutcome:
+    output_hash: str  # sha256 of the reconstructed bytes
+    decompress_secs: float
+    raw_bytes: int
 
 
 @dataclass
@@ -125,46 +146,88 @@ class LocalSubprocessRunner:
         self.strict_sandbox = strict_sandbox
         self.require_network_isolation = require_network_isolation
 
+    def _artifact_dir(self, artifact: ArtifactRef) -> Path:
+        if not artifact.local_path:
+            raise RunnerError("LocalSubprocessRunner requires artifact.local_path")
+        return Path(artifact.local_path)
+
+    def compress(
+        self, artifact: ArtifactRef, data: bytes, *, caps: ResourceCaps | None = None
+    ) -> CompressOutcome:
+        """Run only the compress entrypoint in its own sandbox; return the blob to transfer."""
+
+        caps = caps or ResourceCaps()
+        artifact_dir = self._artifact_dir(artifact)
+        manifest = load_manifest(artifact_dir)
+        with tempfile.TemporaryDirectory(prefix="glyph-compress-") as tmp:
+            tmp_dir = Path(tmp)
+            stream_file = tmp_dir / "stream.bin"
+            blob_file = tmp_dir / "blob.bin"
+            stream_file.write_bytes(data)
+            source_hash = _sha256_file(stream_file)
+            argv = resolve_argv(manifest.entrypoints.compress, stream_file, blob_file)
+            secs = self._exec(argv, artifact_dir, caps, home=tmp_dir)
+            if not blob_file.exists():
+                raise RunnerError("compress produced no output blob")
+            blob = blob_file.read_bytes()
+            return CompressOutcome(
+                blob=blob,
+                compressed_bytes=len(blob),
+                compress_secs=secs,
+                blob_hash=_sha256_file(blob_file),
+                source_hash=source_hash,
+                raw_bytes=len(data),
+            )
+
+    def decompress(
+        self, artifact: ArtifactRef, blob: bytes, *, caps: ResourceCaps | None = None
+    ) -> DecompressOutcome:
+        """Run only the decompress entrypoint in a FRESH sandbox seeded with only the blob.
+
+        Because this sandbox (and, in production, this *separate chute/container*) shares no
+        filesystem, process table, or shared memory with the compress worker, a codec cannot
+        stash the raw input during compress and read it back here -- it must genuinely encode
+        everything in ``blob``, so the measured compression ratio is honest.
+        """
+
+        caps = caps or ResourceCaps()
+        artifact_dir = self._artifact_dir(artifact)
+        manifest = load_manifest(artifact_dir)
+        with tempfile.TemporaryDirectory(prefix="glyph-decompress-") as tmp:
+            tmp_dir = Path(tmp)
+            blob_file = tmp_dir / "blob.bin"
+            roundtrip_file = tmp_dir / "roundtrip.bin"
+            blob_file.write_bytes(blob)
+            argv = resolve_argv(manifest.entrypoints.decompress, blob_file, roundtrip_file)
+            secs = self._exec(argv, artifact_dir, caps, home=tmp_dir)
+            if not roundtrip_file.exists():
+                raise RunnerError("decompress produced no output")
+            return DecompressOutcome(
+                output_hash=_sha256_file(roundtrip_file),
+                decompress_secs=secs,
+                raw_bytes=roundtrip_file.stat().st_size,
+            )
+
     def run_stream(
         self, artifact: ArtifactRef, stream: StreamInput, *, caps: ResourceCaps | None = None
     ) -> StreamResult:
         caps = caps or ResourceCaps()
         if stream.data is None:
             raise RunnerError("LocalSubprocessRunner needs inline stream data, not a remote source")
-        if not artifact.local_path:
-            raise RunnerError("LocalSubprocessRunner requires artifact.local_path")
-        artifact_dir = Path(artifact.local_path)
-        manifest = load_manifest(artifact_dir)
-
-        with tempfile.TemporaryDirectory(prefix="glyph-run-") as tmp:
-            tmp_dir = Path(tmp)
-            stream_file = tmp_dir / "stream.bin"
-            blob_file = tmp_dir / "blob.bin"
-            roundtrip_file = tmp_dir / "roundtrip.bin"
-
-            stream_file.write_bytes(stream.data)
-            source_hash = _sha256_file(stream_file)
-
-            compress_argv = resolve_argv(manifest.entrypoints.compress, stream_file, blob_file)
-            compress_secs = self._exec(compress_argv, artifact_dir, caps, home=tmp_dir)
-            if not blob_file.exists():
-                raise RunnerError("compress produced no output blob")
-            compressed_bytes = blob_file.stat().st_size
-            blob_hash = _sha256_file(blob_file)
-
-            decompress_argv = resolve_argv(manifest.entrypoints.decompress, blob_file, roundtrip_file)
-            decompress_secs = self._exec(decompress_argv, artifact_dir, caps, home=tmp_dir)
-            roundtrip_ok = roundtrip_file.exists() and _sha256_file(roundtrip_file) == source_hash
-
-            return StreamResult(
-                stream_id=stream.stream_id,
-                raw_bytes=len(stream.data),
-                compressed_bytes=compressed_bytes,
-                roundtrip_ok=roundtrip_ok,
-                compress_secs=compress_secs,
-                decompress_secs=decompress_secs,
-                blob_hash=blob_hash,
-            )
+        comp = self.compress(artifact, stream.data, caps=caps)
+        decomp = self.decompress(artifact, comp.blob, caps=caps)  # separate sandbox
+        # Prefer the validator-anchored hash; fall back to the compress worker's own view only
+        # when no trusted hash was supplied (local smoke/tests).
+        expected = stream.expected_sha256 or comp.source_hash
+        return StreamResult(
+            stream_id=stream.stream_id,
+            raw_bytes=comp.raw_bytes,
+            compressed_bytes=comp.compressed_bytes,
+            roundtrip_ok=decomp.output_hash == expected,
+            compress_secs=comp.compress_secs,
+            decompress_secs=decomp.decompress_secs,
+            blob_hash=comp.blob_hash,
+        )
 
     def _exec(self, argv: list[str], cwd: Path, caps: ResourceCaps, *, home: Path) -> float:
         wrapped = argv

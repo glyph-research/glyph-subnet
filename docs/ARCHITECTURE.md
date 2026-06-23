@@ -10,7 +10,7 @@ package, and PM2 ecosystems that run the services as independent processes.
 | `core` | Shared primitives: constants, commitments, artifact contract + hashing, validator state, rolling-winner weights, temporal burn schedule, `.env` loader. Also holds `__version__` / `__version_key__`. |
 | `chain` | Bittensor chain adapter (`chain.py`) and a commitment reader (`reader.py` → `glyph-chain-reader`). |
 | `validation` | Codec artifact precheck (manifest/entrypoints/size, hashing, duplicate-hash disqualification). |
-| `eval` | Evaluation service: codec runners (`LocalSubprocessRunner`, `ChutesRunner`), the deployed `glyph-runner` chute (`chute_app.py`), paired evaluator, scoring + gates, beacon stream sampling, corpus providers, chute deploy CLI. |
+| `eval` | Evaluation service: codec runners (`LocalSubprocessRunner`, `ChutesRunner`), the separate deployed compressor/decompressor chutes (`chute_app.py`), paired evaluator, scoring + gates, beacon stream sampling, corpus providers, chute deploy CLI. |
 | `oracle` | Fresh-data oracle: scrapes attested-timestamp text into a corpus + manifest (`glyph-oracle`). |
 | `weight_setter` | Temporal-burn weight decision (`decide_weights`) + standalone setter service (`glyph-weight-setter`). |
 | `reign_worker` | King-of-the-hill round: paired evaluation + crown update + one-shot exclusion (`glyph-reign-worker`). |
@@ -34,5 +34,6 @@ weight_setter.decide_weights (70/30 ± temporal burn) ──▶ chain.set_weight
 
 Run the all-in-one validator (`./scripts/run_auto_validator.sh`, or
 `pm2 start glyph-validator -- ...`) or split it into `glyph-reign-worker` +
-`glyph-weight-setter` + `glyph-oracle` for separation of concerns. The `glyph-runner` chute is deployed once to Chutes (SN64) and shared by all
-validators. See [VALIDATING.md](VALIDATING.md).
+`glyph-weight-setter` + `glyph-oracle` for separation of concerns. The separate compressor and
+decompressor chutes are deployed once to Chutes (SN64) and shared by all validators. See
+[VALIDATING.md](VALIDATING.md).

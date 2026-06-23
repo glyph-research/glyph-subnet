@@ -79,7 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reference-sku", default=REFERENCE_SKU)
     parser.add_argument("--chutes-key-file", default=None)
-    parser.add_argument("--chute-url", default=None, help="Deployed glyph-runner chute base URL")
+    parser.add_argument("--compress-chute-url", default=None, help="Deployed glyph-compressor chute base URL")
+    parser.add_argument("--decompress-chute-url", default=None, help="Deployed glyph-decompressor chute base URL")
     parser.add_argument("--streams", type=int, default=STREAMS_PER_ROUND)
     parser.add_argument("--stream-bytes", type=int, default=STREAM_BYTES)
     parser.add_argument("--floor-bps", type=float, default=THROUGHPUT_FLOOR_BPS)
@@ -229,7 +230,8 @@ def _make_runner(args) -> object:
     return ChutesRunner(
         reference_sku=args.reference_sku,
         key_file=args.chutes_key_file,
-        base_url=args.chute_url,
+        compress_base_url=args.compress_chute_url,
+        decompress_base_url=args.decompress_chute_url,
     )
 
 

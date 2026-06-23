@@ -30,11 +30,12 @@ def test_chute_username_defaults_to_glyph(monkeypatch):
 def test_chute_username_honours_env_override(monkeypatch):
     mod = _reload(monkeypatch, GLYPH_CHUTE_USERNAME="acme")
     assert mod.CHUTE_USERNAME == "acme"
-    # the derived default chute URL follows the override
+    # the derived default compress/decompress chute URLs follow the override
     importlib.reload(importlib.import_module("eval.runner_chutes"))
-    from eval.runner_chutes import DEFAULT_BASE_URL
+    from eval.runner_chutes import DEFAULT_COMPRESS_URL, DEFAULT_DECOMPRESS_URL
 
-    assert DEFAULT_BASE_URL == "https://acme-glyph-runner.chutes.ai"
+    assert DEFAULT_COMPRESS_URL == "https://acme-glyph-compressor.chutes.ai"
+    assert DEFAULT_DECOMPRESS_URL == "https://acme-glyph-decompressor.chutes.ai"
 
 
 def test_window_anchor_is_a_fixed_int_not_env_configurable(monkeypatch):
