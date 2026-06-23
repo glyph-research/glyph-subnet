@@ -32,7 +32,7 @@ weight_setter.decide_weights (70/30 ± temporal burn) ──▶ chain.set_weight
 
 ## Deployment
 
-Run the all-in-one validator (`pm2 start pm2/ecosystem.validator.config.js`) or split it
-into `glyph-reign-worker` + `glyph-weight-setter` + `glyph-oracle` for separation of
-concerns. The `glyph-runner` chute is deployed once to Chutes (SN64) and shared by all
+Run the all-in-one validator (`./scripts/run_auto_validator.sh`, or
+`pm2 start glyph-validator -- ...`) or split it into `glyph-reign-worker` +
+`glyph-weight-setter` + `glyph-oracle` for separation of concerns. The `glyph-runner` chute is deployed once to Chutes (SN64) and shared by all
 validators. See [VALIDATING.md](VALIDATING.md).

@@ -29,18 +29,20 @@ glyph-oracle --out-dir ./corpus --target-bytes 268435456   # 256 MiB of fresh te
 
 ## Run
 
-All-in-one (recommended to start):
+All-in-one — `glyph-validator` is a console entry point; wrap it in PM2 (edit wallet/netuid):
 
 ```bash
-pm2 start pm2/ecosystem.validator.config.js     # edit wallet/netuid first
+pm2 start glyph-validator --name glyph-validator -- \
+  --netuid 117 --wallet-name validator --hotkey-name default --runner chutes \
+  --corpus-dir ./corpus --state-dir ./state
 ```
 
-Or split into services:
+Or split into services (each is a console entry point — same `pm2 start <script> -- <args>` form):
 
 ```bash
-pm2 start pm2/ecosystem.reign-worker.config.js   # evaluate + update crown
-pm2 start pm2/ecosystem.weight-setter.config.js  # temporal-burn weights every tempo
-pm2 start pm2/ecosystem.oracle.config.js         # daily fresh corpus
+pm2 start glyph-reign-worker  --name glyph-reign-worker  -- --netuid 117 --wallet-name validator --hotkey-name default --runner chutes --corpus-dir ./corpus   # evaluate + update crown
+pm2 start glyph-weight-setter --name glyph-weight-setter -- --netuid 117 --wallet-name validator --hotkey-name default                                          # temporal-burn weights every tempo
+pm2 start glyph-oracle        --name glyph-oracle        -- --out-dir ./corpus --target-bytes 268435456                                                         # daily fresh corpus
 ```
 
 Auto-updating validator (tracks `glyph-research/glyph-subnet`):

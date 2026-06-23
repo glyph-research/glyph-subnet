@@ -28,8 +28,7 @@ src/
   reign_worker/      king-of-the-hill round                   (glyph-reign-worker)
   validator/   all-in-one orchestrator + offline demo   (glyph-validator)
 miner/               commit | check | publish | register      (glyph-miner)
-pm2/                 per-service PM2 ecosystems
-scripts/             install, genesis king, deploy chute, auto-update
+scripts/             install, genesis king, deploy chute, auto-update (run_auto_validator.sh)
 reference_codec/     minimal zstd codec (artifact contract example)
 samples/             bundled corpus + demo codec for the offline demo
 docs/  website/  tests/
@@ -61,7 +60,8 @@ See [docs/MINING.md](docs/MINING.md). Commitments are permanent per hotkey.
 cp .env.example .env                                       # CHUTES_API_KEY
 ./scripts/deploy_runner_chute.sh                           # deploy the eval chute (once)
 glyph-oracle --out-dir ./corpus --target-bytes 268435456   # fresh corpus
-pm2 start pm2/ecosystem.validator.config.js                # edit wallet/netuid first
+./scripts/run_auto_validator.sh --netuid 117 \             # auto-updating validator under PM2
+  --wallet-name w --hotkey-name h --runner chutes --corpus-dir ./corpus --state-dir ./state
 ```
 
 Offline M0 demo (no chain, no Chutes) — exercises eval → king-of-the-hill → weights:
