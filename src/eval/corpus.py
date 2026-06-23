@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from eval.streams import StreamSpec
+from eval.streams import RangeSource, StreamSpec
 
 
 @dataclass(frozen=True)
@@ -51,6 +51,8 @@ class CorpusProvider(Protocol):
 
     def materialize(self, spec: StreamSpec) -> bytes: ...
 
+    def stream_source(self, spec: StreamSpec) -> RangeSource | None: ...
+
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -69,7 +71,13 @@ class StaticLocalProvider:
 
     RESERVED = {"manifest.json", "provenance.json"}
 
-    def __init__(self, directory: str | Path):
+    def __init__(self, directory: str | Path, *, base_url: str | None = None):
+        # base_url, when set, is the public location where the *same* concatenated corpus is
+        # served as one contiguous blob (chunk order == sorted manifest order). It enables the
+        # production Chutes path: the runner range-fetches the URL instead of the validator
+        # inlining bytes. Left None (tests/M0), the provider has no remote source and callers
+        # fall back to inlining materialized bytes.
+        self.base_url = base_url
         self.directory = Path(directory)
         files = [
             p
@@ -117,6 +125,13 @@ class StaticLocalProvider:
     def materialize(self, spec: StreamSpec) -> bytes:
         return self.read_range(spec.offset, spec.length)
 
+    def stream_source(self, spec: StreamSpec) -> RangeSource | None:
+        """The remote URL+range for ``spec``, or None when no ``base_url`` is configured."""
+
+        if not self.base_url:
+            return None
+        return RangeSource(url=self.base_url, offset=spec.offset, length=spec.length)
+
 
 class OracleProvider(StaticLocalProvider):
     """A corpus produced by the data oracle, verified against its published manifest hash.
@@ -126,8 +141,14 @@ class OracleProvider(StaticLocalProvider):
     corpus locally and assert it matches the committed hash (DESIGN §5).
     """
 
-    def __init__(self, directory: str | Path, expected_manifest_hash: str | None = None):
-        super().__init__(directory)
+    def __init__(
+        self,
+        directory: str | Path,
+        expected_manifest_hash: str | None = None,
+        *,
+        base_url: str | None = None,
+    ):
+        super().__init__(directory, base_url=base_url)
         if expected_manifest_hash:
             actual = self.manifest().manifest_hash()
             if actual != expected_manifest_hash:
