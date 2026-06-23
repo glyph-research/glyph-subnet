@@ -22,7 +22,7 @@ COMPACT_COMMITMENT_PREFIX = "g1|"
 # 52.5% / 22.5% / 25% burned (see burn_schedule).
 WINNER_WEIGHTS = (0.70, 0.30)
 WINNER_LIMIT = 2
-DEFAULT_WIN_MARGIN = 0.005  # epsilon: relative ratio improvement required to dethrone
+DEFAULT_WIN_MARGIN = 0.05  # epsilon: 5% relative ratio improvement required to dethrone
 
 # --- Codec artifact limits (DESIGN §4, §7) ------------------------------------
 DEFAULT_MAX_ARTIFACT_BYTES = 10 * 2**30  # 10 GiB

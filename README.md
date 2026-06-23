@@ -11,7 +11,7 @@ Chutes (SN64) serverless GPU, and set weights with a king-of-the-hill policy:
 
 Score = compression ratio (compressed ÷ raw, lower is better) with a hard **bit-exact
 round-trip** gate. A challenger takes the crown only by beating the incumbent by `ε`
-(default `0.5%`); ties go to the earliest commit; losers are excluded forever (one shot).
+(default `5%`); ties go to the earliest commit; losers are excluded forever (one shot).
 
 See [`../DESIGN.md`](../DESIGN.md) for the full spec and [`docs/`](docs) for guides.
 

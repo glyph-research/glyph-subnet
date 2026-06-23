@@ -30,7 +30,7 @@ ships a neural arithmetic coder (LLM/NN next-token probabilities → range coder
   must be byte-identical there (use integer-quantized inference).
 - bit-exact round-trip on every stream; decompress throughput ≥ 10 KiB/s.
 - artifact under the size cap (default 10 GiB); must beat the zstd-19 baseline to take a
-  vacant crown, and beat the incumbent by ≥ 0.5% (relative) to dethrone it.
+  vacant crown, and beat the incumbent by ≥ 5% (relative) to dethrone it.
 - no outbound network, cloud storage, shell download/upload helpers, or hidden fetches.
   Validators statically review artifact source for common exfiltration paths and the
   production Chutes runner executes entrypoints with network isolation and scrubbed secrets.
