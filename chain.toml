@@ -1,0 +1,37 @@
+# Glyph subnet chain parameters. The validator reads CLI/env for live values; this file
+# documents the canonical on-chain settings and launch-time constants (DESIGN §7, §6.1).
+
+[subnet]
+name = "glyph"
+netuid = 117
+network = "finney"
+
+[hyperparameters]
+# Set on-chain at registration. The validator fail-closes if weights_version != the
+# package __version_key__. commit_reveal must be enabled for the anti-copy burn schedule.
+weights_version = 0
+commit_reveal_enabled = true
+tempo = 360
+
+[scoring]
+win_margin = 0.005          # epsilon: relative ratio improvement required to dethrone
+baseline_zstd_level = 19    # vacant-crown floor
+throughput_floor_bps = 10240
+max_artifact_bytes = 10737418240   # 10 GiB
+
+[streams]
+stream_bytes = 33554432     # 32 MiB
+streams_per_round = 8       # 256 MiB paired sample
+
+[winners]
+current = 0.70
+previous = 0.30
+
+[burn]
+window_tempos = 4           # one unpredictable burn tempo per 4-tempo window (25%)
+burn_uid = 0
+window_anchor_block = 0     # TODO: set to the subnet registration block at launch
+
+[chutes]
+reference_sku = "a100"      # NodeSelector.include pin for byte-identical scoring
+chute_name = "glyph-runner"

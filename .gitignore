@@ -1,0 +1,53 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+dist/
+build/
+.DS_Store
+
+# Local validator/miner runtime state.
+state/
+*.jsonl
+validator_state.json
+validator_salt.txt
+TESTNET_STATUS.md
+testnet-status.md
+operator-notes.md
+*.sqlite
+*.sqlite3
+*.db
+
+# Local secrets and machine-specific operator files.
+.env
+.env.*
+!.env.example
+.bittensor/
+.chutes
+wallets/
+wallets.csv
+*.seed
+*.mnemonic
+*.pem
+*.key
+*.crt
+
+# Large / regenerable corpus data (downloadable benchmark text, scraped oracle corpus).
+bench_corpus/
+fresh_corpus/
+
+# Website/design artifacts are intentionally excluded from this repo.
+site/
+web/
+design/
+assets/
+node_modules/
+
+# Auto-validator runtime files.
+logs/
+backups/
+app.config.js

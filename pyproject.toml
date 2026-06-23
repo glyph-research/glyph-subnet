@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glyph-subnet"
+version = "0.1.0"
+description = "Glyph: lossless neural text-compression Bittensor subnet (decentralized Hutter Prize)"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "bittensor>=10.3.0",
+  "huggingface-hub>=0.24.0",
+  "pydantic>=2.8.0",
+  "zstandard>=0.22.0",
+  "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+# The Chutes SDK is only needed to deploy/run the serverless evaluation chute.
+chutes = ["chutes>=0.2.0"]
+dev = ["pytest>=8.0.0", "ruff>=0.5.0", "pre-commit>=3.7.0"]
+
+[project.scripts]
+glyph-validator = "validator.service:main"
+glyph-weight-setter = "weight_setter.service:main"
+glyph-reign-worker = "reign_worker.service:main"
+glyph-chain-reader = "chain.reader:main"
+glyph-oracle = "oracle.oracle:main"
+glyph-deploy-chute = "eval.deploy:main"
+glyph-miner = "miner.cli:main"
+glyph-check-model = "miner.check:main"
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = [
+  "core*",
+  "chain*",
+  "validation*",
+  "eval*",
+  "oracle*",
+  "weight_setter*",
+  "reign_worker*",
+  "validator*",
+  "miner*",
+]
+namespaces = false
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

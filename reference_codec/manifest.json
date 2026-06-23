@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "name": "glyph-zstd-reference",
+  "entrypoints": {
+    "compress": ["python3", "compress.py", "--input", "{input}", "--output", "{output}"],
+    "decompress": ["python3", "decompress.py", "--input", "{input}", "--output", "{output}"]
+  },
+  "resources": {"vram_gb": 0, "ram_gb": 1},
+  "license": "MIT"
+}

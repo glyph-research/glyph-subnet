@@ -1,0 +1,97 @@
+"""Codec artifact contract: manifest schema, argv resolution, deterministic hashing.
+
+A Glyph codec artifact is a directory (a HuggingFace repo in production) containing a
+``manifest.json`` that declares two entrypoints, ``compress`` and ``decompress``, each an
+argv template using the ``{input}`` and ``{output}`` placeholders. The same module is
+used by the validator-side precheck (hashing, validation) and by the runner (execution),
+so the contract has a single source of truth.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Iterator
+from pathlib import Path
+
+from pydantic import BaseModel, Field
+
+MANIFEST_NAME = "manifest.json"
+PLACEHOLDER_INPUT = "{input}"
+PLACEHOLDER_OUTPUT = "{output}"
+_EXCLUDED_PARTS = {"__pycache__", ".git", ".cache"}
+
+
+class Entrypoints(BaseModel):
+    compress: list[str] = Field(min_length=1)
+    decompress: list[str] = Field(min_length=1)
+
+
+class Manifest(BaseModel):
+    schema_version: int = 1
+    name: str = "codec"
+    entrypoints: Entrypoints
+    resources: dict = Field(default_factory=dict)
+    license: str = "unknown"
+
+    def placeholder_issues(self) -> list[str]:
+        issues: list[str] = []
+        for label, argv in (("compress", self.entrypoints.compress), ("decompress", self.entrypoints.decompress)):
+            joined = " ".join(argv)
+            if PLACEHOLDER_INPUT not in joined:
+                issues.append(f"{label} entrypoint is missing the {PLACEHOLDER_INPUT} placeholder")
+            if PLACEHOLDER_OUTPUT not in joined:
+                issues.append(f"{label} entrypoint is missing the {PLACEHOLDER_OUTPUT} placeholder")
+        return issues
+
+
+def manifest_path(artifact_dir: str | Path) -> Path:
+    path = Path(artifact_dir)
+    return path / MANIFEST_NAME if path.is_dir() else path
+
+
+def load_manifest(artifact_dir: str | Path) -> Manifest:
+    data = json.loads(manifest_path(artifact_dir).read_text())
+    return Manifest.model_validate(data)
+
+
+def resolve_argv(template: list[str], input_path: str | Path, output_path: str | Path) -> list[str]:
+    """Substitute the {input}/{output} placeholders in an entrypoint argv template."""
+
+    resolved: list[str] = []
+    for token in template:
+        token = token.replace(PLACEHOLDER_INPUT, str(input_path))
+        token = token.replace(PLACEHOLDER_OUTPUT, str(output_path))
+        resolved.append(token)
+    return resolved
+
+
+def iter_artifact_files(root: str | Path) -> Iterator[Path]:
+    root = Path(root)
+    for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
+        # Exclude reserved dirs by their position *within the artifact*, not the absolute
+        # path (e.g. a HuggingFace snapshot lives under ~/.cache/huggingface/...).
+        rel_parts = path.relative_to(root).parts
+        if path.is_file() and not _EXCLUDED_PARTS.intersection(rel_parts):
+            yield path
+
+
+def hash_artifact(root: str | Path) -> tuple[str, int]:
+    """Deterministic (path, file-hash) tree sha256 over the artifact, plus total bytes.
+
+    This is the canonical artifact hash used for the on-chain-commitment match (recomputed
+    at precheck) and for the cross-hotkey duplicate-hash disqualification (DESIGN anti-copy
+    gate).
+    """
+
+    root = Path(root)
+    digest = hashlib.sha256()
+    total = 0
+    for path in iter_artifact_files(root):
+        rel = path.relative_to(root).as_posix()
+        data = path.read_bytes()
+        total += len(data)
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(data).digest())
+    return digest.hexdigest(), total

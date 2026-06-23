@@ -1,0 +1,1 @@
+"""Glyph fresh-data oracle."""

@@ -1,0 +1,419 @@
+"""Top-level Glyph validator orchestrator.
+
+Composes the reign worker (evaluate + king-of-the-hill) and the weight setter
+(temporal-burn weights) in one process. The same pieces can run as separate PM2 services
+(``reign_worker``, ``weight_setter``); this orchestrator is the all-in-one path and the
+offline M0 demo.
+"""
+
+from __future__ import annotations
+
+import argparse
+import time
+import traceback
+from pathlib import Path
+
+import core
+from chain.chain import BittensorChain, ChainConfig
+from core.commitments import parse_commitments_by_hotkey
+from core.constants import (
+    BASELINE_LEVEL,
+    BURN_UID,
+    COMPRESS_BUDGET_SECS,
+    DEFAULT_MAX_ARTIFACT_BYTES,
+    DEFAULT_NETUID,
+    DEFAULT_WIN_MARGIN,
+    REFERENCE_SKU,
+    STREAM_BYTES,
+    STREAMS_PER_ROUND,
+    THROUGHPUT_FLOOR_BPS,
+    WINDOW_ANCHOR_BLOCK,
+)
+from core.state import CommitmentState, ValidatorState, load_state, save_state
+from core.weights import WinnerEntry, compact_history, promote_winner, should_promote
+from eval.corpus import StaticLocalProvider
+from eval.evaluator import paired_eval
+from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
+from eval.scoring import zstd_baseline_ratio
+from eval.streams import derive_seed, sample_streams
+from validation.precheck import precheck_artifact_dir, precheck_codec
+from reign_worker.service import run_round
+from weight_setter.service import decide_weights
+
+__all__ = ["build_parser", "run_once", "run_reign_only", "run_offline_demo", "decide_weights", "main"]
+
+
+# --------------------------------------------------------------------------------------
+# Argument parsing
+# --------------------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the Glyph compression validator")
+    parser.add_argument("--network", default="finney")
+    parser.add_argument("--netuid", type=int, default=DEFAULT_NETUID)
+    parser.add_argument("--wallet-name", "--wallet.name", dest="wallet_name", default="default")
+    parser.add_argument("--hotkey-name", "--wallet.hotkey", dest="hotkey_name", default="default")
+    parser.add_argument("--wallet-path", "--wallet.path", dest="wallet_path", default=None)
+    parser.add_argument("--state-dir", default="./state")
+    parser.add_argument("--salt-file", default=None)
+    parser.add_argument("--runner", choices=["local", "chutes"], default="chutes")
+    parser.add_argument("--corpus-dir", default=None, help="StaticLocalProvider corpus directory")
+    parser.add_argument("--reference-sku", default=REFERENCE_SKU)
+    parser.add_argument("--chutes-key-file", default=None)
+    parser.add_argument("--chute-url", default=None, help="Deployed glyph-runner chute base URL")
+    parser.add_argument("--streams", type=int, default=STREAMS_PER_ROUND)
+    parser.add_argument("--stream-bytes", type=int, default=STREAM_BYTES)
+    parser.add_argument("--floor-bps", type=float, default=THROUGHPUT_FLOOR_BPS)
+    parser.add_argument("--compress-budget-secs", type=float, default=COMPRESS_BUDGET_SECS)
+    parser.add_argument("--max-artifact-bytes", type=int, default=DEFAULT_MAX_ARTIFACT_BYTES)
+    parser.add_argument("--win-margin", type=float, default=DEFAULT_WIN_MARGIN)
+    parser.add_argument(
+        "--baseline-level",
+        type=int,
+        default=BASELINE_LEVEL,
+        help="zstd level for the vacant-crown baseline floor (production default 19)",
+    )
+    parser.add_argument("--burn-uid", type=int, default=BURN_UID)
+    parser.add_argument("--window-anchor", type=int, default=WINDOW_ANCHOR_BLOCK)
+    parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--sleep", type=int, default=1200)
+    parser.add_argument("--dry-run", action="store_true", help="Do not submit weights")
+    parser.add_argument("--offline-demo", action="store_true")
+    parser.add_argument(
+        "--local-codec",
+        action="append",
+        default=[],
+        metavar="HOTKEY=PATH",
+        help="Offline-demo codec, e.g. hkA=./reference_codec (repeatable)",
+    )
+    parser.add_argument(
+        "--local-artifact",
+        action="append",
+        default=[],
+        metavar="HOTKEY=PATH",
+        help="Evaluate this on-chain hotkey's codec from a local dir instead of HuggingFace "
+        "(testnet/CI when HF upload is unavailable). Repeatable.",
+    )
+    parser.add_argument(
+        "--only-hotkeys",
+        action="append",
+        default=[],
+        metavar="HOTKEY",
+        help="Restrict evaluation to these hotkeys (ignore all other on-chain commitments). Repeatable.",
+    )
+    return parser
+
+
+def _parse_local_artifacts(args) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for item in getattr(args, "local_artifact", []) or []:
+        hotkey, _, path = item.partition("=")
+        if not path:
+            raise SystemExit(f"--local-artifact must be HOTKEY=PATH, got {item!r}")
+        mapping[hotkey] = path
+    return mapping
+
+
+# --------------------------------------------------------------------------------------
+# Small, testable helpers
+# --------------------------------------------------------------------------------------
+
+
+def _load_salt(state_dir: Path, salt_file: str | None) -> str:
+    path = Path(salt_file) if salt_file else state_dir / "validator_salt.txt"
+    if path.exists():
+        return path.read_text().strip()
+    import secrets
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    salt = secrets.token_hex(32)
+    path.write_text(salt)
+    path.chmod(0o600)
+    return salt
+
+
+def _local_version_key() -> int:
+    return int(core.__version_key__)
+
+
+def _assert_version_key_matches(chain: BittensorChain) -> int:
+    expected = _local_version_key()
+    chain_version = chain.get_weights_version()
+    if chain_version != expected:
+        raise SystemExit(
+            "version key mismatch: "
+            f"local validator expects {expected}, but netuid {chain.config.netuid} has "
+            f"weights_version {chain_version}. Stopping before scoring or setting weights."
+        )
+    return chain_version
+
+
+def _apply_precheck(
+    state: ValidatorState,
+    parsed_commitments,
+    max_artifact_bytes: int,
+    *,
+    block: int | None = None,
+    local_artifacts: dict[str, str] | None = None,
+) -> None:
+    """Precheck commitments, record validity, and disqualify duplicate artifact hashes.
+
+    ``local_artifacts`` maps hotkey -> local codec dir, used when HuggingFace download is
+    unavailable (testnet/CI): the on-chain commitment is still authoritative, but the
+    artifact is validated/evaluated from disk.
+    """
+
+    local_artifacts = local_artifacts or {}
+    valid_hash_owner = dict(state.duplicate_hash_owner)
+    for parsed in sorted(parsed_commitments, key=lambda p: p.hotkey):
+        if parsed.hotkey in state.excluded_hotkeys:
+            continue
+        key = f"{parsed.hotkey}:{parsed.commitment.key}"
+        existing = state.commitments.get(key)
+        full_check = existing is None or not existing.artifact_hash
+        local_dir = local_artifacts.get(parsed.hotkey)
+        if local_dir:
+            result = precheck_artifact_dir(
+                local_dir, parsed.commitment.repo, parsed.commitment.rev,
+                max_artifact_bytes=max_artifact_bytes,
+            )
+        else:
+            result = precheck_codec(
+                parsed.commitment.repo,
+                parsed.commitment.rev,
+                max_artifact_bytes=max_artifact_bytes,
+                download=full_check,
+            )
+        commit_block = existing.block if existing and existing.block is not None else block
+        artifact_hash = result.artifact_hash or (existing.artifact_hash if existing else None)
+        entry = CommitmentState(
+            hotkey=parsed.hotkey,
+            repo=parsed.commitment.repo,
+            revision=parsed.commitment.rev,
+            block=commit_block,
+            artifact_hash=artifact_hash,
+            artifact_bytes=result.artifact_bytes
+            if result.artifact_bytes is not None
+            else (existing.artifact_bytes if existing else None),
+            valid=result.ok,
+            disqualification_reason=None if result.ok else "; ".join(result.errors),
+            local_path=local_dir,
+        )
+        if entry.valid and artifact_hash:
+            owner = valid_hash_owner.get(artifact_hash)
+            if owner and owner != parsed.hotkey:
+                entry.valid = False
+                entry.disqualification_reason = f"duplicate artifact; first owner is {owner}"
+            else:
+                valid_hash_owner[artifact_hash] = parsed.hotkey
+        state.commitments[key] = entry
+    state.duplicate_hash_owner = valid_hash_owner
+
+
+def _make_runner(args) -> object:
+    if args.runner == "local":
+        return LocalSubprocessRunner()
+    from eval.runner_chutes import ChutesRunner
+
+    return ChutesRunner(
+        reference_sku=args.reference_sku,
+        key_file=args.chutes_key_file,
+        base_url=args.chute_url,
+    )
+
+
+def _make_provider(args):
+    if not args.corpus_dir:
+        raise SystemExit("--corpus-dir is required (the data oracle corpus directory)")
+    return StaticLocalProvider(args.corpus_dir)
+
+
+def _make_chain(args) -> BittensorChain:
+    return BittensorChain(
+        ChainConfig(
+            netuid=args.netuid,
+            network=args.network,
+            wallet_name=args.wallet_name,
+            hotkey_name=args.hotkey_name,
+            wallet_path=args.wallet_path,
+        )
+    )
+
+
+def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: str) -> int:
+    """Precheck commitments and, if there are new challengers, run one reign round."""
+
+    block = chain.current_block()
+    if state.window_anchor_block is None:
+        state.window_anchor_block = args.window_anchor or block
+    parsed = parse_commitments_by_hotkey(chain.get_all_commitments())
+    only = set(getattr(args, "only_hotkeys", []) or [])
+    if only:
+        parsed = [p for p in parsed if p.hotkey in only]
+    _apply_precheck(
+        state, parsed, args.max_artifact_bytes, block=block,
+        local_artifacts=_parse_local_artifacts(args),
+    )
+    eligible = state.eligible_hotkeys()
+    state.winner_history = compact_history(state.winner_history, eligible_hotkeys=eligible)
+
+    challengers = [
+        c
+        for c in state.commitments.values()
+        if c.valid and c.key not in state.scores and c.hotkey not in state.excluded_hotkeys
+    ]
+    if challengers:
+        provider = _make_provider(args)
+        seed = derive_seed(chain.block_hash(block), salt, block)
+        specs = sample_streams(seed, provider.total_bytes, stream_bytes=args.stream_bytes, streams=args.streams)
+        baseline = zstd_baseline_ratio([provider.materialize(s) for s in specs], level=args.baseline_level)
+        runner = _make_runner(args)
+        caps = ResourceCaps(wall_clock_secs=args.compress_budget_secs, artifact_bytes=args.max_artifact_bytes)
+        print(f"round: {len(challengers)} challenger(s), baseline zstd ratio={baseline:.4f}")
+        run_round(
+            state, runner, challengers, provider, specs,
+            caps=caps, floor_bps=args.floor_bps, budget_secs=args.compress_budget_secs,
+            margin=args.win_margin, block=block, eligible_hotkeys=eligible, baseline_ratio=baseline,
+        )
+    return block
+
+
+# --------------------------------------------------------------------------------------
+# Production paths (require chain access)
+# --------------------------------------------------------------------------------------
+
+
+def run_once(args: argparse.Namespace) -> None:
+    state_dir = Path(args.state_dir)
+    state_path = state_dir / "validator_state.json"
+    state = load_state(state_path)
+    salt = _load_salt(state_dir, args.salt_file)
+
+    chain = _make_chain(args)
+    version_key = _local_version_key()
+    print(f"version key ok: {_assert_version_key_matches(chain)}")
+    if not chain.commit_reveal_enabled():
+        print("WARNING: commit-reveal is not enabled on this subnet; anti-copy weights are weaker")
+
+    block = _evaluate_round(args, state, chain, salt)
+    tempo = chain.tempo()
+    anchor = state.window_anchor_block
+
+    metagraph = chain.metagraph()
+    hotkeys = list(metagraph.hotkeys)
+    uids = [int(uid) for uid in metagraph.uids]
+
+    weights, burn = decide_weights(
+        hotkeys, state.winner_history, block=block, tempo=tempo,
+        last_round_outputs=state.last_round_outputs, anchor=anchor, burn_uid=args.burn_uid,
+    )
+    save_state(state_path, state)
+
+    nonzero = [(uids[i], round(w, 4)) for i, w in enumerate(weights) if w > 0]
+    print(f"block={block} tempo={tempo} burn_tempo={burn} weights={nonzero}")
+    if args.dry_run:
+        print("dry-run: not submitting weights")
+        return
+    print(f"set_weights response: {chain.set_weights(uids, weights, version_key=version_key)}")
+
+
+def run_reign_only(args: argparse.Namespace) -> None:
+    """The reign half only (evaluate + update crown), no weight setting."""
+
+    state_dir = Path(args.state_dir)
+    state_path = state_dir / "validator_state.json"
+    state = load_state(state_path)
+    salt = _load_salt(state_dir, args.salt_file)
+
+    chain = _make_chain(args)
+    print(f"version key ok: {_assert_version_key_matches(chain)}")
+    _evaluate_round(args, state, chain, salt)
+    save_state(state_path, state)
+    print(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in state.winner_history]}")
+
+
+# --------------------------------------------------------------------------------------
+# Offline M0 demo (no chain): eval -> score -> king-of-the-hill -> weights end to end
+# --------------------------------------------------------------------------------------
+
+
+def run_offline_demo(args: argparse.Namespace) -> None:
+    if not args.corpus_dir:
+        raise SystemExit("--offline-demo requires --corpus-dir")
+    codec_specs = args.local_codec or ["winner=./reference_codec"]
+    provider = StaticLocalProvider(args.corpus_dir)
+    seed = derive_seed("offline-demo-block", "offline-demo-salt", 0)
+    specs = sample_streams(seed, provider.total_bytes, stream_bytes=args.stream_bytes, streams=args.streams)
+    baseline = zstd_baseline_ratio([provider.materialize(s) for s in specs], level=args.baseline_level)
+
+    hotkeys = ["uid0_burn"]
+    artifacts: list[tuple[str, ArtifactRef]] = []
+    parsed_codecs: list[tuple[str, str]] = []
+    for item in codec_specs:
+        hotkey, _, path = item.partition("=")
+        if not path:
+            raise SystemExit(f"--local-codec must be HOTKEY=PATH, got {item!r}")
+        hotkeys.append(hotkey)
+        artifacts.append((hotkey, ArtifactRef(repo=f"{hotkey}/codec", rev="local", local_path=path)))
+        parsed_codecs.append((hotkey, path))
+
+    runner = LocalSubprocessRunner()
+    caps = ResourceCaps(wall_clock_secs=args.compress_budget_secs)
+    outcomes = paired_eval(
+        runner, artifacts, provider, specs, caps=caps,
+        floor_bps=args.floor_bps, budget_secs=args.compress_budget_secs,
+    )
+
+    print(
+        f"streams={len(specs)} stream_bytes={args.stream_bytes} "
+        f"baseline zstd-{args.baseline_level} ratio={baseline:.4f}"
+    )
+    history: list[WinnerEntry] = []
+    for block_n, (hotkey, _path) in enumerate(parsed_codecs):
+        outcome = outcomes[hotkey]
+        beats = outcome.score.valid and outcome.score.ratio < baseline
+        status = "valid" if outcome.score.valid else f"INVALID {outcome.score.reasons}"
+        print(
+            f"  {hotkey}: ratio={outcome.score.ratio:.4f} "
+            f"min_throughput={outcome.score.throughput_bps_min:.0f} B/s "
+            f"beats_baseline={beats} [{status}]"
+        )
+        if beats and (not history or should_promote(outcome.score.ratio, history[0].ratio, args.win_margin)):
+            winner = WinnerEntry(hotkey, f"{hotkey}/codec", "local", outcome.score.ratio, block_n)
+            history = promote_winner(history, winner)
+
+    last_round_outputs = outcomes[history[0].hotkey].burn_outputs() if history else []
+    print(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in history]}")
+    print("temporal burn schedule (two 4-tempo windows):")
+    for tempo_idx in range(8):
+        block = tempo_idx * 360
+        weights, burn = decide_weights(
+            hotkeys, history, block=block, tempo=360, last_round_outputs=last_round_outputs, anchor=0
+        )
+        nonzero = [(hotkeys[i], round(w, 3)) for i, w in enumerate(weights) if w > 0]
+        print(f"  tempo {tempo_idx} (block {block}): burn={burn} weights={nonzero}")
+
+
+def main() -> None:
+    from core.dotenv import load_dotenv
+
+    load_dotenv()  # CHUTES_API_KEY etc. from .env (see .env.example)
+    args = build_parser().parse_args()
+    if args.offline_demo:
+        run_offline_demo(args)
+        return
+    while True:
+        try:
+            run_once(args)
+        except KeyboardInterrupt:
+            break
+        except Exception:
+            traceback.print_exc()
+        if not args.loop:
+            break
+        time.sleep(args.sleep)
+
+
+if __name__ == "__main__":
+    main()
