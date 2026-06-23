@@ -1,14 +1,14 @@
 """Codec artifact validation and hashing (validator + miner side).
 
-Unlike a model-benchmark subnet, a Glyph codec artifact *is* executable code by design --
-the miner ships the decompressor -- so there is no "no remote code" ban here. Isolation of
-untrusted artifacts is the runner/sandbox's responsibility (DESIGN §6). Precheck instead
-validates the manifest/entrypoint contract, enforces the artifact-size cap, and computes
-the canonical artifact hash used for the on-chain match and duplicate-hash disqualification.
+A Glyph codec artifact is executable code by design: the miner ships the compressor and
+decompressor. Precheck therefore validates both the artifact contract and obvious
+exfiltration paths before the runner executes the artifact in an isolated worker.
 """
 
 from __future__ import annotations
 
+import ast
+import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +20,110 @@ from core.artifact import (
     load_manifest,
 )
 from core.constants import DEFAULT_MAX_ARTIFACT_BYTES
+
+_SOURCE_SUFFIXES = {
+    ".py",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".fish",
+    ".pl",
+    ".rb",
+    ".js",
+    ".ts",
+    ".mjs",
+    ".cjs",
+    ".lua",
+    ".r",
+    ".jl",
+    ".php",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".h",
+    ".hpp",
+    ".hh",
+    ".rs",
+    ".go",
+    ".java",
+    ".kt",
+}
+_SOURCE_NAMES = {"makefile", "dockerfile"}
+_SHELL_SOURCE_SUFFIXES = {".sh", ".bash", ".zsh", ".fish"}
+_SHELL_SOURCE_NAMES = {"makefile", "dockerfile"}
+_MAX_REVIEWABLE_SOURCE_BYTES = 2 * 1024 * 1024
+
+_NETWORK_IMPORTS = {
+    "aiohttp",
+    "azure",
+    "boto3",
+    "botocore",
+    "dropbox",
+    "ftplib",
+    "google.cloud",
+    "grpc",
+    "h11",
+    "h2",
+    "http.client",
+    "http.server",
+    "httpx",
+    "huggingface_hub",
+    "imaplib",
+    "paramiko",
+    "poplib",
+    "requests",
+    "scp",
+    "sftp",
+    "smtplib",
+    "socket",
+    "ssl",
+    "telnetlib",
+    "urllib",
+    "websocket",
+    "websockets",
+    "xmlrpc",
+}
+_SHELL_COMMAND_APIS = {
+    "os.system",
+    "os.popen",
+    "popen2.popen2",
+    "popen2.popen3",
+    "popen2.popen4",
+}
+_SUBPROCESS_APIS = {
+    "subprocess.call",
+    "subprocess.check_call",
+    "subprocess.check_output",
+    "subprocess.Popen",
+    "subprocess.run",
+}
+_DYNAMIC_IMPORT_APIS = {"__import__", "importlib.import_module"}
+_NETWORK_COMMANDS = {
+    "aws",
+    "azcopy",
+    "curl",
+    "dig",
+    "gcloud",
+    "gsutil",
+    "host",
+    "nc",
+    "netcat",
+    "nslookup",
+    "rclone",
+    "rsync",
+    "scp",
+    "sftp",
+    "ssh",
+    "telnet",
+    "wget",
+}
+_INLINE_CODE_RUNTIMES = {"bash", "dash", "fish", "node", "perl", "python", "python3", "ruby", "sh", "zsh"}
+_URL_RE = re.compile(r"\b(?:https?|ftp|s3|gs)://", re.IGNORECASE)
+_DEV_TCP_RE = re.compile(r"/dev/(?:tcp|udp)/", re.IGNORECASE)
+_NETWORK_COMMAND_RE = re.compile(
+    r"(?<![\w.-])(" + "|".join(re.escape(cmd) for cmd in sorted(_NETWORK_COMMANDS)) + r")(?![\w.-])"
+)
 
 
 @dataclass
@@ -54,6 +158,207 @@ def _entrypoint_script_warnings(directory: Path, manifest) -> list[str]:
     return warnings
 
 
+def _module_blocked(name: str) -> bool:
+    lowered = name.lower()
+    return any(lowered == blocked or lowered.startswith(f"{blocked}.") for blocked in _NETWORK_IMPORTS)
+
+
+def _qualified_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _qualified_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return None
+
+
+def _truthy_literal(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is True
+
+
+def _first_string_arg(node: ast.Call) -> str | None:
+    if not node.args:
+        return None
+    first = node.args[0]
+    return first.value if isinstance(first, ast.Constant) and isinstance(first.value, str) else None
+
+
+def _literal_command_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return Path(node.value.split()[0]).name.lower() if node.value.split() else None
+    if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
+        first = node.elts[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            return Path(first.value).name.lower()
+    return None
+
+
+def _python_docstring_node_ids(tree: ast.AST) -> set[int]:
+    ids: set[int] = set()
+    docstring_owners = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    for node in ast.walk(tree):
+        if not isinstance(node, docstring_owners) or not node.body:
+            continue
+        first = node.body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+            if isinstance(first.value.value, str):
+                ids.add(id(first.value))
+    return ids
+
+
+def _strip_shell_comments(text: str) -> str:
+    lines: list[str] = []
+    for line in text.splitlines():
+        quote: str | None = None
+        escaped = False
+        kept: list[str] = []
+        for char in line:
+            if escaped:
+                kept.append(char)
+                escaped = False
+                continue
+            if char == "\\":
+                kept.append(char)
+                escaped = True
+                continue
+            if quote:
+                kept.append(char)
+                if char == quote:
+                    quote = None
+                continue
+            if char in {"'", '"'}:
+                quote = char
+                kept.append(char)
+                continue
+            if char == "#":
+                break
+            kept.append(char)
+        lines.append("".join(kept))
+    return "\n".join(lines)
+
+
+class _PythonSecurityVisitor(ast.NodeVisitor):
+    def __init__(self, rel: str, *, docstring_node_ids: set[int]):
+        self.rel = rel
+        self.docstring_node_ids = docstring_node_ids
+        self.errors: list[str] = []
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+        for alias in node.names:
+            self._check_import(alias.name, node.lineno)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+        if node.module:
+            self._check_import(node.module, node.lineno)
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        name = _qualified_name(node.func)
+        if name in _SHELL_COMMAND_APIS:
+            self.errors.append(f"{self.rel}:{node.lineno}: shell command API {name} is not allowed")
+        if name in _SUBPROCESS_APIS:
+            command = _literal_command_name(node.args[0]) if node.args else None
+            if command in _NETWORK_COMMANDS:
+                self.errors.append(
+                    f"{self.rel}:{node.lineno}: subprocess network command {command!r} is not allowed"
+                )
+            for keyword in node.keywords:
+                if keyword.arg == "shell" and _truthy_literal(keyword.value):
+                    self.errors.append(f"{self.rel}:{node.lineno}: subprocess shell=True is not allowed")
+        if name in _DYNAMIC_IMPORT_APIS:
+            imported = _first_string_arg(node)
+            if imported and _module_blocked(imported):
+                self.errors.append(
+                    f"{self.rel}:{node.lineno}: dynamic import of network module {imported!r} is not allowed"
+                )
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:  # noqa: N802
+        if isinstance(node.value, str) and id(node) not in self.docstring_node_ids:
+            if _URL_RE.search(node.value):
+                self.errors.append(f"{self.rel}:{node.lineno}: external URL/protocol literal is not allowed")
+            if _DEV_TCP_RE.search(node.value):
+                self.errors.append(f"{self.rel}:{node.lineno}: /dev/tcp or /dev/udp network access is not allowed")
+
+    def _check_import(self, name: str, lineno: int) -> None:
+        if _module_blocked(name):
+            self.errors.append(f"{self.rel}:{lineno}: network/cloud import {name!r} is not allowed")
+
+
+def _is_reviewable_source(path: Path) -> bool:
+    return path.suffix.lower() in _SOURCE_SUFFIXES or path.name.lower() in _SOURCE_NAMES
+
+
+def _is_shell_like_source(path: Path) -> bool:
+    return path.suffix.lower() in _SHELL_SOURCE_SUFFIXES or path.name.lower() in _SHELL_SOURCE_NAMES
+
+
+def _entrypoint_security_errors(manifest) -> list[str]:
+    errors: list[str] = []
+    for label, argv in (("compress", manifest.entrypoints.compress), ("decompress", manifest.entrypoints.decompress)):
+        if not argv:
+            continue
+        command = Path(argv[0]).name.lower()
+        if command in _NETWORK_COMMANDS:
+            errors.append(f"{label} entrypoint uses network command {command!r}")
+        if command in _INLINE_CODE_RUNTIMES and any(token in {"-c", "-e"} for token in argv[1:]):
+            errors.append(f"{label} entrypoint uses inline code execution; use a reviewable script file")
+        for token in argv:
+            if _URL_RE.search(token):
+                errors.append(f"{label} entrypoint contains external URL/protocol")
+                break
+    return errors
+
+
+def _source_security_errors(root: Path) -> list[str]:
+    errors: list[str] = []
+    for path in iter_artifact_files(root):
+        if not _is_reviewable_source(path):
+            continue
+        rel = path.relative_to(root).as_posix()
+        try:
+            size = path.stat().st_size
+            if size > _MAX_REVIEWABLE_SOURCE_BYTES:
+                errors.append(
+                    f"{rel}: source file is {size:,} bytes; split or remove generated code for review"
+                )
+                continue
+            text = path.read_text("utf-8", errors="replace")
+        except Exception as exc:
+            errors.append(f"{rel}: cannot read source for security review: {exc}")
+            continue
+
+        if path.suffix.lower() == ".py":
+            try:
+                tree = ast.parse(text, filename=rel)
+            except SyntaxError as exc:
+                errors.append(f"{rel}:{exc.lineno or 0}: invalid Python source: {exc.msg}")
+                continue
+            visitor = _PythonSecurityVisitor(rel, docstring_node_ids=_python_docstring_node_ids(tree))
+            visitor.visit(tree)
+            errors.extend(visitor.errors)
+        else:
+            scanned_text = _strip_shell_comments(text) if _is_shell_like_source(path) else text
+            if _URL_RE.search(scanned_text):
+                errors.append(f"{rel}: external URL/protocol literals are not allowed")
+            if _DEV_TCP_RE.search(scanned_text):
+                errors.append(f"{rel}: /dev/tcp or /dev/udp network access is not allowed")
+
+        if _is_shell_like_source(path):
+            match = _NETWORK_COMMAND_RE.search(_strip_shell_comments(text))
+            if match:
+                errors.append(f"{rel}: network command {match.group(1)!r} is not allowed")
+    return errors
+
+
+def artifact_security_errors(directory: str | Path, manifest=None) -> list[str]:
+    """Return pre-execution security issues that should block a codec artifact."""
+
+    path = Path(directory)
+    if manifest is None:
+        manifest = load_manifest(path)
+    return [*_entrypoint_security_errors(manifest), *_source_security_errors(path)]
+
+
 def precheck_artifact_dir(
     directory: str | Path,
     repo: str = "",
@@ -80,6 +385,7 @@ def precheck_artifact_dir(
     result.license = manifest.license
     result.errors.extend(manifest.placeholder_issues())
     result.warnings.extend(_entrypoint_script_warnings(path, manifest))
+    result.errors.extend(artifact_security_errors(path, manifest))
 
     try:
         digest, total = hash_artifact(path)

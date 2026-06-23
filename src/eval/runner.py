@@ -90,15 +90,40 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+_SUBPROCESS_ENV_ALLOWLIST = {
+    "CUDA_VISIBLE_DEVICES",
+    "GLYPH_TS_ZIP_DEVICE",
+    "GLYPH_TS_ZIP_THREADS",
+    "LANG",
+    "LC_ALL",
+    "LD_LIBRARY_PATH",
+    "NVIDIA_DRIVER_CAPABILITIES",
+    "NVIDIA_VISIBLE_DEVICES",
+    "PATH",
+    "PYTHONPATH",
+}
+
+
+def _subprocess_env(home: Path) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if key in _SUBPROCESS_ENV_ALLOWLIST}
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    env["HOME"] = str(home)
+    env["XDG_CACHE_HOME"] = str(home / ".cache")
+    env["TMPDIR"] = str(home)
+    env["NO_PROXY"] = "*"
+    return env
+
+
 class LocalSubprocessRunner:
     """Run a codec's entrypoints in a subprocess on the host (dev/CI/own-codec only)."""
 
     prefers_remote_source = False  # runs on the host; always needs the bytes materialized
 
-    def __init__(self, *, strict_sandbox: bool = False):
-        # strict_sandbox best-effort drops network via `unshare --net` when available.
-        # Real isolation of untrusted artifacts is the Chutes container's job (DESIGN §6).
+    def __init__(self, *, strict_sandbox: bool = False, require_network_isolation: bool = False):
+        # strict_sandbox drops network via `unshare --net` when available. Production
+        # Chutes execution sets require_network_isolation so this fails closed.
         self.strict_sandbox = strict_sandbox
+        self.require_network_isolation = require_network_isolation
 
     def run_stream(
         self, artifact: ArtifactRef, stream: StreamInput, *, caps: ResourceCaps | None = None
@@ -121,14 +146,14 @@ class LocalSubprocessRunner:
             source_hash = _sha256_file(stream_file)
 
             compress_argv = resolve_argv(manifest.entrypoints.compress, stream_file, blob_file)
-            compress_secs = self._exec(compress_argv, artifact_dir, caps)
+            compress_secs = self._exec(compress_argv, artifact_dir, caps, home=tmp_dir)
             if not blob_file.exists():
                 raise RunnerError("compress produced no output blob")
             compressed_bytes = blob_file.stat().st_size
             blob_hash = _sha256_file(blob_file)
 
             decompress_argv = resolve_argv(manifest.entrypoints.decompress, blob_file, roundtrip_file)
-            decompress_secs = self._exec(decompress_argv, artifact_dir, caps)
+            decompress_secs = self._exec(decompress_argv, artifact_dir, caps, home=tmp_dir)
             roundtrip_ok = roundtrip_file.exists() and _sha256_file(roundtrip_file) == source_hash
 
             return StreamResult(
@@ -141,16 +166,19 @@ class LocalSubprocessRunner:
                 blob_hash=blob_hash,
             )
 
-    def _exec(self, argv: list[str], cwd: Path, caps: ResourceCaps) -> float:
+    def _exec(self, argv: list[str], cwd: Path, caps: ResourceCaps, *, home: Path) -> float:
         wrapped = argv
-        if self.strict_sandbox and not caps.network and shutil.which("unshare"):
-            wrapped = ["unshare", "--net", "--", *argv]
+        if self.strict_sandbox and not caps.network:
+            if shutil.which("unshare"):
+                wrapped = ["unshare", "--net", "--", *argv]
+            elif self.require_network_isolation:
+                raise RunnerError("network isolation unavailable for untrusted artifact execution")
         start = time.perf_counter()
         try:
             proc = subprocess.run(
                 wrapped,
                 cwd=str(cwd),
-                env=os.environ.copy(),
+                env=_subprocess_env(home),
                 timeout=caps.wall_clock_secs,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

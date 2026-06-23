@@ -19,6 +19,12 @@ pytest -q
 # note the chute URL; pass it via --chute-url or GLYPH_CHUTE_URL
 ```
 
+The deployed runner downloads the committed artifact, re-runs precheck inside the worker,
+then executes compressor/decompressor entrypoints with outbound network disabled and
+validator secrets removed from the subprocess environment. If the worker cannot apply
+network isolation, the benchmark fails closed instead of running miner code with network
+access.
+
 If you deploy under a Chutes account other than the default `glyph`, set
 `GLYPH_CHUTE_USERNAME=<account>` (it builds the default chute URL and is the build/deploy
 username). All validators must point at the *same* deployed chute — set `GLYPH_CHUTE_URL` to
