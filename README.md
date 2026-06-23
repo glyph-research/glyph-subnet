@@ -60,7 +60,8 @@ See [docs/MINING.md](docs/MINING.md). Commitments are permanent per hotkey.
 cp .env.example .env                                       # CHUTES_API_KEY
 ./scripts/deploy_runner_chute.sh                           # deploy the eval chute (once)
 glyph-oracle --out-dir ./corpus --target-bytes 268435456   # fresh corpus
-./scripts/run_auto_validator.sh --netuid 117 \             # auto-updating validator under PM2
+# auto-updating validator under PM2 (edit wallet/netuid)
+./scripts/run_auto_validator.sh --netuid 117 \
   --wallet-name w --hotkey-name h --runner chutes --corpus-dir ./corpus --state-dir ./state
 ```
 
