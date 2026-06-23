@@ -193,9 +193,54 @@ def _literal_command_name(node: ast.AST) -> str | None:
     return None
 
 
+def _python_docstring_node_ids(tree: ast.AST) -> set[int]:
+    ids: set[int] = set()
+    docstring_owners = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    for node in ast.walk(tree):
+        if not isinstance(node, docstring_owners) or not node.body:
+            continue
+        first = node.body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+            if isinstance(first.value.value, str):
+                ids.add(id(first.value))
+    return ids
+
+
+def _strip_shell_comments(text: str) -> str:
+    lines: list[str] = []
+    for line in text.splitlines():
+        quote: str | None = None
+        escaped = False
+        kept: list[str] = []
+        for char in line:
+            if escaped:
+                kept.append(char)
+                escaped = False
+                continue
+            if char == "\\":
+                kept.append(char)
+                escaped = True
+                continue
+            if quote:
+                kept.append(char)
+                if char == quote:
+                    quote = None
+                continue
+            if char in {"'", '"'}:
+                quote = char
+                kept.append(char)
+                continue
+            if char == "#":
+                break
+            kept.append(char)
+        lines.append("".join(kept))
+    return "\n".join(lines)
+
+
 class _PythonSecurityVisitor(ast.NodeVisitor):
-    def __init__(self, rel: str):
+    def __init__(self, rel: str, *, docstring_node_ids: set[int]):
         self.rel = rel
+        self.docstring_node_ids = docstring_node_ids
         self.errors: list[str] = []
 
     def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
@@ -226,6 +271,13 @@ class _PythonSecurityVisitor(ast.NodeVisitor):
                     f"{self.rel}:{node.lineno}: dynamic import of network module {imported!r} is not allowed"
                 )
         self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:  # noqa: N802
+        if isinstance(node.value, str) and id(node) not in self.docstring_node_ids:
+            if _URL_RE.search(node.value):
+                self.errors.append(f"{self.rel}:{node.lineno}: external URL/protocol literal is not allowed")
+            if _DEV_TCP_RE.search(node.value):
+                self.errors.append(f"{self.rel}:{node.lineno}: /dev/tcp or /dev/udp network access is not allowed")
 
     def _check_import(self, name: str, lineno: int) -> None:
         if _module_blocked(name):
@@ -275,24 +327,26 @@ def _source_security_errors(root: Path) -> list[str]:
             errors.append(f"{rel}: cannot read source for security review: {exc}")
             continue
 
-        if _URL_RE.search(text):
-            errors.append(f"{rel}: external URL/protocol literals are not allowed")
-        if _DEV_TCP_RE.search(text):
-            errors.append(f"{rel}: /dev/tcp or /dev/udp network access is not allowed")
-        if _is_shell_like_source(path):
-            match = _NETWORK_COMMAND_RE.search(text)
-            if match:
-                errors.append(f"{rel}: network command {match.group(1)!r} is not allowed")
-
         if path.suffix.lower() == ".py":
             try:
                 tree = ast.parse(text, filename=rel)
             except SyntaxError as exc:
                 errors.append(f"{rel}:{exc.lineno or 0}: invalid Python source: {exc.msg}")
                 continue
-            visitor = _PythonSecurityVisitor(rel)
+            visitor = _PythonSecurityVisitor(rel, docstring_node_ids=_python_docstring_node_ids(tree))
             visitor.visit(tree)
             errors.extend(visitor.errors)
+        else:
+            scanned_text = _strip_shell_comments(text) if _is_shell_like_source(path) else text
+            if _URL_RE.search(scanned_text):
+                errors.append(f"{rel}: external URL/protocol literals are not allowed")
+            if _DEV_TCP_RE.search(scanned_text):
+                errors.append(f"{rel}: /dev/tcp or /dev/udp network access is not allowed")
+
+        if _is_shell_like_source(path):
+            match = _NETWORK_COMMAND_RE.search(_strip_shell_comments(text))
+            if match:
+                errors.append(f"{rel}: network command {match.group(1)!r} is not allowed")
     return errors
 
 
