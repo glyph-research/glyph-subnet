@@ -47,10 +47,15 @@ is bit-exact. The codec must be published on HuggingFace first (`glyph-miner pub
 
 ## Provide a corpus
 
-Run the data oracle (or point at any corpus directory):
+By default, the validator reads the mixed launch corpus from `/tmp/glyph_mixed_8x2mb`
+or the directory named by `GLYPH_MIXED_CORPUS_DIR`. The launch mix is 8 x 2 MiB:
+3x FineWeb, 3x Pile-derived, and 2x enwiki9.
+
+To override it, run the data oracle or point at any corpus directory:
 
 ```bash
 glyph-oracle --out-dir ./corpus --target-bytes 268435456   # 256 MiB of fresh text
+glyph-validator --corpus-dir ./corpus ...
 ```
 
 For production Chutes runs, also publish the same corpus as one contiguous blob (chunk order ==
@@ -65,13 +70,13 @@ All-in-one — `glyph-validator` is a console entry point; wrap it in PM2 (edit 
 ```bash
 pm2 start glyph-validator --name glyph-validator -- \
   --netuid 117 --wallet-name validator --hotkey-name default --runner chutes \
-  --corpus-dir ./corpus --state-dir ./state
+  --corpus-url https://<host>/corpus.bin --state-dir ./state
 ```
 
 Or split into services (each is a console entry point — same `pm2 start <script> -- <args>` form):
 
 ```bash
-pm2 start glyph-reign-worker  --name glyph-reign-worker  -- --netuid 117 --wallet-name validator --hotkey-name default --runner chutes --corpus-dir ./corpus   # evaluate + update crown
+pm2 start glyph-reign-worker  --name glyph-reign-worker  -- --netuid 117 --wallet-name validator --hotkey-name default --runner chutes --corpus-url https://<host>/corpus.bin   # evaluate + update crown
 pm2 start glyph-weight-setter --name glyph-weight-setter -- --netuid 117 --wallet-name validator --hotkey-name default                                          # temporal-burn weights every tempo
 pm2 start glyph-oracle        --name glyph-oracle        -- --out-dir ./corpus --target-bytes 268435456                                                         # daily fresh corpus
 ```
@@ -81,7 +86,8 @@ Auto-updating validator (tracks `glyph-research/glyph-subnet`):
 ```bash
 ./scripts/setup_hooks.sh
 ./scripts/run_auto_validator.sh --network finney --netuid 117 \
-  --wallet-name validator --hotkey-name default --runner chutes --corpus-dir ./corpus --state-dir ./state
+  --wallet-name validator --hotkey-name default --runner chutes \
+  --corpus-url https://<host>/corpus.bin --state-dir ./state
 ```
 
 ## Notes
@@ -89,4 +95,6 @@ Auto-updating validator (tracks `glyph-research/glyph-subnet`):
 - **Version safety**: the validator fail-closes if `core.__version_key__` ≠ the
   on-chain `weights_version`. Bump both together on breaking changes.
 - **Commit-reveal** must be enabled on the subnet for the anti-copy burn schedule to bite.
-- **Offline check** (no chain/Chutes): `glyph-validator --offline-demo --corpus-dir samples/corpus --runner local ...`.
+- **Offline check** (no chain/Chutes): `glyph-validator --offline-demo --runner local ...`
+  uses the mixed corpus by default; pass `--corpus-dir samples/corpus` for the tiny
+  bundled sample.

@@ -9,6 +9,7 @@ offline M0 demo.
 from __future__ import annotations
 
 import argparse
+import os
 import time
 import traceback
 from pathlib import Path
@@ -42,6 +43,9 @@ from weight_setter.service import decide_weights
 
 __all__ = ["build_parser", "run_once", "run_reign_only", "run_offline_demo", "decide_weights", "main"]
 
+DEFAULT_MIXED_CORPUS_DIR = "/tmp/glyph_mixed_8x2mb"
+MIXED_CORPUS_ENV = "GLYPH_MIXED_CORPUS_DIR"
+
 
 # --------------------------------------------------------------------------------------
 # Argument parsing
@@ -58,7 +62,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", default="./state")
     parser.add_argument("--salt-file", default=None)
     parser.add_argument("--runner", choices=["local", "chutes"], default="chutes")
-    parser.add_argument("--corpus-dir", default=None, help="StaticLocalProvider corpus directory")
+    parser.add_argument(
+        "--corpus-dir",
+        default=None,
+        help=(
+            "StaticLocalProvider corpus directory; defaults to the mixed launch corpus "
+            f"at ${MIXED_CORPUS_ENV} or {DEFAULT_MIXED_CORPUS_DIR}"
+        ),
+    )
     parser.add_argument(
         "--corpus-url",
         default=None,
@@ -222,10 +233,29 @@ def _make_runner(args) -> object:
     )
 
 
+def _default_corpus_dir() -> Path:
+    return Path(os.environ.get(MIXED_CORPUS_ENV, DEFAULT_MIXED_CORPUS_DIR))
+
+
+def _resolve_corpus_dir(corpus_dir: str | None) -> Path:
+    path = Path(corpus_dir) if corpus_dir else _default_corpus_dir()
+    if not path.is_dir():
+        if corpus_dir:
+            raise SystemExit(f"corpus directory not found: {path}")
+        raise SystemExit(
+            "default mixed corpus directory not found: "
+            f"{path}. Create/populate the mixed launch corpus, set {MIXED_CORPUS_ENV}, "
+            "or pass --corpus-dir explicitly."
+        )
+    return path
+
+
 def _make_provider(args):
-    if not args.corpus_dir:
-        raise SystemExit("--corpus-dir is required (the data oracle corpus directory)")
-    return StaticLocalProvider(args.corpus_dir, base_url=getattr(args, "corpus_url", None))
+    path = _resolve_corpus_dir(args.corpus_dir)
+    provider = StaticLocalProvider(path, base_url=getattr(args, "corpus_url", None))
+    if provider.total_bytes <= 0:
+        raise SystemExit(f"corpus directory has no benchmark data files: {path}")
+    return provider
 
 
 def _make_chain(args) -> BittensorChain:
@@ -338,10 +368,8 @@ def run_reign_only(args: argparse.Namespace) -> None:
 
 
 def run_offline_demo(args: argparse.Namespace) -> None:
-    if not args.corpus_dir:
-        raise SystemExit("--offline-demo requires --corpus-dir")
     codec_specs = args.local_codec or ["winner=./reference_codec"]
-    provider = StaticLocalProvider(args.corpus_dir)
+    provider = _make_provider(args)
     seed = derive_seed("offline-demo-block", "offline-demo-salt", 0)
     specs = sample_streams(seed, provider.total_bytes, stream_bytes=args.stream_bytes, streams=args.streams)
     baseline = zstd_baseline_ratio([provider.materialize(s) for s in specs], level=args.baseline_level)
