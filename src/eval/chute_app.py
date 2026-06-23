@@ -90,7 +90,6 @@ def _evaluate(req: RunStreamRequest) -> StreamResultModel:
 
     from huggingface_hub import snapshot_download
 
-    from core.artifact import hash_artifact
     from eval.runner import (
         ArtifactRef,
         LocalSubprocessRunner,
@@ -98,10 +97,12 @@ def _evaluate(req: RunStreamRequest) -> StreamResultModel:
         RunnerError,
         StreamInput,
     )
+    from validation.precheck import precheck_artifact_dir
 
     data = _materialize(req.stream)
     local = snapshot_download(repo_id=req.artifact.repo, revision=req.artifact.rev)
-    digest, _total = hash_artifact(local)
+    precheck = precheck_artifact_dir(local, req.artifact.repo, req.artifact.rev)
+    digest = precheck.artifact_hash
 
     def failure(error: str) -> StreamResultModel:
         return StreamResultModel(
@@ -116,10 +117,13 @@ def _evaluate(req: RunStreamRequest) -> StreamResultModel:
             error=error,
         )
 
+    if not precheck.ok:
+        return failure("artifact precheck failed: " + "; ".join(precheck.errors))
+
     if req.artifact.sha256 and digest != req.artifact.sha256:
         return failure(f"artifact hash mismatch: got {digest}, expected {req.artifact.sha256}")
 
-    runner = LocalSubprocessRunner()
+    runner = LocalSubprocessRunner(strict_sandbox=True, require_network_isolation=True)
     artifact = ArtifactRef(repo=req.artifact.repo, rev=req.artifact.rev, sha256=digest, local_path=local)
     try:
         result = runner.run_stream(

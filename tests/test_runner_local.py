@@ -76,3 +76,42 @@ def test_crashing_codec_raises_runner_error(tmp_path):
     artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
     with pytest.raises(RunnerError):
         runner.run_stream(artifact, StreamInput("s0", b"data" * 100), caps=ResourceCaps())
+
+
+def test_runner_scrubs_secret_environment(monkeypatch, tmp_path):
+    _write_codec(
+        tmp_path,
+        "import argparse\n"
+        "p=argparse.ArgumentParser();p.add_argument('--input');p.add_argument('--output')\n"
+        "a=p.parse_args()\n"
+        "open(a.output,'wb').write(open(a.input,'rb').read())\n",
+    )
+    (tmp_path / "compress.py").write_text(
+        "import argparse, os, sys\n"
+        "if os.environ.get('CHUTES_API_KEY') or os.environ.get('HF_TOKEN'):\n"
+        "    sys.exit(7)\n"
+        "p=argparse.ArgumentParser();p.add_argument('--input');p.add_argument('--output')\n"
+        "a=p.parse_args()\n"
+        "open(a.output,'wb').write(open(a.input,'rb').read())\n"
+    )
+    monkeypatch.setenv("CHUTES_API_KEY", "cpk_secret")
+    monkeypatch.setenv("HF_TOKEN", "hf_secret")
+    runner = LocalSubprocessRunner()
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    result = runner.run_stream(artifact, StreamInput("s0", b"data" * 100), caps=ResourceCaps())
+    assert result.roundtrip_ok is True
+
+
+def test_strict_runner_fails_closed_without_network_isolation(monkeypatch, tmp_path):
+    _write_codec(
+        tmp_path,
+        "import argparse\n"
+        "p=argparse.ArgumentParser();p.add_argument('--input');p.add_argument('--output')\n"
+        "a=p.parse_args()\n"
+        "open(a.output,'wb').write(open(a.input,'rb').read())\n",
+    )
+    monkeypatch.setattr("eval.runner.shutil.which", lambda name: None)
+    runner = LocalSubprocessRunner(strict_sandbox=True, require_network_isolation=True)
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    with pytest.raises(RunnerError, match="network isolation unavailable"):
+        runner.run_stream(artifact, StreamInput("s0", b"data" * 100), caps=ResourceCaps())
