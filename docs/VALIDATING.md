@@ -19,6 +19,13 @@ pytest -q
 # note the chute URL; pass it via --chute-url or GLYPH_CHUTE_URL
 ```
 
+If you deploy under a Chutes account other than the default `glyph`, set
+`GLYPH_CHUTE_USERNAME=<account>` (it builds the default chute URL and is the build/deploy
+username). All validators must point at the *same* deployed chute — set `GLYPH_CHUTE_URL` to
+override the URL directly. These are deployment-specific; consensus-critical launch values
+(e.g. the burn-window anchor) are committed in `src/core/constants.py` and identical
+network-wide, never per-operator env.
+
 ## Provide a corpus
 
 Run the data oracle (or point at any corpus directory):

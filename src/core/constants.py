@@ -1,8 +1,15 @@
 """Shared constants for the Glyph lossless-compression subnet.
 
-Values follow glyph/DESIGN.md (v0.1). Anything marked TODO must be fixed at subnet
-registration so it is identical network-wide.
+Values follow glyph/DESIGN.md (v0.1). Two classes of value live here:
+
+* Network-wide constants (e.g. ``WINDOW_ANCHOR_BLOCK``) MUST be identical across every
+  validator — they feed consensus (burn-tempo alignment), so they are committed in source,
+  never read from per-operator environment. A coordinated change ships as a code change.
+* Deployment-specific values (e.g. ``CHUTE_USERNAME``) only affect *where* a single operator
+  runs and may be overridden via environment variables (documented in ``.env.example``).
 """
+
+import os
 
 # --- Chain / commitment -------------------------------------------------------
 DEFAULT_NETUID = 117  # always overridable via --netuid
@@ -39,8 +46,13 @@ BASELINE_LEVEL = 19  # zstd -19: the vacant-crown floor a codec must beat
 # sets weights 100% to BURN_UID.
 BURN_WINDOW_TEMPOS = 4
 BURN_UID = 0
-# Network-wide origin so every validator's window index aligns. TODO: set to the
-# subnet registration block at launch.
+# Network-wide origin so every validator's window index aligns. This MUST be identical on
+# every validator: a per-operator override would desync the burn windows and split consensus,
+# so it is a committed constant (not an env var). 0 anchors the windows at genesis, which is a
+# valid, fully deterministic choice — window boundaries are still fixed network-wide. To
+# re-phase the windows at/after registration, change this value in source and ship it to all
+# validators together (the validator/weight-setter `--window-anchor` flag exists only for
+# isolated testing and must not diverge between mainnet validators).
 WINDOW_ANCHOR_BLOCK = 0
 
 # --- Chutes (SN64) evaluation backend -----------------------------------------
@@ -48,5 +60,9 @@ WINDOW_ANCHOR_BLOCK = 0
 # compressed bytes (DESIGN §4 same-system determinism + reference SKU).
 REFERENCE_SKU = "a100"
 REFERENCE_MIN_VRAM_GB = 24
-CHUTE_USERNAME = "glyph"  # TODO: deploying account username
+# The Chutes account that builds/deploys/serves the glyph-runner chute. Deployment-specific,
+# not consensus-critical: every validator targets the same deployed chute and overrides its URL
+# via GLYPH_CHUTE_URL (see runner_chutes.py), so this only needs to match the account that ran
+# the deploy. Set GLYPH_CHUTE_USERNAME to that account's username; defaults to "glyph".
+CHUTE_USERNAME = os.environ.get("GLYPH_CHUTE_USERNAME", "glyph")
 CHUTE_NAME = "glyph-runner"
