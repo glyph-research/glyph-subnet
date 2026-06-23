@@ -1,8 +1,13 @@
-"""ChutesRunner: dispatch a same-worker round-trip to the deployed glyph-runner chute.
+"""ChutesRunner: dispatch one stream across the SEPARATE compress and decompress chutes.
 
-Implements the same ``CodecRunner`` contract as ``LocalSubprocessRunner`` but executes
-the codec on Chutes (SN64) serverless GPU instead of the host, so a key-holding validator
-never runs untrusted artifacts locally. Auth uses a ``cpk_`` API key.
+Implements the ``CodecRunner`` contract but runs the codec on Chutes (SN64) serverless GPU
+instead of the host, so a key-holding validator never executes untrusted artifacts locally.
+Compress and decompress hit two different deployed chutes (separate containers): the blob
+from ``/compress`` is the *only* thing passed to ``/decompress``, so a codec cannot stash the
+raw input and read it back to fake the ratio (exploit-prevention #14). Auth uses a ``cpk_``
+API key. Bit-exactness is gated on the decompress worker's output hash matching the hash the
+validator computed from the trusted corpus (``StreamInput.expected_sha256``), never a
+worker's self-report.
 """
 
 from __future__ import annotations
@@ -13,18 +18,20 @@ from pathlib import Path
 
 import requests
 
-from core.constants import CHUTE_NAME, CHUTE_USERNAME, REFERENCE_SKU
+from core.constants import (
+    CHUTE_COMPRESSOR_NAME,
+    CHUTE_DECOMPRESSOR_NAME,
+    CHUTE_USERNAME,
+    REFERENCE_SKU,
+)
 from eval.runner import ArtifactRef, ResourceCaps, RunnerError, StreamInput
 from eval.scoring import StreamResult
 
-# Confirmed live invocation contract (validated against the Chutes API; pinned offline by
-# tests/test_chute_contract.py and exercised live by scripts/smoke_chute.py):
-#   URL     f"https://{username}-{name}.chutes.ai{public_api_path}"  -> here .../run_stream
-#   method  POST, JSON body == chute_app.RunStreamRequest
-#   auth    Authorization: Basic <cpk_...>            (the bare key 401s)
-#   reply   JSON == chute_app.StreamResultModel dump  (a cord returns a dict, not a model)
-# Override the base URL per deployment via --chute-url / GLYPH_CHUTE_URL.
-DEFAULT_BASE_URL = f"https://{CHUTE_USERNAME}-{CHUTE_NAME}.chutes.ai"
+# Confirmed live invocation contract (auth Authorization: Basic <cpk_...>; a cord returns a
+# JSON dict). Override per deployment via --compress-chute-url / --decompress-chute-url or
+# GLYPH_COMPRESS_CHUTE_URL / GLYPH_DECOMPRESS_CHUTE_URL.
+DEFAULT_COMPRESS_URL = f"https://{CHUTE_USERNAME}-{CHUTE_COMPRESSOR_NAME}.chutes.ai"
+DEFAULT_DECOMPRESS_URL = f"https://{CHUTE_USERNAME}-{CHUTE_DECOMPRESSOR_NAME}.chutes.ai"
 
 
 def _load_api_key(key_file: str | None) -> str:
@@ -54,95 +61,121 @@ def _load_api_key(key_file: str | None) -> str:
 
 
 class ChutesRunner:
-    prefers_remote_source = True  # the chute range-fetches the corpus; don't inline bytes
+    prefers_remote_source = True  # the compress chute range-fetches the corpus; don't inline bytes
 
     def __init__(
         self,
         *,
         reference_sku: str = REFERENCE_SKU,
         key_file: str | None = None,
-        base_url: str | None = None,
+        compress_base_url: str | None = None,
+        decompress_base_url: str | None = None,
         timeout: float = 3600.0,
     ):
         self.reference_sku = reference_sku
-        self.base_url = (base_url or os.environ.get("GLYPH_CHUTE_URL") or DEFAULT_BASE_URL).rstrip("/")
+        self.compress_base_url = (
+            compress_base_url or os.environ.get("GLYPH_COMPRESS_CHUTE_URL") or DEFAULT_COMPRESS_URL
+        ).rstrip("/")
+        self.decompress_base_url = (
+            decompress_base_url or os.environ.get("GLYPH_DECOMPRESS_CHUTE_URL") or DEFAULT_DECOMPRESS_URL
+        ).rstrip("/")
         self.timeout = timeout
         self.api_key = _load_api_key(key_file)
 
     @staticmethod
-    def _build_payload(artifact: ArtifactRef, stream: StreamInput, caps: ResourceCaps) -> dict:
-        """Select the stream dispatch shape: range-fetched URL (production) or inline bytes.
-
-        When the stream carries a ``source`` the chute range-fetches the corpus itself
-        (DESIGN: fetch before isolation) so the validator never inlines (and re-uploads) the
-        bytes. Otherwise the bytes go inline -- the path kept for tests / local smoke / small
-        streams. The chute's ``StreamSource`` accepts either shape.
-        """
+    def _stream_payload(stream: StreamInput) -> dict:
+        """The compress request's stream shape: range-fetched URL (production) or inline bytes."""
 
         if stream.source is not None:
-            stream_payload = {
+            return {
                 "stream_id": stream.stream_id,
                 "url": stream.source.url,
                 "offset": stream.source.offset,
                 "length": stream.source.length,
             }
-        elif stream.data is not None:
-            stream_payload = {
+        if stream.data is not None:
+            return {
                 "stream_id": stream.stream_id,
                 "inline_b64": base64.b64encode(stream.data).decode("ascii"),
             }
-        else:
-            raise RunnerError("stream has neither inline data nor a remote source")
+        raise RunnerError("stream has neither inline data nor a remote source")
+
+    @staticmethod
+    def _artifact_payload(artifact: ArtifactRef) -> dict:
+        return {"repo": artifact.repo, "rev": artifact.rev, "sha256": artifact.sha256}
+
+    @classmethod
+    def _compress_request(cls, artifact: ArtifactRef, stream: StreamInput, caps: ResourceCaps) -> dict:
         return {
-            "artifact": {"repo": artifact.repo, "rev": artifact.rev, "sha256": artifact.sha256},
-            "stream": stream_payload,
+            "artifact": cls._artifact_payload(artifact),
+            "stream": cls._stream_payload(stream),
             "wall_clock_secs": caps.wall_clock_secs,
         }
 
-    def run_stream(
-        self, artifact: ArtifactRef, stream: StreamInput, *, caps: ResourceCaps | None = None
-    ) -> StreamResult:
-        caps = caps or ResourceCaps()
-        payload = self._build_payload(artifact, stream, caps)
-        url = f"{self.base_url}/run_stream"
-        # Chutes invocation auth is `Authorization: Basic <cpk_...>` (per `chutes keys create`);
-        # sending the bare key 401s.
+    @classmethod
+    def _decompress_request(
+        cls, artifact: ArtifactRef, stream_id: str, blob_b64: str, caps: ResourceCaps
+    ) -> dict:
+        return {
+            "artifact": cls._artifact_payload(artifact),
+            "stream_id": stream_id,
+            "blob_b64": blob_b64,
+            "wall_clock_secs": caps.wall_clock_secs,
+        }
+
+    def _post(self, url: str, payload: dict) -> dict:
+        # Chutes invocation auth is `Authorization: Basic <cpk_...>`; the bare key 401s.
         auth = self.api_key if self.api_key.startswith("Basic ") else f"Basic {self.api_key}"
         try:
             response = requests.post(
                 url, json=payload, headers={"Authorization": auth}, timeout=self.timeout
             )
             response.raise_for_status()
-            data = response.json()
+            return response.json()
         except Exception as exc:  # network/HTTP errors are dispatch failures
-            raise RunnerError(f"chute dispatch failed: {exc}") from exc
+            raise RunnerError(f"chute dispatch failed ({url}): {exc}") from exc
 
-        return self._parse_response(data, stream)
+    def run_stream(
+        self, artifact: ArtifactRef, stream: StreamInput, *, caps: ResourceCaps | None = None
+    ) -> StreamResult:
+        caps = caps or ResourceCaps()
+        comp = self._post(
+            f"{self.compress_base_url}/compress", self._compress_request(artifact, stream, caps)
+        )
+        if comp.get("error"):
+            return self._failed(stream, int(comp.get("raw_bytes", stream.raw_len)))
+
+        decomp = self._post(
+            f"{self.decompress_base_url}/decompress",
+            self._decompress_request(artifact, stream.stream_id, comp["blob_b64"], caps),
+        )
+        if decomp.get("error"):
+            return self._failed(stream, int(comp.get("raw_bytes", stream.raw_len)))
+
+        # Gate bit-exactness on the validator-anchored hash; only fall back to the compress
+        # worker's self-reported source hash when no trusted hash was supplied (local smoke).
+        expected = stream.expected_sha256 or comp.get("source_sha256", "")
+        roundtrip_ok = bool(expected) and decomp.get("output_sha256") == expected
+        return StreamResult(
+            stream_id=stream.stream_id,
+            raw_bytes=int(comp["raw_bytes"]),
+            compressed_bytes=int(comp["compressed_bytes"]),
+            roundtrip_ok=roundtrip_ok,
+            compress_secs=float(comp["compress_secs"]),
+            decompress_secs=float(decomp["decompress_secs"]),
+            blob_hash=comp.get("blob_hash", ""),
+        )
 
     @staticmethod
-    def _parse_response(data: dict, stream: StreamInput) -> StreamResult:
-        """Map the chute's JSON reply (a ``StreamResultModel`` dump) to a ``StreamResult``.
+    def _failed(stream: StreamInput, raw_bytes: int) -> StreamResult:
+        """A worker-side codec failure is an invalid stream, not a dispatch error."""
 
-        A worker-side codec failure (``error`` set) is an invalid stream, not a dispatch
-        error -- score it as a failed (non-bit-exact) round-trip rather than raising.
-        """
-
-        if data.get("error"):
-            return StreamResult(
-                stream_id=stream.stream_id,
-                raw_bytes=int(data.get("raw_bytes", stream.raw_len)),
-                compressed_bytes=0,
-                roundtrip_ok=False,
-                compress_secs=0.0,
-                decompress_secs=0.0,
-                blob_hash="",
-            )
         return StreamResult(
-            stream_id=data["stream_id"],
-            raw_bytes=data["raw_bytes"],
-            compressed_bytes=data["compressed_bytes"],
-            roundtrip_ok=data["roundtrip_ok"],
-            compress_secs=data["compress_secs"],
-            decompress_secs=data["decompress_secs"],
-            blob_hash=data.get("blob_hash", ""),
+            stream_id=stream.stream_id,
+            raw_bytes=raw_bytes,
+            compressed_bytes=0,
+            roundtrip_ok=False,
+            compress_secs=0.0,
+            decompress_secs=0.0,
+            blob_hash="",
         )

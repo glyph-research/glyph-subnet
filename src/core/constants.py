@@ -60,9 +60,14 @@ WINDOW_ANCHOR_BLOCK = 0
 # compressed bytes (DESIGN §4 same-system determinism + reference SKU).
 REFERENCE_SKU = "a100"
 REFERENCE_MIN_VRAM_GB = 24
-# The Chutes account that builds/deploys/serves the glyph-runner chute. Deployment-specific,
-# not consensus-critical: every validator targets the same deployed chute and overrides its URL
-# via GLYPH_CHUTE_URL (see runner_chutes.py), so this only needs to match the account that ran
-# the deploy. Set GLYPH_CHUTE_USERNAME to that account's username; defaults to "glyph".
+# The Chutes account that builds/deploys/serves the eval chutes. Deployment-specific, not
+# consensus-critical: every validator targets the same deployed chutes and can override their
+# URLs via GLYPH_COMPRESS_CHUTE_URL / GLYPH_DECOMPRESS_CHUTE_URL (see runner_chutes.py), so this
+# only needs to match the account that ran the deploy. Set GLYPH_CHUTE_USERNAME; defaults to "glyph".
 CHUTE_USERNAME = os.environ.get("GLYPH_CHUTE_USERNAME", "glyph")
-CHUTE_NAME = "glyph-runner"
+CHUTE_NAME = "glyph-runner"  # shared image name
+# Compress and decompress run on SEPARATE deployed chutes (separate containers), so a codec
+# cannot stash the raw input during compress and read it back during decompress -- the
+# decompress worker only ever sees the blob (DESIGN §6; exploit-prevention #14).
+CHUTE_COMPRESSOR_NAME = "glyph-compressor"
+CHUTE_DECOMPRESSOR_NAME = "glyph-decompressor"

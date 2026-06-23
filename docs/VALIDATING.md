@@ -12,38 +12,45 @@ cp .env.example .env            # set CHUTES_API_KEY=cpk_...  (chutes keys creat
 pytest -q
 ```
 
-## Deploy the evaluation chute (once)
+## Deploy the evaluation chutes (once)
+
+Compress and decompress run on **separate** chutes (separate containers), so a codec cannot
+stash the raw input during compress and read it back during decompress to fake the ratio — the
+decompressor only ever receives the blob.
 
 ```bash
-./scripts/deploy_runner_chute.sh
-# note the chute URL; pass it via --chute-url or GLYPH_CHUTE_URL
+./scripts/deploy_runner_chute.sh   # builds + deploys compressor_chute AND decompressor_chute
+# note both chute URLs; pass them via --compress-chute-url / --decompress-chute-url
+# (or GLYPH_COMPRESS_CHUTE_URL / GLYPH_DECOMPRESS_CHUTE_URL)
 ```
 
-The deployed runner downloads the committed artifact, re-runs precheck inside the worker,
-then executes compressor/decompressor entrypoints with outbound network disabled and
-validator secrets removed from the subprocess environment. If the worker cannot apply
-network isolation, the benchmark fails closed instead of running miner code with network
-access.
+Each deployed chute downloads the committed artifact, re-runs precheck inside the worker, then
+executes only its phase with outbound network disabled and validator secrets removed from the
+subprocess environment. If a worker cannot apply network isolation, the benchmark fails closed
+instead of running miner code with network access.
 
 If you deploy under a Chutes account other than the default `glyph`, set
-`GLYPH_CHUTE_USERNAME=<account>` (it builds the default chute URL and is the build/deploy
-username). All validators must point at the *same* deployed chute — set `GLYPH_CHUTE_URL` to
-override the URL directly. These are deployment-specific; consensus-critical launch values
-(e.g. the burn-window anchor) are committed in `src/core/constants.py` and identical
-network-wide, never per-operator env.
+`GLYPH_CHUTE_USERNAME=<account>` (it builds the default chute URLs and is the build/deploy
+username). All validators must point at the *same* two deployed chutes. These are
+deployment-specific; consensus-critical launch values (e.g. the burn-window anchor) are
+committed in `src/core/constants.py` and identical network-wide, never per-operator env.
 
 ### Validate the live invocation contract
 
-The chute is invoked as `POST {base}/run_stream` with `Authorization: Basic <cpk_...>`; the
-request body is `chute_app.RunStreamRequest` and the reply is a JSON dump of
-`StreamResultModel`. That binding is pinned offline by `tests/test_chute_contract.py` (runs in
-CI, no GPU). After a deploy, confirm it end-to-end on the live instance with the smoke helper,
-which drives the real `ChutesRunner` for both stream shapes:
+Each chute is invoked as `POST {base}/compress` / `POST {base}/decompress` with
+`Authorization: Basic <cpk_...>`; the bodies are `chute_app.CompressRequest` /
+`DecompressRequest` and the replies are JSON dumps of `CompressResultModel` /
+`DecompressResultModel`. Bit-exactness is gated on the decompress worker's `output_sha256`
+matching the hash the validator computed from the trusted corpus — never a worker self-report.
+That binding is pinned offline by `tests/test_chute_contract.py` (CI, no GPU). After a deploy,
+confirm it end-to-end with the smoke helper, which drives the real `ChutesRunner` across both
+chutes for both stream shapes:
 
 ```bash
 CHUTES_API_KEY=cpk_... python scripts/smoke_chute.py \
   --repo you/glyph-ref-codec --rev main \
-  --chute-url https://<acct>-glyph-runner.chutes.ai \
+  --compress-chute-url https://<acct>-glyph-compressor.chutes.ai \
+  --decompress-chute-url https://<acct>-glyph-decompressor.chutes.ai \
   [--corpus-url https://<host>/corpus.bin]   # also exercises the URL/range path
 ```
 

@@ -1,21 +1,26 @@
-"""The glyph-runner Chute (DESIGN §6): a deployed Chutes (SN64) endpoint.
+"""The glyph eval chutes (DESIGN §6): TWO deployed Chutes (SN64) endpoints.
 
-One cord, ``run_stream``, performs an entire compress->decompress round-trip for a single
-stream on a single worker -- which is what lets Glyph require only same-system
-determinism. The endpoint is pinned to the reference GPU SKU via ``NodeSelector.include``
+Compress and decompress run on **separate** chutes -- ``/compress`` (CHUTE_COMPRESSOR_NAME)
+and ``/decompress`` (CHUTE_DECOMPRESSOR_NAME) -- so they execute in separate containers. The
+decompress worker only ever receives the compressed blob, never the raw input, so a codec
+cannot stash the raw bytes during compress and read them back during decompress to fake the
+ratio (exploit-prevention #14). Both pin the reference GPU SKU via ``NodeSelector.include``
 so every validator measures identical compressed bytes.
 
-Deploy with:  chutes deploy eval.chute_app:chute --accept-fee
+Deploy both (separately):
+  chutes deploy eval.chute_app:compressor_chute   --accept-fee
+  chutes deploy eval.chute_app:decompressor_chute --accept-fee
 
 Invocation contract (validated against the live Chutes API):
-- ``POST {base}/run_stream`` with ``Authorization: Basic <cpk_...>``; the request body is
-  ``RunStreamRequest`` and the reply is a JSON dump of ``StreamResultModel``.
-- A cord MUST return a JSON-serializable dict, not a pydantic model -- returning a model
-  raises ``TypeError: Type is not JSON serializable`` in the response serializer, which the
-  gateway surfaces as a misleading 500 "No infrastructure available".
-``tests/test_chute_contract.py`` pins this binding offline (no GPU); ``scripts/smoke_chute.py``
-runs a live round-trip (inline + url/range) against a deployed instance. The boundaries stay
-isolated in ``_evaluate`` (here) and ``runner_chutes.ChutesRunner`` (dispatch).
+- ``POST {base}/compress``   with ``Authorization: Basic <cpk_...>`` -> ``CompressRequest`` /
+  ``CompressResultModel`` (carries ``blob_b64``).
+- ``POST {base}/decompress`` with the same auth -> ``DecompressRequest`` (the blob) /
+  ``DecompressResultModel``. The validator gates bit-exactness on ``output_sha256`` against the
+  hash it computed from the trusted corpus -- never the worker's self-report.
+- A cord MUST return a JSON-serializable dict, not a pydantic model -- returning a model raises
+  ``TypeError: Type is not JSON serializable``, surfaced as a misleading 500 "No infrastructure".
+``tests/test_chute_contract.py`` pins the binding offline; ``scripts/smoke_chute.py`` runs a
+live split round-trip. The boundaries stay isolated here and in ``runner_chutes.ChutesRunner``.
 """
 
 from __future__ import annotations
@@ -25,6 +30,8 @@ import base64
 from pydantic import BaseModel
 
 from core.constants import (
+    CHUTE_COMPRESSOR_NAME,
+    CHUTE_DECOMPRESSOR_NAME,
     CHUTE_NAME,
     CHUTE_USERNAME,
     REFERENCE_MIN_VRAM_GB,
@@ -52,20 +59,36 @@ class StreamSource(BaseModel):
     length: int = 0
 
 
-class RunStreamRequest(BaseModel):
+class CompressRequest(BaseModel):
     artifact: ArtifactSpec
     stream: StreamSource
     wall_clock_secs: float = 3600.0
 
 
-class StreamResultModel(BaseModel):
+class CompressResultModel(BaseModel):
     stream_id: str
     raw_bytes: int
     compressed_bytes: int
-    roundtrip_ok: bool
     compress_secs: float
-    decompress_secs: float
+    blob_b64: str  # the compressed artifact, handed to a *separate* decompressor chute
     blob_hash: str
+    source_sha256: str  # the compress worker's view of the raw hash (validator cross-checks)
+    artifact_hash: str | None = None
+    error: str | None = None
+
+
+class DecompressRequest(BaseModel):
+    artifact: ArtifactSpec
+    stream_id: str
+    blob_b64: str
+    wall_clock_secs: float = 3600.0
+
+
+class DecompressResultModel(BaseModel):
+    stream_id: str
+    raw_bytes: int
+    decompress_secs: float
+    output_sha256: str  # sha256 of the reconstructed bytes; the validator gates on this
     artifact_hash: str | None = None
     error: str | None = None
 
@@ -85,62 +108,88 @@ def _materialize(src: StreamSource) -> bytes:
     raise ValueError("stream source needs inline_b64 or url")
 
 
-def _evaluate(req: RunStreamRequest) -> StreamResultModel:
-    """Run one stream's round-trip on this worker. Reuses the local runner inside the chute."""
+def _prepare_artifact(spec: ArtifactSpec):
+    """snapshot_download + re-precheck + hash check on the worker. Returns (local_path, digest).
+
+    Raises ``ValueError`` (with the precheck/hash reason) so the cord can report it as a failed
+    stream rather than a dispatch error.
+    """
 
     from huggingface_hub import snapshot_download
 
-    from eval.runner import (
-        ArtifactRef,
-        LocalSubprocessRunner,
-        ResourceCaps,
-        RunnerError,
-        StreamInput,
-    )
     from validation.precheck import precheck_artifact_dir
 
-    data = _materialize(req.stream)
-    local = snapshot_download(repo_id=req.artifact.repo, revision=req.artifact.rev)
-    precheck = precheck_artifact_dir(local, req.artifact.repo, req.artifact.rev)
+    local = snapshot_download(repo_id=spec.repo, revision=spec.rev)
+    precheck = precheck_artifact_dir(local, spec.repo, spec.rev)
     digest = precheck.artifact_hash
-
-    def failure(error: str) -> StreamResultModel:
-        return StreamResultModel(
-            stream_id=req.stream.stream_id,
-            raw_bytes=len(data),
-            compressed_bytes=0,
-            roundtrip_ok=False,
-            compress_secs=0.0,
-            decompress_secs=0.0,
-            blob_hash="",
-            artifact_hash=digest,
-            error=error,
-        )
-
     if not precheck.ok:
-        return failure("artifact precheck failed: " + "; ".join(precheck.errors))
+        raise ValueError("artifact precheck failed: " + "; ".join(precheck.errors))
+    if spec.sha256 and digest != spec.sha256:
+        raise ValueError(f"artifact hash mismatch: got {digest}, expected {spec.sha256}")
+    return local, digest
 
-    if req.artifact.sha256 and digest != req.artifact.sha256:
-        return failure(f"artifact hash mismatch: got {digest}, expected {req.artifact.sha256}")
 
+def _compress(req: CompressRequest) -> CompressResultModel:
+    """Run only the compress entrypoint on this worker; return the blob for the decompressor."""
+
+    from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps, RunnerError
+
+    data = _materialize(req.stream)
+    try:
+        local, digest = _prepare_artifact(req.artifact)
+    except ValueError as exc:
+        return CompressResultModel(
+            stream_id=req.stream.stream_id, raw_bytes=len(data), compressed_bytes=0,
+            compress_secs=0.0, blob_b64="", blob_hash="", source_sha256="", error=str(exc),
+        )
     runner = LocalSubprocessRunner(strict_sandbox=True, require_network_isolation=True)
     artifact = ArtifactRef(repo=req.artifact.repo, rev=req.artifact.rev, sha256=digest, local_path=local)
     try:
-        result = runner.run_stream(
-            artifact, StreamInput(req.stream.stream_id, data),
-            caps=ResourceCaps(wall_clock_secs=req.wall_clock_secs),
-        )
+        out = runner.compress(artifact, data, caps=ResourceCaps(wall_clock_secs=req.wall_clock_secs))
     except RunnerError as exc:
-        return failure(str(exc))
+        return CompressResultModel(
+            stream_id=req.stream.stream_id, raw_bytes=len(data), compressed_bytes=0,
+            compress_secs=0.0, blob_b64="", blob_hash="", source_sha256="",
+            artifact_hash=digest, error=str(exc),
+        )
+    return CompressResultModel(
+        stream_id=req.stream.stream_id,
+        raw_bytes=out.raw_bytes,
+        compressed_bytes=out.compressed_bytes,
+        compress_secs=out.compress_secs,
+        blob_b64=base64.b64encode(out.blob).decode("ascii"),
+        blob_hash=out.blob_hash,
+        source_sha256=out.source_hash,
+        artifact_hash=digest,
+    )
 
-    return StreamResultModel(
-        stream_id=result.stream_id,
-        raw_bytes=result.raw_bytes,
-        compressed_bytes=result.compressed_bytes,
-        roundtrip_ok=result.roundtrip_ok,
-        compress_secs=result.compress_secs,
-        decompress_secs=result.decompress_secs,
-        blob_hash=result.blob_hash,
+
+def _decompress(req: DecompressRequest) -> DecompressResultModel:
+    """Run only the decompress entrypoint on this worker, seeded with only the blob."""
+
+    from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps, RunnerError
+
+    try:
+        local, digest = _prepare_artifact(req.artifact)
+    except ValueError as exc:
+        return DecompressResultModel(
+            stream_id=req.stream_id, raw_bytes=0, decompress_secs=0.0, output_sha256="", error=str(exc),
+        )
+    runner = LocalSubprocessRunner(strict_sandbox=True, require_network_isolation=True)
+    artifact = ArtifactRef(repo=req.artifact.repo, rev=req.artifact.rev, sha256=digest, local_path=local)
+    try:
+        blob = base64.b64decode(req.blob_b64)
+        out = runner.decompress(artifact, blob, caps=ResourceCaps(wall_clock_secs=req.wall_clock_secs))
+    except RunnerError as exc:
+        return DecompressResultModel(
+            stream_id=req.stream_id, raw_bytes=0, decompress_secs=0.0, output_sha256="",
+            artifact_hash=digest, error=str(exc),
+        )
+    return DecompressResultModel(
+        stream_id=req.stream_id,
+        raw_bytes=out.raw_bytes,
+        decompress_secs=out.decompress_secs,
+        output_sha256=out.output_hash,
         artifact_hash=digest,
     )
 
@@ -159,46 +208,63 @@ def build_image():
     )
 
 
-def build_chute():
+def _build_chute(name: str):
     if Chute is None:
         raise RuntimeError("chutes SDK is not installed; `pip install chutes`")
-    image = build_image()
-    chute = Chute(
+    return Chute(
         username=CHUTE_USERNAME,
-        name=CHUTE_NAME,
-        image=image,
+        name=name,
+        image=build_image(),
         node_selector=NodeSelector(
             gpu_count=1,
             min_vram_gb_per_gpu=REFERENCE_MIN_VRAM_GB,
             include=[REFERENCE_SKU],  # reference-SKU pin: identical bytes across validators
         ),
-        # Capacity gating on the invocation gateway is concurrency * max_instances; with the
-        # default 1*1 a single in-flight (or stale-tracked) request trips a 429 "at maximum
-        # capacity". A little headroom avoids that. (NB: REFERENCE_SKU must equal the SKU the
-        # subnet mandates -- e.g. an integrated SN64 subnet forces include=['pro_6000'].)
+        # Capacity gating on the invocation gateway is concurrency * max_instances; the default
+        # 1*1 429s on one in-flight request, so give headroom. (REFERENCE_SKU must equal the SKU
+        # the subnet mandates -- an integrated SN64 subnet forces include=['pro_6000'].)
         concurrency=4,
     )
 
-    @chute.cord(public_api_path="/run_stream", method="POST")
-    async def run_stream(self, req: RunStreamRequest) -> dict:  # noqa: ANN001
-        # Two things the Chutes runtime requires that are easy to get wrong:
-        # 1) the round-trip is blocking (snapshot_download + subprocess codec run) -- run it
-        #    OFF the event loop, else health-check pings stall and the instance is reaped;
-        # 2) return a plain JSON-serializable dict -- the response serializer cannot encode a
-        #    raw pydantic model (TypeError: Type is not JSON serializable: StreamResultModel),
-        #    which surfaces to the caller as a misleading 500 "No infrastructure available".
+
+def build_compressor_chute():
+    """The compress-only chute. Deploy: chutes deploy eval.chute_app:compressor_chute --accept-fee"""
+
+    chute = _build_chute(CHUTE_COMPRESSOR_NAME)
+
+    @chute.cord(public_api_path="/compress", method="POST")
+    async def compress(self, req: CompressRequest) -> dict:  # noqa: ANN001
+        # Blocking work off the event loop; return a plain JSON dict (a pydantic model trips
+        # the serializer and surfaces as a misleading 500 "No infrastructure available").
         import asyncio
 
-        result = await asyncio.to_thread(_evaluate, req)
+        result = await asyncio.to_thread(_compress, req)
         return result.model_dump()
 
     return chute
 
 
-# Module-level handle for `chutes deploy eval.chute_app:chute`. Built lazily-safe:
-# importing this module must never fail (e.g. when the build context / cwd is not the repo
-# root). `chutes build/deploy`, run from the repo root, constructs it successfully.
+def build_decompressor_chute():
+    """The decompress-only chute. Deploy: chutes deploy eval.chute_app:decompressor_chute --accept-fee"""
+
+    chute = _build_chute(CHUTE_DECOMPRESSOR_NAME)
+
+    @chute.cord(public_api_path="/decompress", method="POST")
+    async def decompress(self, req: DecompressRequest) -> dict:  # noqa: ANN001
+        import asyncio
+
+        result = await asyncio.to_thread(_decompress, req)
+        return result.model_dump()
+
+    return chute
+
+
+# Module-level handles for `chutes deploy eval.chute_app:compressor_chute` /
+# `:decompressor_chute`. Built lazily-safe: importing this module must never fail (e.g. when
+# the build context / cwd is not the repo root). Deploy both as SEPARATE chutes so compress
+# and decompress run in separate containers (exploit-prevention #14).
 try:
-    chute = build_chute() if Chute is not None else None
+    compressor_chute = build_compressor_chute() if Chute is not None else None
+    decompressor_chute = build_decompressor_chute() if Chute is not None else None
 except Exception:
-    chute = None
+    compressor_chute = decompressor_chute = None

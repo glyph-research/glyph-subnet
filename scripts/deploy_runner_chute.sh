@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Build and deploy the glyph-runner evaluation chute to Chutes (SN64).
+# Build and deploy the glyph evaluation chutes to Chutes (SN64): the compressor and the
+# decompressor as SEPARATE chutes (separate containers), so a codec cannot stash the raw
+# input during compress and read it back during decompress (#14).
 # Run from the repo root. Requires a logged-in chutes account (~/.chutes/config.ini) and,
 # for validators invoking it, CHUTES_API_KEY in .env.
 set -euo pipefail
@@ -13,7 +15,8 @@ if ! command -v chutes >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "[glyph] building + deploying eval.chute_app:chute ..."
+echo "[glyph] building + deploying eval.chute_app:compressor_chute + decompressor_chute ..."
 glyph-deploy-chute --build --deploy --public --accept-fee "$@"
 
-echo "[glyph] deployed. Point validators at the chute URL with --chute-url or GLYPH_CHUTE_URL."
+echo "[glyph] deployed. Point validators at both chutes with --compress-chute-url /"
+echo "        --decompress-chute-url (or GLYPH_COMPRESS_CHUTE_URL / GLYPH_DECOMPRESS_CHUTE_URL)."
