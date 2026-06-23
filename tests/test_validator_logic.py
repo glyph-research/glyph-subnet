@@ -4,7 +4,7 @@ import core
 from core.commitments import CodecCommitment, ParsedCommitment
 from validation.precheck import PrecheckResult
 from core.state import ValidatorState
-from validator.service import _apply_precheck, _assert_version_key_matches, decide_weights
+from validator.service import _apply_precheck, _assert_version_key_matches, _make_provider, decide_weights
 from core.weights import WinnerEntry
 
 TEMPO = 360
@@ -19,6 +19,72 @@ class FakeChain:
 
     def get_weights_version(self) -> int:
         return self.version
+
+
+# --- corpus default -------------------------------------------------------------
+
+def test_make_provider_defaults_to_mixed_corpus_env(monkeypatch, tmp_path):
+    mixed = tmp_path / "mixed"
+    mixed.mkdir()
+    (mixed / "chunk_00_fineweb.txt").write_bytes(b"fineweb")
+    (mixed / "provenance.json").write_text("{}")
+    monkeypatch.setenv("GLYPH_MIXED_CORPUS_DIR", str(mixed))
+
+    args = type("Args", (), {"corpus_dir": None, "corpus_url": None})()
+    provider = _make_provider(args)
+
+    assert provider.directory == mixed
+    assert provider.total_bytes == len(b"fineweb")
+
+
+def test_make_provider_explicit_corpus_dir_wins(monkeypatch, tmp_path):
+    default = tmp_path / "default"
+    explicit = tmp_path / "explicit"
+    default.mkdir()
+    explicit.mkdir()
+    (default / "chunk_default.txt").write_bytes(b"default")
+    (explicit / "chunk_explicit.txt").write_bytes(b"explicit")
+    monkeypatch.setenv("GLYPH_MIXED_CORPUS_DIR", str(default))
+
+    args = type("Args", (), {"corpus_dir": str(explicit), "corpus_url": None})()
+    provider = _make_provider(args)
+
+    assert provider.directory == explicit
+    assert provider.total_bytes == len(b"explicit")
+
+
+def test_make_provider_preserves_corpus_url_on_default(monkeypatch, tmp_path):
+    mixed = tmp_path / "mixed"
+    mixed.mkdir()
+    (mixed / "chunk_00_fineweb.txt").write_bytes(b"fineweb")
+    monkeypatch.setenv("GLYPH_MIXED_CORPUS_DIR", str(mixed))
+
+    args = type("Args", (), {"corpus_dir": None, "corpus_url": "https://host/corpus.bin"})()
+    provider = _make_provider(args)
+
+    source = provider.stream_source(type("Spec", (), {"offset": 2, "length": 3})())
+    assert source.url == "https://host/corpus.bin"
+
+
+def test_make_provider_missing_default_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("GLYPH_MIXED_CORPUS_DIR", str(tmp_path / "missing"))
+
+    args = type("Args", (), {"corpus_dir": None, "corpus_url": None})()
+    with pytest.raises(SystemExit) as exc:
+        _make_provider(args)
+
+    assert "default mixed corpus directory not found" in str(exc.value)
+
+
+def test_make_provider_empty_corpus_fails(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    args = type("Args", (), {"corpus_dir": str(empty), "corpus_url": None})()
+    with pytest.raises(SystemExit) as exc:
+        _make_provider(args)
+
+    assert "no benchmark data files" in str(exc.value)
 
 
 # --- version-key gate (fail closed) ---------------------------------------------

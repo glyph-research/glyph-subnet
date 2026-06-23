@@ -59,10 +59,11 @@ See [docs/MINING.md](docs/MINING.md). Commitments are permanent per hotkey.
 ```bash
 cp .env.example .env                                       # CHUTES_API_KEY
 ./scripts/deploy_runner_chute.sh                           # deploy the eval chute (once)
-glyph-oracle --out-dir ./corpus --target-bytes 268435456   # fresh corpus
+export GLYPH_MIXED_CORPUS_DIR=/tmp/glyph_mixed_8x2mb       # default mixed launch corpus
 # auto-updating validator under PM2 (edit wallet/netuid)
 ./scripts/run_auto_validator.sh --netuid 117 \
-  --wallet-name w --hotkey-name h --runner chutes --corpus-dir ./corpus --state-dir ./state
+  --wallet-name w --hotkey-name h --runner chutes \
+  --corpus-url https://<host>/corpus.bin --state-dir ./state
 ```
 
 Offline M0 demo (no chain, no Chutes) — exercises eval → king-of-the-hill → weights:
