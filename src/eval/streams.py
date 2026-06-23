@@ -21,6 +21,22 @@ class StreamSpec:
     length: int
 
 
+@dataclass(frozen=True)
+class RangeSource:
+    """Where a stream's bytes live remotely, so a worker can range-fetch them itself.
+
+    The production Chutes path passes this instead of inlining the bytes: the deployed
+    runner does an HTTP ``Range`` fetch of ``url`` for ``[offset, offset+length)``, mirroring
+    the chute's ``StreamSource`` (url/offset/length). The validator never pulls (and re-uploads)
+    the 256 MiB sample. ``offset``/``length`` are global byte coordinates into the corpus, so
+    the published corpus must be one contiguous blob in the same order the manifest hashes.
+    """
+
+    url: str
+    offset: int
+    length: int
+
+
 def derive_seed(block_hash: str, salt: str, round_index: int) -> int:
     payload = f"{block_hash}:{salt}:{round_index}".encode("utf-8")
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")

@@ -31,6 +31,7 @@ from core.constants import (
     VRAM_CAP_BYTES,
 )
 from eval.scoring import StreamResult
+from eval.streams import RangeSource
 
 
 class RunnerError(Exception):
@@ -48,7 +49,18 @@ class ArtifactRef:
 @dataclass
 class StreamInput:
     stream_id: str
-    data: bytes
+    data: bytes | None = None  # inline bytes: local runner, tests, small/smoke streams
+    source: RangeSource | None = None  # production: bytes range-fetched by the remote worker
+
+    @property
+    def raw_len(self) -> int:
+        """Raw stream length, whether materialized inline or known from the remote range."""
+
+        if self.data is not None:
+            return len(self.data)
+        if self.source is not None:
+            return self.source.length
+        return 0
 
 
 @dataclass
@@ -61,6 +73,10 @@ class ResourceCaps:
 
 
 class CodecRunner(Protocol):
+    # True when the runner fetches stream bytes itself from a ``StreamInput.source``; the
+    # evaluator then skips materializing/inlining them. False runners get inline ``data``.
+    prefers_remote_source: bool
+
     def run_stream(
         self, artifact: ArtifactRef, stream: StreamInput, *, caps: ResourceCaps
     ) -> StreamResult: ...
@@ -77,6 +93,8 @@ def _sha256_file(path: Path) -> str:
 class LocalSubprocessRunner:
     """Run a codec's entrypoints in a subprocess on the host (dev/CI/own-codec only)."""
 
+    prefers_remote_source = False  # runs on the host; always needs the bytes materialized
+
     def __init__(self, *, strict_sandbox: bool = False):
         # strict_sandbox best-effort drops network via `unshare --net` when available.
         # Real isolation of untrusted artifacts is the Chutes container's job (DESIGN §6).
@@ -86,6 +104,8 @@ class LocalSubprocessRunner:
         self, artifact: ArtifactRef, stream: StreamInput, *, caps: ResourceCaps | None = None
     ) -> StreamResult:
         caps = caps or ResourceCaps()
+        if stream.data is None:
+            raise RunnerError("LocalSubprocessRunner needs inline stream data, not a remote source")
         if not artifact.local_path:
             raise RunnerError("LocalSubprocessRunner requires artifact.local_path")
         artifact_dir = Path(artifact.local_path)

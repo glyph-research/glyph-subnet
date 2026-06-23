@@ -59,6 +59,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--salt-file", default=None)
     parser.add_argument("--runner", choices=["local", "chutes"], default="chutes")
     parser.add_argument("--corpus-dir", default=None, help="StaticLocalProvider corpus directory")
+    parser.add_argument(
+        "--corpus-url",
+        default=None,
+        help="Public URL of the corpus served as one contiguous blob (chunk order == sorted "
+        "manifest order). Enables the production Chutes path: the runner range-fetches each "
+        "stream itself instead of the validator inlining the 256 MiB sample.",
+    )
     parser.add_argument("--reference-sku", default=REFERENCE_SKU)
     parser.add_argument("--chutes-key-file", default=None)
     parser.add_argument("--chute-url", default=None, help="Deployed glyph-runner chute base URL")
@@ -226,7 +233,7 @@ def _make_runner(args) -> object:
 def _make_provider(args):
     if not args.corpus_dir:
         raise SystemExit("--corpus-dir is required (the data oracle corpus directory)")
-    return StaticLocalProvider(args.corpus_dir)
+    return StaticLocalProvider(args.corpus_dir, base_url=getattr(args, "corpus_url", None))
 
 
 def _make_chain(args) -> BittensorChain:

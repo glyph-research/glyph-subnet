@@ -27,6 +27,11 @@ Run the data oracle (or point at any corpus directory):
 glyph-oracle --out-dir ./corpus --target-bytes 268435456   # 256 MiB of fresh text
 ```
 
+For production Chutes runs, also publish the same corpus as one contiguous blob (chunk order ==
+sorted manifest order) and pass its URL via `--corpus-url`. The deployed runner then range-fetches
+each stream itself instead of the validator inlining the 256 MiB sample. Without `--corpus-url`
+(or with `--runner local`), streams are inlined as before — fine for tests and smoke runs.
+
 ## Run
 
 All-in-one — `glyph-validator` is a console entry point; wrap it in PM2 (edit wallet/netuid):

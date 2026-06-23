@@ -49,6 +49,8 @@ def _load_api_key(key_file: str | None) -> str:
 
 
 class ChutesRunner:
+    prefers_remote_source = True  # the chute range-fetches the corpus; don't inline bytes
+
     def __init__(
         self,
         *,
@@ -62,20 +64,41 @@ class ChutesRunner:
         self.timeout = timeout
         self.api_key = _load_api_key(key_file)
 
+    @staticmethod
+    def _build_payload(artifact: ArtifactRef, stream: StreamInput, caps: ResourceCaps) -> dict:
+        """Select the stream dispatch shape: range-fetched URL (production) or inline bytes.
+
+        When the stream carries a ``source`` the chute range-fetches the corpus itself
+        (DESIGN: fetch before isolation) so the validator never inlines (and re-uploads) the
+        bytes. Otherwise the bytes go inline -- the path kept for tests / local smoke / small
+        streams. The chute's ``StreamSource`` accepts either shape.
+        """
+
+        if stream.source is not None:
+            stream_payload = {
+                "stream_id": stream.stream_id,
+                "url": stream.source.url,
+                "offset": stream.source.offset,
+                "length": stream.source.length,
+            }
+        elif stream.data is not None:
+            stream_payload = {
+                "stream_id": stream.stream_id,
+                "inline_b64": base64.b64encode(stream.data).decode("ascii"),
+            }
+        else:
+            raise RunnerError("stream has neither inline data nor a remote source")
+        return {
+            "artifact": {"repo": artifact.repo, "rev": artifact.rev, "sha256": artifact.sha256},
+            "stream": stream_payload,
+            "wall_clock_secs": caps.wall_clock_secs,
+        }
+
     def run_stream(
         self, artifact: ArtifactRef, stream: StreamInput, *, caps: ResourceCaps | None = None
     ) -> StreamResult:
         caps = caps or ResourceCaps()
-        payload = {
-            "artifact": {"repo": artifact.repo, "rev": artifact.rev, "sha256": artifact.sha256},
-            # inline_b64 is correctness-first; production should switch to url+offset+length
-            # so the chute range-fetches the corpus itself (DESIGN: fetch before isolation).
-            "stream": {
-                "stream_id": stream.stream_id,
-                "inline_b64": base64.b64encode(stream.data).decode("ascii"),
-            },
-            "wall_clock_secs": caps.wall_clock_secs,
-        }
+        payload = self._build_payload(artifact, stream, caps)
         url = f"{self.base_url}/run_stream"
         # Chutes invocation auth is `Authorization: Basic <cpk_...>` (per `chutes keys create`);
         # sending the bare key 401s.
@@ -93,7 +116,7 @@ class ChutesRunner:
             # A worker-side codec failure is an invalid stream, not a dispatch error.
             return StreamResult(
                 stream_id=stream.stream_id,
-                raw_bytes=len(stream.data),
+                raw_bytes=int(data.get("raw_bytes", stream.raw_len)),
                 compressed_bytes=0,
                 roundtrip_ok=False,
                 compress_secs=0.0,
