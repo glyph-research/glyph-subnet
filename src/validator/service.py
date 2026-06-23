@@ -13,7 +13,6 @@ import time
 import traceback
 from pathlib import Path
 
-import core
 from chain.chain import BittensorChain, ChainConfig
 from core.commitments import parse_commitments_by_hotkey
 from core.constants import (
@@ -30,6 +29,7 @@ from core.constants import (
     WINDOW_ANCHOR_BLOCK,
 )
 from core.state import CommitmentState, ValidatorState, load_state, save_state
+from core.version import assert_weights_version_matches, local_version_key
 from core.weights import WinnerEntry, compact_history, promote_winner, should_promote
 from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
@@ -141,19 +141,11 @@ def _load_salt(state_dir: Path, salt_file: str | None) -> str:
 
 
 def _local_version_key() -> int:
-    return int(core.__version_key__)
+    return local_version_key()
 
 
 def _assert_version_key_matches(chain: BittensorChain) -> int:
-    expected = _local_version_key()
-    chain_version = chain.get_weights_version()
-    if chain_version != expected:
-        raise SystemExit(
-            "version key mismatch: "
-            f"local validator expects {expected}, but netuid {chain.config.netuid} has "
-            f"weights_version {chain_version}. Stopping before scoring or setting weights."
-        )
-    return chain_version
+    return assert_weights_version_matches(chain)
 
 
 def _apply_precheck(
