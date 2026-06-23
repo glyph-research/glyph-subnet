@@ -14,7 +14,8 @@ DEFAULT_GITHUB_REPO="${GITHUB_REPO:-glyph-research/glyph-subnet}"
 DEFAULT_VALIDATOR_PROC_NAME="glyph_auto_validator"
 DEFAULT_MONITOR_PROC_NAME="glyph_update_monitor"
 VERSION_FILE="src/core/__init__.py"
-VERSION_VAR="__version__"
+VERSION_VAR="__version_key__"
+VERSION_LABEL="version key"
 
 CHECK_INTERVAL="${CHECK_INTERVAL:-$DEFAULT_CHECK_INTERVAL}"
 LOG_FILE="$DEFAULT_LOG_FILE"
@@ -49,7 +50,7 @@ show_help() {
 Usage: $0 [AUTO_UPDATE_OPTIONS] [VALIDATOR_ARGS...]
 
 Starts glyph-validator under PM2 and a PM2 monitor process that periodically checks
-GitHub for a newer src/core/__init__.py __version__, pulls updates, reinstalls the
+GitHub for a newer src/core/__init__.py __version_key__, pulls updates, reinstalls the
 package, and restarts the validator.
 
 Auto-update options:
@@ -95,16 +96,15 @@ read_local_version() {
 
 read_remote_version() {
     local branch="$1"
-    local url="https://raw.githubusercontent.com/$GITHUB_REPO/$branch/$VERSION_FILE"
-    "$PYTHON_BIN" - "$url" "$VERSION_VAR" <<'PY'
+    git fetch --quiet origin "$branch"
+    git show "origin/$branch:$VERSION_FILE" | "$PYTHON_BIN" -c '
 import ast
 import sys
-import urllib.request
 
-url = sys.argv[1]
-name = sys.argv[2]
-with urllib.request.urlopen(url, timeout=30) as response:
-    content = response.read().decode("utf-8")
+name = sys.argv[1]
+branch = sys.argv[2]
+version_file = sys.argv[3]
+content = sys.stdin.read()
 tree = ast.parse(content)
 for node in tree.body:
     if isinstance(node, ast.Assign):
@@ -112,8 +112,8 @@ for node in tree.body:
             if isinstance(target, ast.Name) and target.id == name:
                 print(ast.literal_eval(node.value))
                 raise SystemExit(0)
-raise SystemExit(f"{name} not found in remote {url}")
-PY
+raise SystemExit(f"{name} not found in remote origin/{branch}:{version_file}")
+' "$VERSION_VAR" "$branch" "$VERSION_FILE"
 }
 
 version_less_than() {
@@ -193,7 +193,7 @@ monitor_loop() {
     log_info "Starting Glyph auto-update monitor"
     log_info "Repo: $GITHUB_REPO"
     log_info "Branch: $branch"
-    log_info "Current version: $current_version"
+    log_info "Current $VERSION_LABEL: $current_version"
     log_info "Check interval: $CHECK_INTERVAL seconds"
 
     while true; do
@@ -212,10 +212,10 @@ monitor_loop() {
         fi
 
         current_version="$(read_local_version)"
-        log_info "Local version: $current_version; remote version: $latest_version"
+        log_info "Local $VERSION_LABEL: $current_version; remote $VERSION_LABEL: $latest_version"
 
         if version_less_than "$current_version" "$latest_version"; then
-            log_info "New version available: $latest_version"
+            log_info "New $VERSION_LABEL available: $latest_version"
             local backup_path
             backup_path="$(create_backup "$current_version")"
 

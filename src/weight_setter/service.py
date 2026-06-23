@@ -16,6 +16,7 @@ from pathlib import Path
 from core.burn_schedule import derive_burn_seed, is_burn_tempo
 from core.constants import BURN_UID, DEFAULT_NETUID, WINDOW_ANCHOR_BLOCK
 from core.state import load_state
+from core.version import assert_weights_version_matches, local_version_key
 from core.weights import WinnerEntry, compute_weights
 
 
@@ -54,7 +55,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> None:
-    import core
     from chain.chain import BittensorChain, ChainConfig
 
     state = load_state(Path(args.state_dir) / "validator_state.json")
@@ -67,6 +67,8 @@ def run(args: argparse.Namespace) -> None:
             wallet_path=args.wallet_path,
         )
     )
+    version_key = local_version_key()
+    print(f"version key ok: {assert_weights_version_matches(chain)}")
     block = chain.current_block()
     tempo = chain.tempo()
     anchor = (
@@ -92,7 +94,7 @@ def run(args: argparse.Namespace) -> None:
     if args.dry_run:
         print("dry-run: not submitting weights")
         return
-    response = chain.set_weights(uids, weights, version_key=int(core.__version_key__))
+    response = chain.set_weights(uids, weights, version_key=version_key)
     print(f"set_weights response: {response}")
 
 
