@@ -26,6 +26,25 @@ override the URL directly. These are deployment-specific; consensus-critical lau
 (e.g. the burn-window anchor) are committed in `src/core/constants.py` and identical
 network-wide, never per-operator env.
 
+### Validate the live invocation contract
+
+The chute is invoked as `POST {base}/run_stream` with `Authorization: Basic <cpk_...>`; the
+request body is `chute_app.RunStreamRequest` and the reply is a JSON dump of
+`StreamResultModel`. That binding is pinned offline by `tests/test_chute_contract.py` (runs in
+CI, no GPU). After a deploy, confirm it end-to-end on the live instance with the smoke helper,
+which drives the real `ChutesRunner` for both stream shapes:
+
+```bash
+CHUTES_API_KEY=cpk_... python scripts/smoke_chute.py \
+  --repo you/glyph-ref-codec --rev main \
+  --chute-url https://<acct>-glyph-runner.chutes.ai \
+  [--corpus-url https://<host>/corpus.bin]   # also exercises the URL/range path
+```
+
+It downloads the codec from `--repo@--rev` on the GPU worker, runs a small inline round-trip
+(and a URL/range one when `--corpus-url` is given), and exits non-zero unless every round-trip
+is bit-exact. The codec must be published on HuggingFace first (`glyph-miner publish`).
+
 ## Provide a corpus
 
 Run the data oracle (or point at any corpus directory):
