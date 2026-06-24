@@ -7,9 +7,16 @@ hotkey. Commitments are permanent: to submit a different codec, register a new h
 from __future__ import annotations
 
 import argparse
+import secrets
 
 from chain.chain import BittensorChain, ChainConfig
-from core.commitments import CodecCommitment, parse_commitment, serialize_commitment
+from core.commitments import (
+    CodecCommitment,
+    commitment_digest,
+    parse_commitment,
+    serialize_commit_phase,
+    serialize_reveal_phase,
+)
 from core.constants import DEFAULT_MAX_ARTIFACT_BYTES, DEFAULT_NETUID
 from validation.precheck import precheck_codec
 
@@ -43,7 +50,10 @@ def main() -> None:
     args = build_parser().parse_args()
     revision = _resolve_revision(args.model_repo, args.revision)
     commitment = CodecCommitment(repo=args.model_repo, rev=revision)
-    serialized = serialize_commitment(commitment)
+    salt = secrets.token_hex(8)
+    digest = commitment_digest(commitment.repo, commitment.rev, salt)
+    commit_value = serialize_commit_phase(digest)
+    reveal_value = serialize_reveal_phase(commitment.repo, commitment.rev, salt)
 
     if not args.skip_model_check:
         result = precheck_codec(args.model_repo, revision, max_artifact_bytes=args.max_artifact_bytes)
@@ -68,7 +78,7 @@ def main() -> None:
     existing = chain.get_my_commitment()
     if existing:
         try:
-            existing_commitment = parse_commitment(existing)
+            existing_commitment, _ = parse_commitment(existing)
             print(f"hotkey already committed {existing_commitment.repo}@{existing_commitment.rev}")
         except Exception:
             print("hotkey already has non-empty commitment metadata; refusing to overwrite")
@@ -76,7 +86,8 @@ def main() -> None:
 
     print(f"hotkey={chain.hotkey}")
     print(f"netuid={args.netuid}")
-    print(f"commitment={serialized}")
+    print(f"commit phase = {commit_value}")
+    print(f"reveal phase = {reveal_value}")
 
     if args.dry_run:
         print("dry-run: not submitting commitment")
@@ -88,11 +99,22 @@ def main() -> None:
             print("aborted")
             return
 
-    response = chain.set_commitment(serialized)
-    if getattr(response, "success", False):
-        print("commitment submitted")
+    # Two-phase commit-reveal in one shot (exploit vector #9). Phase 1 publishes only the
+    # digest; set_commitment waits for finalization, so phase 2's reveal lands on a later
+    # block. The earliest-commit tie-break keys off the phase-1 block, so a mempool watcher
+    # who only learns repo|rev at reveal time cannot land an earlier commit.
+    print("submitting commit phase (hiding digest)...")
+    commit_response = chain.set_commitment(commit_value)
+    if not getattr(commit_response, "success", True):
+        print(f"commit phase failed, not revealing: {commit_response}")
+        raise SystemExit(1)
+
+    print("commit included; submitting reveal phase...")
+    reveal_response = chain.set_commitment(reveal_value)
+    if getattr(reveal_response, "success", False):
+        print(f"commitment revealed (keep this salt for your records): salt={salt}")
     else:
-        print(f"commitment response: {response}")
+        print(f"reveal response: {reveal_response}  salt={salt}")
 
 
 if __name__ == "__main__":

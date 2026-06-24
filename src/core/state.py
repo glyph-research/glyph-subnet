@@ -58,6 +58,10 @@ class ValidatorState(BaseModel):
     last_round_outputs: list[tuple[str, int, str]] = Field(default_factory=list)
     # One-shot losers: a challenger that did not win is excluded from future rounds.
     excluded_hotkeys: set[str] = Field(default_factory=set)
+    # Commit-phase digests observed on-chain and the block we first saw them at, per hotkey
+    # ({hotkey: {digest: block}}). A two-phase reveal tie-breaks off the commit-phase block
+    # recorded here, defeating commit front-running (exploit vector #9).
+    commit_phase_seen: dict[str, dict[str, int]] = Field(default_factory=dict)
     # Block this validator anchored its burn-window origin to (persisted for stability).
     window_anchor_block: int | None = None
 

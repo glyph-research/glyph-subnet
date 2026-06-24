@@ -122,6 +122,44 @@ def test_apply_precheck_disqualifies_duplicate_hash(monkeypatch):
     assert "duplicate artifact" in second.disqualification_reason
 
 
+# --- commit-reveal tie-break block (exploit vector #9) --------------------------
+
+def _ok_precheck(repo, revision, *, max_artifact_bytes, download=True):
+    return PrecheckResult(repo=repo, revision=revision, ok=True, artifact_hash=repo, artifact_bytes=10)
+
+
+def test_reveal_tie_breaks_off_observed_commit_phase_block(monkeypatch):
+    from core.commitments import commitment_digest
+
+    monkeypatch.setattr("validator.service.precheck_codec", _ok_precheck)
+    salt = "00112233"
+    digest = commitment_digest("a/codec", "abc123", salt)
+    state = ValidatorState()
+    # Validator observed this hotkey's commit-phase digest at block 5.
+    state.commit_phase_seen = {"hotkey-a": {digest: 5}}
+    reveal = ParsedCommitment(
+        "hotkey-a", CodecCommitment(repo="a/codec", rev="abc123"), "raw", salt=salt, digest=digest
+    )
+    # Reveal is processed much later, at block 50.
+    _apply_precheck(state, [reveal], max_artifact_bytes=100, block=50)
+    # commit_block keys off the commit-phase block, not the reveal-observation block.
+    assert state.commitments["hotkey-a:a/codec@abc123"].block == 5
+
+
+def test_reveal_without_observed_commit_phase_falls_back_to_current_block(monkeypatch):
+    from core.commitments import commitment_digest
+
+    monkeypatch.setattr("validator.service.precheck_codec", _ok_precheck)
+    salt = "00112233"
+    digest = commitment_digest("a/codec", "abc123", salt)
+    state = ValidatorState()  # commit phase never observed
+    reveal = ParsedCommitment(
+        "hotkey-a", CodecCommitment(repo="a/codec", rev="abc123"), "raw", salt=salt, digest=digest
+    )
+    _apply_precheck(state, [reveal], max_artifact_bytes=100, block=50)
+    assert state.commitments["hotkey-a:a/codec@abc123"].block == 50
+
+
 # --- temporal burn weights ------------------------------------------------------
 
 def _window_blocks():
