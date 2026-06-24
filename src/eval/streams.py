@@ -1,9 +1,14 @@
 """Beacon-seeded stream sampling (DESIGN §3.2, §5).
 
-Every validator derives the identical paired sample from the same chain-beacon seed, so
-no validator chooses the data. ``derive_seed`` mixes a post-corpus block hash with a
-private validator salt and the round index; ``sample_streams`` turns the seed into a
-deterministic set of long contiguous byte windows over the corpus.
+``derive_seed`` mixes a post-corpus block hash with a per-validator **private salt** and the
+round index; ``sample_streams`` turns the seed into a deterministic set of long contiguous
+byte windows over the corpus.
+
+NOTE: because the salt is per-validator-private, validators currently sample *different*
+windows -- the selection is identical run-to-run for a given validator, but NOT identical
+across validators. Byte-identical-across-validators selection requires deriving from the
+public beacon only; that is the direction of issue #22 (beacon-only per-round corpus +
+window selection), pending owner sign-off on dropping the private salt from the data path.
 """
 
 from __future__ import annotations
