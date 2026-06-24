@@ -16,6 +16,12 @@ DEFAULT_NETUID = 117  # always overridable via --netuid
 COMMITMENT_VERSION = 1
 COMMITMENT_PREFIX = "glyph:"
 COMPACT_COMMITMENT_PREFIX = "g1|"
+# Commit-reveal of the commitment itself (exploit vector #9, front-running). A miner first
+# publishes ``g1c|<sha256(repo|rev|salt)>`` (reveals nothing), then on the next block reveals
+# ``g1r|repo|rev|salt``. The earliest-commit tie-break (DESIGN §3.5) keys off the commit-phase
+# block, so a mempool watcher who only learns repo|rev at reveal time can never commit earlier.
+COMMIT_PHASE_PREFIX = "g1c|"
+REVEAL_PHASE_PREFIX = "g1r|"
 
 # --- Rolling-winner policy (DESIGN §3.5) --------------------------------------
 # current winner / previous winner. Effective split after the temporal burn is

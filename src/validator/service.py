@@ -15,7 +15,7 @@ import traceback
 from pathlib import Path
 
 from chain.chain import BittensorChain, ChainConfig
-from core.commitments import parse_commitments_by_hotkey
+from core.commitments import parse_commit_phase_by_hotkey, parse_commitments_by_hotkey
 from core.constants import (
     BASELINE_LEVEL,
     BURN_UID,
@@ -196,7 +196,15 @@ def _apply_precheck(
                 max_artifact_bytes=max_artifact_bytes,
                 download=full_check,
             )
-        commit_block = existing.block if existing and existing.block is not None else block
+        # Tie-break block: prefer the commit-phase block this reveal opens (front-run-proof),
+        # then a previously recorded block, then the current block (legacy / commit phase missed).
+        seen_digests = state.commit_phase_seen.get(parsed.hotkey, {})
+        if parsed.digest and parsed.digest in seen_digests:
+            commit_block = seen_digests[parsed.digest]
+        elif existing and existing.block is not None:
+            commit_block = existing.block
+        else:
+            commit_block = block
         artifact_hash = result.artifact_hash or (existing.artifact_hash if existing else None)
         entry = CommitmentState(
             hotkey=parsed.hotkey,
@@ -278,7 +286,14 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
     block = chain.current_block()
     if state.window_anchor_block is None:
         state.window_anchor_block = args.window_anchor or block
-    parsed = parse_commitments_by_hotkey(chain.get_all_commitments())
+    raw_commitments = chain.get_all_commitments()
+    # Record commit-phase digests as we see them so a later reveal can tie-break off the
+    # commit-phase block (exploit vector #9). Observing this requires polling during the
+    # commit/reveal window; a validator that only catches the reveal degrades to the
+    # reveal-observation block, which a copier (who must reveal later) still loses to.
+    for hotkey, digest in parse_commit_phase_by_hotkey(raw_commitments).items():
+        state.commit_phase_seen.setdefault(hotkey, {}).setdefault(digest, block)
+    parsed = parse_commitments_by_hotkey(raw_commitments)
     only = set(getattr(args, "only_hotkeys", []) or [])
     if only:
         parsed = [p for p in parsed if p.hotkey in only]
