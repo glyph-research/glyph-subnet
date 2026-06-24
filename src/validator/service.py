@@ -15,10 +15,16 @@ import traceback
 from pathlib import Path
 
 from chain.chain import BittensorChain, ChainConfig
-from core.commitments import parse_commit_phase_by_hotkey, parse_commitments_by_hotkey
+from core.commitments import (
+    parse_commit_phase_by_hotkey,
+    parse_commitments_by_hotkey,
+    prune_commit_phase_seen,
+)
 from core.constants import (
     BASELINE_LEVEL,
     BURN_UID,
+    COMMIT_PHASE_MAX_AGE_BLOCKS,
+    COMMIT_POLL_INTERVAL_SECS,
     COMPRESS_BUDGET_SECS,
     DEFAULT_MAX_ARTIFACT_BYTES,
     DEFAULT_NETUID,
@@ -97,6 +103,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--window-anchor", type=int, default=WINDOW_ANCHOR_BLOCK)
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--sleep", type=int, default=1200)
+    parser.add_argument(
+        "--commit-poll-interval",
+        type=int,
+        default=COMMIT_POLL_INTERVAL_SECS,
+        help="Seconds between lightweight commitment polls between full rounds, so commit-phase "
+        "blocks are observed before their next-block reveal (exploit vector #9).",
+    )
+    parser.add_argument(
+        "--commit-phase-max-age",
+        type=int,
+        default=COMMIT_PHASE_MAX_AGE_BLOCKS,
+        help="Prune commit-phase digests with no matching reveal after this many blocks.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Do not submit weights")
     parser.add_argument("--offline-demo", action="store_true")
     parser.add_argument(
@@ -201,6 +220,10 @@ def _apply_precheck(
         seen_digests = state.commit_phase_seen.get(parsed.hotkey, {})
         if parsed.digest and parsed.digest in seen_digests:
             commit_block = seen_digests[parsed.digest]
+            # Reveal resolved -> drop the commit-phase record so the map stays bounded (#21).
+            del seen_digests[parsed.digest]
+            if not seen_digests:
+                state.commit_phase_seen.pop(parsed.hotkey, None)
         elif existing and existing.block is not None:
             commit_block = existing.block
         else:
@@ -293,6 +316,9 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
     # reveal-observation block, which a copier (who must reveal later) still loses to.
     for hotkey, digest in parse_commit_phase_by_hotkey(raw_commitments).items():
         state.commit_phase_seen.setdefault(hotkey, {}).setdefault(digest, block)
+    prune_commit_phase_seen(
+        state.commit_phase_seen, block, getattr(args, "commit_phase_max_age", COMMIT_PHASE_MAX_AGE_BLOCKS)
+    )
     parsed = parse_commitments_by_hotkey(raw_commitments)
     only = set(getattr(args, "only_hotkeys", []) or [])
     if only:
@@ -439,6 +465,40 @@ def run_offline_demo(args: argparse.Namespace) -> None:
         print(f"  tempo {tempo_idx} (block {block}): burn={burn} weights={nonzero}")
 
 
+def poll_commit_phase(args: argparse.Namespace, chain: BittensorChain) -> int:
+    """Lightweight commitment poll: record new commit-phase digests, prune stale ones.
+
+    Run between full rounds at ~block cadence (full eval rounds are far too slow to catch
+    the ~1-block commit->reveal window) so a reveal tie-breaks off its true commit-phase
+    block (#21, exploit vector #9). Returns the count of newly recorded digests.
+    """
+
+    state_path = Path(args.state_dir) / "validator_state.json"
+    state = load_state(state_path)
+    block = chain.current_block()
+    new = 0
+    for hotkey, digest in parse_commit_phase_by_hotkey(chain.get_all_commitments()).items():
+        seen = state.commit_phase_seen.setdefault(hotkey, {})
+        if digest not in seen:
+            seen[digest] = block
+            new += 1
+    prune_commit_phase_seen(state.commit_phase_seen, block, args.commit_phase_max_age)
+    save_state(state_path, state)
+    return new
+
+
+def _sleep_with_commit_polls(args: argparse.Namespace, chain: BittensorChain) -> None:
+    """Wait ~``args.sleep`` until the next full round, polling commit phases each block."""
+
+    end = time.time() + args.sleep
+    while time.time() < end:
+        time.sleep(max(1, min(args.commit_poll_interval, end - time.time())))
+        try:
+            poll_commit_phase(args, chain)
+        except Exception:
+            traceback.print_exc()
+
+
 def main() -> None:
     from core.dotenv import load_dotenv
 
@@ -447,6 +507,7 @@ def main() -> None:
     if args.offline_demo:
         run_offline_demo(args)
         return
+    poll_chain = None
     while True:
         try:
             run_once(args)
@@ -456,7 +517,11 @@ def main() -> None:
             traceback.print_exc()
         if not args.loop:
             break
-        time.sleep(args.sleep)
+        # Use the inter-round wait to poll commitments at block cadence so commit-phase
+        # blocks are captured before their reveal (instead of idling for --sleep).
+        if poll_chain is None:
+            poll_chain = _make_chain(args)
+        _sleep_with_commit_polls(args, poll_chain)
 
 
 if __name__ == "__main__":

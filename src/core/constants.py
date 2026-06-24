@@ -22,6 +22,15 @@ COMPACT_COMMITMENT_PREFIX = "g1|"
 # block, so a mempool watcher who only learns repo|rev at reveal time can never commit earlier.
 COMMIT_PHASE_PREFIX = "g1c|"
 REVEAL_PHASE_PREFIX = "g1r|"
+# Commit-reveal polling/pruning (exploit vector #9 follow-ups, issue #21).
+# A reveal lands ~1 block after its commit, so validators must observe commitments at
+# roughly block cadence to capture the commit-phase block (full eval rounds are far too
+# slow). One finney block is ~12s.
+COMMIT_POLL_INTERVAL_SECS = 12
+# A commit-phase digest only needs to survive until this validator processes its reveal.
+# After this many blocks with no matching reveal the commit is treated as abandoned and
+# pruned, so persisted ``commit_phase_seen`` stays bounded. ~300 blocks ≈ 1h of slack.
+COMMIT_PHASE_MAX_AGE_BLOCKS = 300
 
 # --- Rolling-winner policy (DESIGN §3.5) --------------------------------------
 # current winner / previous winner. Effective split after the temporal burn is
