@@ -144,6 +144,8 @@ def test_reveal_tie_breaks_off_observed_commit_phase_block(monkeypatch):
     _apply_precheck(state, [reveal], max_artifact_bytes=100, block=50)
     # commit_block keys off the commit-phase block, not the reveal-observation block.
     assert state.commitments["hotkey-a:a/codec@abc123"].block == 5
+    # Reveal resolved -> the commit-phase digest is dropped so the map stays bounded (#21).
+    assert "hotkey-a" not in state.commit_phase_seen
 
 
 def test_reveal_without_observed_commit_phase_falls_back_to_current_block(monkeypatch):

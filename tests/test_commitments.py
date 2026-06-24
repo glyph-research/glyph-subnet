@@ -74,3 +74,29 @@ def test_repo_and_rev_reject_pipe_to_keep_wire_format_unambiguous():
         CodecCommitment(repo="a|b/c", rev="abc123")
     with pytest.raises(ValueError):
         CodecCommitment(repo="a/b", rev="ab|c123")
+
+
+def test_prune_returns_removed_count_and_drops_empty_hotkeys():
+    from core.commitments import prune_commit_phase_seen
+
+    seen = {"a": {"d1": 0, "d2": 10}, "b": {"d3": 0}}
+    removed = prune_commit_phase_seen(seen, current_block=12, max_age_blocks=5)
+    # d1 (block 0) and d3 (block 0) are >5 blocks old -> pruned; d2 (block 10, age 2) survives.
+    assert removed == 2
+    assert seen == {"a": {"d2": 10}}
+    assert "b" not in seen  # empty hotkey entry removed
+
+
+def test_commit_phase_seen_stays_bounded_across_many_rounds():
+    from core.commitments import prune_commit_phase_seen
+
+    seen: dict[str, dict[str, int]] = {}
+    # 200 rounds, each one block apart, each adding a never-revealed commit-phase digest.
+    for blk in range(200):
+        seen.setdefault(f"hk{blk}", {})[f"d{blk}"] = blk
+        prune_commit_phase_seen(seen, current_block=blk, max_age_blocks=5)
+    total = sum(len(v) for v in seen.values())
+    # Without pruning this would be 200; bounded to roughly the max-age window instead.
+    assert total <= 6
+    assert all(digests for digests in seen.values())  # no empty hotkey dicts linger
+    assert "hk0" not in seen

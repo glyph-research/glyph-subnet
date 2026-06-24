@@ -143,6 +143,28 @@ def parse_commitment(raw: str) -> tuple[CodecCommitment, str | None]:
     return commitment, None
 
 
+def prune_commit_phase_seen(
+    seen: dict[str, dict[str, int]], current_block: int, max_age_blocks: int
+) -> int:
+    """Drop commit-phase digests older than ``max_age_blocks`` and empty hotkey entries.
+
+    Bounds the persisted ``commit_phase_seen`` map: a digest whose reveal never arrives
+    (abandoned commit) is aged out, and resolved digests are removed by the validator when
+    it matches a reveal. Returns the number of digests removed.
+    """
+
+    removed = 0
+    for hotkey in list(seen):
+        digests = seen[hotkey]
+        for digest in list(digests):
+            if current_block - digests[digest] > max_age_blocks:
+                del digests[digest]
+                removed += 1
+        if not digests:
+            del seen[hotkey]
+    return removed
+
+
 def parse_commit_phase_by_hotkey(raw_commitments: dict[str, str]) -> dict[str, str]:
     """Map hotkey -> commit-phase digest for hotkeys currently in the commit phase."""
 
