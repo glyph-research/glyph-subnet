@@ -18,6 +18,8 @@ dependencies = [
 [project.optional-dependencies]
 # The Chutes SDK is only needed to deploy/run the serverless evaluation chute.
 chutes = ["chutes>=0.2.0"]
+# `datasets` is only needed by the owner-run oracle to build the mixed corpus.
+oracle = ["datasets>=2.19.0"]
 dev = ["pytest>=8.0.0", "ruff>=0.5.0", "pre-commit>=3.7.0"]
 
 [project.scripts]
