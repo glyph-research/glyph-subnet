@@ -70,6 +70,22 @@ def select_index(seed: bytes, count: int) -> int:
     return int.from_bytes(seed, "big") % count
 
 
+def position_keys(seed: bytes) -> tuple[int, int, int]:
+    """Raw 64-bit (file_key, row_group_key, offset_key) from a chunk seed.
+
+    The provider applies ``% count`` as each count becomes known (the row-group count depends on
+    which file was picked), so picking the file and the row-group can happen in stages while
+    staying deterministic in ``seed``.
+    """
+
+    h = hashlib.sha256(seed).digest()
+    return (
+        int.from_bytes(h[0:8], "big"),
+        int.from_bytes(h[8:16], "big"),
+        int.from_bytes(h[16:24], "big"),
+    )
+
+
 def resolve_position(seed: bytes, num_files: int, num_row_groups: int) -> tuple[int, int, int]:
     """Map a chunk seed to a concrete (file_index, row_group_index, offset_key).
 
@@ -80,11 +96,8 @@ def resolve_position(seed: bytes, num_files: int, num_row_groups: int) -> tuple[
 
     if num_files <= 0 or num_row_groups <= 0:
         raise ValueError("num_files and num_row_groups must be positive")
-    h = hashlib.sha256(seed).digest()
-    file_index = int.from_bytes(h[0:8], "big") % num_files
-    row_group_index = int.from_bytes(h[8:16], "big") % num_row_groups
-    offset_key = int.from_bytes(h[16:24], "big")
-    return file_index, row_group_index, offset_key
+    file_key, row_group_key, offset_key = position_keys(seed)
+    return file_key % num_files, row_group_key % num_row_groups, offset_key
 
 
 def derive_round_corpus(beacon: str, spec: tuple[SourceSpec, ...] = SOURCE_SPEC) -> list[ChunkLocator]:
