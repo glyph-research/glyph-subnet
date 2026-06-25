@@ -124,6 +124,14 @@ def _subprocess_env(home: Path) -> dict[str, str]:
     env["XDG_CACHE_HOME"] = str(home / ".cache")
     env["TMPDIR"] = str(home)
     env["NO_PROXY"] = "*"
+    # Force the HF/transformers stack fully offline so a neural codec can only load weights
+    # bundled in its already-snapshot_download'd + prechecked artifact dir -- never a runtime
+    # download. Defense-in-depth with the `unshare --net` isolation: every model byte is forced
+    # through the trusted prep boundary (where it is hashed/prechecked), and an attempted
+    # download fails immediately instead of hanging until the wall-clock timeout.
+    env["HF_HUB_OFFLINE"] = "1"
+    env["TRANSFORMERS_OFFLINE"] = "1"
+    env["HF_DATASETS_OFFLINE"] = "1"
     return env
 
 
@@ -222,6 +230,12 @@ class LocalSubprocessRunner:
         )
 
     def _exec(self, argv: list[str], cwd: Path, caps: ResourceCaps, *, home: Path) -> float:
+        # Security invariant: untrusted codec code only ever runs HERE, and it runs with the
+        # network dropped (`unshare --net`) while the corpus stream is present. All trusted prep
+        # that needs the network (snapshot_download of the artifact + weights, corpus fetch) runs
+        # BEFORE this and executes no untrusted code. So even arbitrary code / malicious weights /
+        # malicious deps cannot exfiltrate: the data is only present when there is no network, and
+        # `_subprocess_env` also pins the HF stack offline as a second layer.
         wrapped = argv
         if self.strict_sandbox and not caps.network:
             if shutil.which("unshare"):
