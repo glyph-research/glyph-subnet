@@ -23,6 +23,7 @@ simply carry no front-running protection and tie-break on first observation).
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field, field_validator
@@ -134,8 +135,6 @@ def parse_commitment(raw: str) -> tuple[CodecCommitment, str | None]:
         return CodecCommitment(repo=repo, rev=revision), None
     if data.startswith(COMMITMENT_PREFIX):
         data = data[len(COMMITMENT_PREFIX) :]
-    import json
-
     payload = json.loads(data)
     commitment = CodecCommitment.model_validate(payload)
     if commitment.v != COMMITMENT_VERSION:

@@ -75,7 +75,7 @@ def run_round(
         runner, artifacts, provider, stream_specs, caps=caps, floor_bps=floor_bps, budget_secs=budget_secs
     )
 
-    # Record scores; refresh the incumbent's ratio on this round's fresh streams.
+    # Re-score every codec on this round's fresh streams (also refreshes the incumbent's ratio).
     for hotkey, outcome in outcomes.items():
         commitment = next((c for c in state.commitments.values() if c.hotkey == hotkey and c.valid), None)
         if commitment is None:
@@ -102,7 +102,6 @@ def run_round(
             # Incumbent failed its own re-evaluation -> vacate, hot standby promotes later.
             print(f"incumbent {incumbent_commitment.hotkey} failed re-eval: {inc_outcome.score.reasons}")
 
-    # Rank valid challengers best-first (lowest ratio, earliest commit).
     ranked = sorted(
         (c for c in challengers if outcomes.get(c.hotkey) and outcomes[c.hotkey].score.valid),
         key=lambda c: rank_key(state.scores[c.key].as_winner()),

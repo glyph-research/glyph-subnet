@@ -13,7 +13,6 @@ A ``CodecRunner`` runs one stream's full round-trip -- compress then decompress 
 
 from __future__ import annotations
 
-import hashlib
 import os
 import shutil
 import subprocess
@@ -30,6 +29,7 @@ from core.constants import (
     RAM_CAP_BYTES,
     VRAM_CAP_BYTES,
 )
+from core.hashing import sha256_file
 from eval.scoring import StreamResult
 from eval.streams import RangeSource
 
@@ -103,14 +103,6 @@ class CodecRunner(Protocol):
     ) -> StreamResult: ...
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 _SUBPROCESS_ENV_ALLOWLIST = {
     "CUDA_VISIBLE_DEVICES",
     "GLYPH_TS_ZIP_DEVICE",
@@ -164,7 +156,7 @@ class LocalSubprocessRunner:
             stream_file = tmp_dir / "stream.bin"
             blob_file = tmp_dir / "blob.bin"
             stream_file.write_bytes(data)
-            source_hash = _sha256_file(stream_file)
+            source_hash = sha256_file(stream_file)
             argv = resolve_argv(manifest.entrypoints.compress, stream_file, blob_file)
             secs = self._exec(argv, artifact_dir, caps, home=tmp_dir)
             if not blob_file.exists():
@@ -174,7 +166,7 @@ class LocalSubprocessRunner:
                 blob=blob,
                 compressed_bytes=len(blob),
                 compress_secs=secs,
-                blob_hash=_sha256_file(blob_file),
+                blob_hash=sha256_file(blob_file),
                 source_hash=source_hash,
                 raw_bytes=len(data),
             )
@@ -203,7 +195,7 @@ class LocalSubprocessRunner:
             if not roundtrip_file.exists():
                 raise RunnerError("decompress produced no output")
             return DecompressOutcome(
-                output_hash=_sha256_file(roundtrip_file),
+                output_hash=sha256_file(roundtrip_file),
                 decompress_secs=secs,
                 raw_bytes=roundtrip_file.stat().st_size,
             )

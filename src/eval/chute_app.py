@@ -26,6 +26,7 @@ live split round-trip. The boundaries stay isolated here and in ``runner_chutes.
 from __future__ import annotations
 
 import base64
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -108,7 +109,7 @@ def _materialize(src: StreamSource) -> bytes:
     raise ValueError("stream source needs inline_b64 or url")
 
 
-def _prepare_artifact(spec: ArtifactSpec):
+def _prepare_artifact(spec: ArtifactSpec) -> tuple[str, str]:
     """snapshot_download + re-precheck + hash check on the worker. Returns (local_path, digest).
 
     Raises ``ValueError`` (with the precheck/hash reason) so the cord can report it as a failed
@@ -194,7 +195,7 @@ def _decompress(req: DecompressRequest) -> DecompressResultModel:
     )
 
 
-def build_image():
+def build_image() -> "Image":
     if Image is None:
         raise RuntimeError("chutes SDK is not installed; `pip install chutes`")
     return (
@@ -233,9 +234,9 @@ def build_compressor_chute():
     chute = _build_chute(CHUTE_COMPRESSOR_NAME)
 
     @chute.cord(public_api_path="/compress", method="POST")
-    async def compress(self, req: CompressRequest) -> dict:  # noqa: ANN001
-        # Blocking work off the event loop; return a plain JSON dict (a pydantic model trips
-        # the serializer and surfaces as a misleading 500 "No infrastructure available").
+    async def compress(self, req: CompressRequest) -> dict[str, Any]:  # noqa: ANN001
+        # Return a plain JSON dict: a pydantic model trips the serializer and surfaces as a
+        # misleading 500 "No infrastructure available".
         import asyncio
 
         result = await asyncio.to_thread(_compress, req)
@@ -250,7 +251,7 @@ def build_decompressor_chute():
     chute = _build_chute(CHUTE_DECOMPRESSOR_NAME)
 
     @chute.cord(public_api_path="/decompress", method="POST")
-    async def decompress(self, req: DecompressRequest) -> dict:  # noqa: ANN001
+    async def decompress(self, req: DecompressRequest) -> dict[str, Any]:  # noqa: ANN001
         import asyncio
 
         result = await asyncio.to_thread(_decompress, req)
