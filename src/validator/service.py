@@ -13,6 +13,7 @@ import os
 import time
 import traceback
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from chain.chain import BittensorChain, ChainConfig
 from core.commitments import (
@@ -47,15 +48,16 @@ from validation.precheck import precheck_artifact_dir, precheck_codec
 from reign_worker.service import run_round
 from weight_setter.service import decide_weights
 
+if TYPE_CHECKING:
+    from eval.runner_chutes import ChutesRunner
+
 __all__ = ["build_parser", "run_once", "run_reign_only", "run_offline_demo", "decide_weights", "main"]
 
 DEFAULT_MIXED_CORPUS_DIR = "/tmp/glyph_mixed_8x2mb"
 MIXED_CORPUS_ENV = "GLYPH_MIXED_CORPUS_DIR"
 
 
-# --------------------------------------------------------------------------------------
 # Argument parsing
-# --------------------------------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -153,9 +155,7 @@ def _parse_local_artifacts(args) -> dict[str, str]:
     return mapping
 
 
-# --------------------------------------------------------------------------------------
 # Small, testable helpers
-# --------------------------------------------------------------------------------------
 
 
 def _load_salt(state_dir: Path, salt_file: str | None) -> str:
@@ -253,7 +253,7 @@ def _apply_precheck(
     state.duplicate_hash_owner = valid_hash_owner
 
 
-def _make_runner(args) -> object:
+def _make_runner(args) -> "LocalSubprocessRunner | ChutesRunner":
     if args.runner == "local":
         return LocalSubprocessRunner()
     from eval.runner_chutes import ChutesRunner
@@ -283,7 +283,7 @@ def _resolve_corpus_dir(corpus_dir: str | None) -> Path:
     return path
 
 
-def _make_provider(args):
+def _make_provider(args) -> StaticLocalProvider:
     path = _resolve_corpus_dir(args.corpus_dir)
     provider = StaticLocalProvider(path, base_url=getattr(args, "corpus_url", None))
     if provider.total_bytes <= 0:
@@ -351,9 +351,7 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
     return block
 
 
-# --------------------------------------------------------------------------------------
 # Production paths (require chain access)
-# --------------------------------------------------------------------------------------
 
 
 def run_once(args: argparse.Namespace) -> None:
@@ -405,9 +403,7 @@ def run_reign_only(args: argparse.Namespace) -> None:
     print(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in state.winner_history]}")
 
 
-# --------------------------------------------------------------------------------------
 # Offline M0 demo (no chain): eval -> score -> king-of-the-hill -> weights end to end
-# --------------------------------------------------------------------------------------
 
 
 def run_offline_demo(args: argparse.Namespace) -> None:
@@ -517,8 +513,8 @@ def main() -> None:
             traceback.print_exc()
         if not args.loop:
             break
-        # Use the inter-round wait to poll commitments at block cadence so commit-phase
-        # blocks are captured before their reveal (instead of idling for --sleep).
+        # Poll at block cadence between rounds so a reveal's commit-phase block is captured
+        # rather than degrading to the reveal-observation block (exploit vector #9).
         if poll_chain is None:
             poll_chain = _make_chain(args)
         _sleep_with_commit_polls(args, poll_chain)

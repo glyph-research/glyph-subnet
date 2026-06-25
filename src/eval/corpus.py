@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from core.hashing import sha256_file
 from eval.streams import RangeSource, StreamSpec
 
 
@@ -54,14 +55,6 @@ class CorpusProvider(Protocol):
     def stream_source(self, spec: StreamSpec) -> RangeSource | None: ...
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 class StaticLocalProvider:
     """Treat the files under ``directory`` (sorted) as one concatenated corpus.
 
@@ -72,11 +65,9 @@ class StaticLocalProvider:
     RESERVED = {"manifest.json", "provenance.json"}
 
     def __init__(self, directory: str | Path, *, base_url: str | None = None):
-        # base_url, when set, is the public location where the *same* concatenated corpus is
-        # served as one contiguous blob (chunk order == sorted manifest order). It enables the
-        # production Chutes path: the runner range-fetches the URL instead of the validator
-        # inlining bytes. Left None (tests/M0), the provider has no remote source and callers
-        # fall back to inlining materialized bytes.
+        # base_url: public location serving the *same* corpus as one contiguous blob (chunk
+        # order == sorted manifest order), so the Chutes runner range-fetches it instead of the
+        # validator inlining bytes. None (tests/M0) -> callers fall back to inlining.
         self.base_url = base_url
         self.directory = Path(directory)
         files = [
@@ -99,7 +90,7 @@ class StaticLocalProvider:
 
     def manifest(self) -> CorpusManifest:
         chunks = [
-            ChunkRef(id=path.relative_to(self.directory).as_posix(), size=size, hash=_sha256_file(path))
+            ChunkRef(id=path.relative_to(self.directory).as_posix(), size=size, hash=sha256_file(path))
             for _, size, path in self._index
         ]
         return CorpusManifest(version=1, total_bytes=self._total, chunks=chunks)

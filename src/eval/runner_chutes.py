@@ -8,6 +8,9 @@ raw input and read it back to fake the ratio (exploit-prevention #14). Auth uses
 API key. Bit-exactness is gated on the decompress worker's output hash matching the hash the
 validator computed from the trusted corpus (``StreamInput.expected_sha256``), never a
 worker's self-report.
+
+Confirmed live invocation contract: auth ``Authorization: Basic <cpk_...>``; a cord returns a
+JSON dict.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import base64
 import os
 from pathlib import Path
+from typing import Any
 
 import requests
 
@@ -27,9 +31,8 @@ from core.constants import (
 from eval.runner import ArtifactRef, ResourceCaps, RunnerError, StreamInput
 from eval.scoring import StreamResult
 
-# Confirmed live invocation contract (auth Authorization: Basic <cpk_...>; a cord returns a
-# JSON dict). Override per deployment via --compress-chute-url / --decompress-chute-url or
-# GLYPH_COMPRESS_CHUTE_URL / GLYPH_DECOMPRESS_CHUTE_URL.
+# Override the deployed chute URLs per deployment via --compress-chute-url / --decompress-chute-url
+# or GLYPH_COMPRESS_CHUTE_URL / GLYPH_DECOMPRESS_CHUTE_URL.
 DEFAULT_COMPRESS_URL = f"https://{CHUTE_USERNAME}-{CHUTE_COMPRESSOR_NAME}.chutes.ai"
 DEFAULT_DECOMPRESS_URL = f"https://{CHUTE_USERNAME}-{CHUTE_DECOMPRESSOR_NAME}.chutes.ai"
 
@@ -83,7 +86,7 @@ class ChutesRunner:
         self.api_key = _load_api_key(key_file)
 
     @staticmethod
-    def _stream_payload(stream: StreamInput) -> dict:
+    def _stream_payload(stream: StreamInput) -> dict[str, Any]:
         """The compress request's stream shape: range-fetched URL (production) or inline bytes."""
 
         if stream.source is not None:
@@ -101,7 +104,7 @@ class ChutesRunner:
         raise RunnerError("stream has neither inline data nor a remote source")
 
     @staticmethod
-    def _artifact_payload(artifact: ArtifactRef) -> dict:
+    def _artifact_payload(artifact: ArtifactRef) -> dict[str, Any]:
         return {"repo": artifact.repo, "rev": artifact.rev, "sha256": artifact.sha256}
 
     @classmethod
