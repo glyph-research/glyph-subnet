@@ -7,9 +7,9 @@ cannot stash the raw bytes during compress and read them back during decompress 
 ratio (exploit-prevention #14). Both pin the reference GPU SKU via ``NodeSelector.include``
 so every validator measures identical compressed bytes.
 
-Deploy both (separately):
-  chutes deploy eval.chute_app:compressor_chute   --accept-fee
-  chutes deploy eval.chute_app:decompressor_chute --accept-fee
+Deploy both via the wrapper (chutes >=0.6 rejects dotted refs and loads a chute from
+<cwd>/<module>.py, so the wrapper sets up a flat-ref `chute_app:...` load context):
+  glyph-deploy-chute --build --deploy --public --accept-fee
 
 Invocation contract (validated against the live Chutes API):
 - ``POST {base}/compress``   with ``Authorization: Basic <cpk_...>`` -> ``CompressRequest`` /
@@ -199,9 +199,15 @@ def build_image() -> "Image":
     if Image is None:
         raise RuntimeError("chutes SDK is not installed; `pip install chutes`")
     return (
-        Image(username=CHUTE_USERNAME, name=CHUTE_NAME, tag="0.1")
+        Image(
+            username=CHUTE_USERNAME,
+            name=CHUTE_NAME,
+            tag="0.1",
+            readme="Glyph eval chute: sandboxed compressor/decompressor runner for the subnet.",
+        )
         .from_base("parachutes/python:3.12")
-        .apt_install("zstd")
+        # No apt_install: the Chutes image build runs non-root (apt-get can't take the dpkg
+        # lock). The eval needs only the `zstandard` Python package, not the system zstd binary.
         .run_command("pip install zstandard huggingface_hub requests 'pydantic>=2.8'")
         .add("src", "/app/src")  # copies all service packages; run `chutes build` from repo root
         .set_workdir("/app")
@@ -233,7 +239,7 @@ def _build_chute(name: str):
 
 
 def build_compressor_chute():
-    """The compress-only chute. Deploy: chutes deploy eval.chute_app:compressor_chute --accept-fee"""
+    """The compress-only chute. Deploy via `glyph-deploy-chute --build --deploy`."""
 
     chute = _build_chute(CHUTE_COMPRESSOR_NAME)
 
@@ -250,7 +256,7 @@ def build_compressor_chute():
 
 
 def build_decompressor_chute():
-    """The decompress-only chute. Deploy: chutes deploy eval.chute_app:decompressor_chute --accept-fee"""
+    """The decompress-only chute. Deploy via `glyph-deploy-chute --build --deploy`."""
 
     chute = _build_chute(CHUTE_DECOMPRESSOR_NAME)
 
@@ -264,7 +270,7 @@ def build_decompressor_chute():
     return chute
 
 
-# Module-level handles for `chutes deploy eval.chute_app:compressor_chute` /
+# Module-level handles loaded via the flat `chute_app:compressor_chute` /
 # `:decompressor_chute`. Built lazily-safe: importing this module must never fail (e.g. when
 # the build context / cwd is not the repo root). Deploy both as SEPARATE chutes so compress
 # and decompress run in separate containers (exploit-prevention #14).
