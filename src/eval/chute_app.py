@@ -206,7 +206,8 @@ def build_image() -> "Image":
             readme="Glyph eval chute: sandboxed compressor/decompressor runner for the subnet.",
         )
         .from_base("parachutes/python:3.12")
-        .apt_install("zstd")
+        # No apt_install: the Chutes image build runs non-root (apt-get can't take the dpkg
+        # lock). The eval needs only the `zstandard` Python package, not the system zstd binary.
         .run_command("pip install zstandard huggingface_hub requests 'pydantic>=2.8'")
         .add("src", "/app/src")  # copies all service packages; run `chutes build` from repo root
         .set_workdir("/app")
