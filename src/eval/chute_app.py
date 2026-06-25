@@ -231,10 +231,17 @@ def _build_chute(name: str):
         # rejected ("Only TEE chutes are supported"). TEE also gives the attestation that the
         # reference SKU / image actually ran, reinforcing same-system determinism.
         tee=True,
-        # Capacity gating on the invocation gateway is concurrency * max_instances; the default
-        # 1*1 429s on one in-flight request, so give headroom. (REFERENCE_SKU must equal the SKU
-        # the subnet mandates -- an integrated SN64 subnet forces include=['pro_6000'].)
-        concurrency=4,
+        # Keep a warmed instance alive 1h past its last request. Without this the chute inherits
+        # the platform default (~5 min idle) and goes cold between sporadic eval invocations, so
+        # the next validator round hits a cold start and the gateway 500s/429s ("no infrastructure
+        # available") until an instance re-warms. 3600s comfortably bridges normal round gaps
+        # without holding the GPU indefinitely when validation is idle.
+        shutdown_after_seconds=3600,
+        # Invocation-gateway capacity is concurrency * max_instances; too low and concurrent
+        # validator dispatches 429. 16 gives headroom for bursty multi-stream rounds. (The codec
+        # subprocess still enforces the per-run VRAM/RAM caps, so concurrency is a dispatch limit,
+        # not a resource override.)
+        concurrency=16,
     )
 
 
