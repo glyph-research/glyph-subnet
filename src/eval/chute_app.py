@@ -221,6 +221,10 @@ def _build_chute(name: str):
             min_vram_gb_per_gpu=REFERENCE_MIN_VRAM_GB,
             include=[REFERENCE_SKU],  # reference-SKU pin: identical bytes across validators
         ),
+        # Chutes mandates confidential (TEE) execution as of 2026-05-12 -- non-TEE deploys are
+        # rejected ("Only TEE chutes are supported"). TEE also gives the attestation that the
+        # reference SKU / image actually ran, reinforcing same-system determinism.
+        tee=True,
         # Capacity gating on the invocation gateway is concurrency * max_instances; the default
         # 1*1 429s on one in-flight request, so give headroom. (REFERENCE_SKU must equal the SKU
         # the subnet mandates -- an integrated SN64 subnet forces include=['pro_6000'].)
