@@ -120,7 +120,14 @@ def _prepare_artifact(spec: ArtifactSpec) -> tuple[str, str]:
 
     from validation.precheck import precheck_artifact_dir
 
-    local = snapshot_download(repo_id=spec.repo, revision=spec.rev)
+    # Convert any fetch failure (network unreachable, missing repo/rev, auth) into a ValueError so
+    # the cord returns it as a failed-stream error field instead of letting an unhandled exception
+    # bubble up through the ASGI handler -- an unhandled raise here 500s the request AND degrades
+    # the worker, after which the gateway 429s further invocations ("no infrastructure").
+    try:
+        local = snapshot_download(repo_id=spec.repo, revision=spec.rev)
+    except Exception as exc:  # noqa: BLE001 - any download failure is a failed stream, not a crash
+        raise ValueError(f"artifact fetch failed for {spec.repo}@{spec.rev}: {exc}") from exc
     precheck = precheck_artifact_dir(local, spec.repo, spec.rev)
     digest = precheck.artifact_hash
     if not precheck.ok:
@@ -225,12 +232,22 @@ def _build_chute(name: str):
         # rejected ("Only TEE chutes are supported"). TEE also gives the attestation that the
         # reference SKU / image actually ran, reinforcing same-system determinism.
         tee=True,
-        # Keep a warmed instance alive 1h past its last request. Without this the chute inherits
+        # Allow outbound network from the container. The cord's trusted prep
+        # (`_prepare_artifact` -> huggingface_hub.snapshot_download) must reach HuggingFace to
+        # fetch the miner's codec at request time; without this the aegis TEE netnanny blocks all
+        # egress ("BLOCKING non-localhost connection ... Network is unreachable"), snapshot_download
+        # raises LocalEntryNotFoundError, and the cord 500s (degrading the worker so follow-up
+        # invocations 429). Exfiltration is still prevented because the UNTRUSTED codec subprocess
+        # runs under `unshare --net` (LocalSubprocessRunner require_network_isolation=True, which
+        # fails closed): only the trusted, no-untrusted-code prep path uses the network, and it runs
+        # before any stream bytes are handed to the codec. See eval/runner.py `_exec`.
+        allow_external_egress=True,
+        # Keep a warmed instance alive ~2.7h past its last request. Without this the chute inherits
         # the platform default (~5 min idle) and goes cold between sporadic eval invocations, so
         # the next validator round hits a cold start and the gateway 500s/429s ("no infrastructure
-        # available") until an instance re-warms. 3600s comfortably bridges normal round gaps
+        # available") until an instance re-warms. 9600s comfortably bridges normal round gaps
         # without holding the GPU indefinitely when validation is idle.
-        shutdown_after_seconds=3600,
+        shutdown_after_seconds=9600,
         # Invocation-gateway capacity is concurrency * max_instances; too low and concurrent
         # validator dispatches 429. 16 gives headroom for bursty multi-stream rounds. (The codec
         # subprocess still enforces the per-run VRAM/RAM caps, so concurrency is a dispatch limit,
