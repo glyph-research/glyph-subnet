@@ -199,7 +199,12 @@ def build_image() -> "Image":
     if Image is None:
         raise RuntimeError("chutes SDK is not installed; `pip install chutes`")
     return (
-        Image(username=CHUTE_USERNAME, name=CHUTE_NAME, tag="0.1")
+        Image(
+            username=CHUTE_USERNAME,
+            name=CHUTE_NAME,
+            tag="0.1",
+            readme="Glyph eval chute: sandboxed compressor/decompressor runner for the subnet.",
+        )
         .from_base("parachutes/python:3.12")
         .apt_install("zstd")
         .run_command("pip install zstandard huggingface_hub requests 'pydantic>=2.8'")
