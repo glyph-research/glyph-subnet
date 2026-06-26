@@ -262,13 +262,17 @@ def build_compressor_chute():
     chute = _build_chute(CHUTE_COMPRESSOR_NAME)
 
     @chute.cord(public_api_path="/compress", method="POST")
-    async def compress(self, req: CompressRequest) -> dict[str, Any]:  # noqa: ANN001
-        # Return a plain JSON dict: a pydantic model trips the serializer and surfaces as a
-        # misleading 500 "No infrastructure available".
-        import asyncio
-
-        result = await asyncio.to_thread(_compress, req)
-        return result.model_dump()
+    def compress(self, req: CompressRequest) -> dict[str, Any]:  # noqa: ANN001
+        # Plain SYNC cord. Chutes already runs every cord in its own worker thread pool
+        # (cord.py `_run_in_thread` -> `_user_code_executor`, sized to `concurrency`), so
+        # blocking work (snapshot_download + the codec subprocess) belongs here directly. An
+        # `async def` here instead made chutes spin up a *fresh event loop per request*
+        # (`_run_user_coro` -> `loop.run_until_complete`) AND a nested `asyncio.to_thread`
+        # pool -- ~2 threads/request plus per-request loop churn, and on a gateway-timeout
+        # cancel the inner subprocess is orphaned while the throwaway loop tears down. That
+        # churn can degrade the instance under load (probe failures / "can't serve").
+        # Return a plain JSON dict -- a pydantic model trips the serializer as a misleading 500.
+        return _compress(req).model_dump()
 
     return chute
 
@@ -279,11 +283,11 @@ def build_decompressor_chute():
     chute = _build_chute(CHUTE_DECOMPRESSOR_NAME)
 
     @chute.cord(public_api_path="/decompress", method="POST")
-    async def decompress(self, req: DecompressRequest) -> dict[str, Any]:  # noqa: ANN001
-        import asyncio
-
-        result = await asyncio.to_thread(_decompress, req)
-        return result.model_dump()
+    def decompress(self, req: DecompressRequest) -> dict[str, Any]:  # noqa: ANN001
+        # Plain SYNC cord (see build_compressor_chute for why): chutes runs it directly in its
+        # managed worker pool; an `async def` + asyncio.to_thread double-wraps it with a
+        # per-request throwaway event loop and nested thread pool.
+        return _decompress(req).model_dump()
 
     return chute
 
