@@ -30,6 +30,9 @@ from core.constants import (
     DEFAULT_MAX_ARTIFACT_BYTES,
     DEFAULT_NETUID,
     DEFAULT_WIN_MARGIN,
+    EVAL_SOURCE,
+    EVAL_STREAM_BYTES,
+    EVAL_STREAMS,
     REFERENCE_SKU,
     STREAM_BYTES,
     STREAMS_PER_ROUND,
@@ -44,7 +47,7 @@ from eval.evaluator import paired_eval
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
 from eval.runner_docker import DEFAULT_DOCKER_IMAGE
 from eval.scoring import zstd_baseline_ratio
-from eval.streams import derive_seed, sample_streams
+from eval.streams import derive_seed, sample_source_streams, sample_streams
 from validation.precheck import precheck_artifact_dir, precheck_codec
 from reign_worker.service import run_round
 from weight_setter.service import decide_weights
@@ -122,6 +125,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--streams", type=int, default=STREAMS_PER_ROUND)
     parser.add_argument("--stream-bytes", type=int, default=STREAM_BYTES)
+    # Per-source eval (issue #10): score on EVAL_STREAMS windows drawn only from this
+    # provenance source (FineWeb). Empty --eval-source disables it and reverts to whole-corpus
+    # sampling (--streams/--stream-bytes). Falls back to whole-corpus sampling automatically if
+    # the corpus has no provenance for the source.
+    parser.add_argument("--eval-source", default=EVAL_SOURCE,
+                        help="provenance source to draw eval streams from ('' = whole corpus)")
+    parser.add_argument("--eval-streams", type=int, default=EVAL_STREAMS)
+    parser.add_argument("--eval-stream-bytes", type=int, default=EVAL_STREAM_BYTES)
     parser.add_argument("--floor-bps", type=float, default=THROUGHPUT_FLOOR_BPS)
     parser.add_argument("--compress-budget-secs", type=float, default=COMPRESS_BUDGET_SECS)
     parser.add_argument("--max-artifact-bytes", type=int, default=DEFAULT_MAX_ARTIFACT_BYTES)
@@ -330,6 +341,23 @@ def _make_provider(args) -> StaticLocalProvider:
     return provider
 
 
+def _select_specs(args, provider, seed):
+    """Per-round stream selection. With --eval-source set (default FineWeb) and that source
+    resolvable in the corpus provenance, draw --eval-streams windows of --eval-stream-bytes
+    from that source only (issue #10); otherwise fall back to whole-corpus sampling."""
+
+    source = getattr(args, "eval_source", "") or ""
+    if source and hasattr(provider, "source_range"):
+        rng = provider.source_range(source)
+        if rng is not None:
+            start, span = rng
+            return sample_source_streams(
+                seed, start, span,
+                stream_bytes=args.eval_stream_bytes, streams=args.eval_streams,
+            )
+    return sample_streams(seed, provider.total_bytes, stream_bytes=args.stream_bytes, streams=args.streams)
+
+
 def _make_chain(args) -> BittensorChain:
     return BittensorChain(
         ChainConfig(
@@ -377,7 +405,7 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
     if challengers:
         provider = _make_provider(args)
         seed = derive_seed(chain.block_hash(block), salt, block)
-        specs = sample_streams(seed, provider.total_bytes, stream_bytes=args.stream_bytes, streams=args.streams)
+        specs = _select_specs(args, provider, seed)
         baseline = zstd_baseline_ratio([provider.materialize(s) for s in specs], level=args.baseline_level)
         runner = _make_runner(args)
         caps = ResourceCaps(wall_clock_secs=args.compress_budget_secs, artifact_bytes=args.max_artifact_bytes)
@@ -449,7 +477,7 @@ def run_offline_demo(args: argparse.Namespace) -> None:
     codec_specs = args.local_codec or ["winner=./reference_codec"]
     provider = _make_provider(args)
     seed = derive_seed("offline-demo-block", "offline-demo-salt", 0)
-    specs = sample_streams(seed, provider.total_bytes, stream_bytes=args.stream_bytes, streams=args.streams)
+    specs = _select_specs(args, provider, seed)
     baseline = zstd_baseline_ratio([provider.materialize(s) for s in specs], level=args.baseline_level)
 
     hotkeys = ["uid0_burn"]
@@ -470,8 +498,11 @@ def run_offline_demo(args: argparse.Namespace) -> None:
         floor_bps=args.floor_bps, budget_secs=args.compress_budget_secs,
     )
 
+    sampled_bytes = specs[0].length if specs else 0
+    source = (getattr(args, "eval_source", "") or "") if sampled_bytes else ""
     print(
-        f"streams={len(specs)} stream_bytes={args.stream_bytes} "
+        f"streams={len(specs)} stream_bytes={sampled_bytes}"
+        f"{f' source={source}' if source else ''} "
         f"baseline zstd-{args.baseline_level} ratio={baseline:.4f}"
     )
     history: list[WinnerEntry] = []

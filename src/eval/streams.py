@@ -77,3 +77,37 @@ def sample_streams(
             offset = int.from_bytes(digest, "big") % (max_offset + 1)
         specs.append(StreamSpec(stream_id=f"s{index}", offset=offset, length=length))
     return specs
+
+
+def sample_source_streams(
+    seed: int,
+    source_start: int,
+    source_bytes: int,
+    *,
+    stream_bytes: int = STREAM_BYTES,
+    streams: int = STREAMS_PER_ROUND,
+) -> list[StreamSpec]:
+    """Pick ``streams`` windows of ``stream_bytes`` confined to a single source's byte range.
+
+    Same seed-derived offset logic as ``sample_streams`` (so selection is fresh per round and
+    per validator via ``derive_seed``), but every window stays inside the source span
+    ``[source_start, source_start + source_bytes)``. Returned offsets are global corpus
+    coordinates. Used by the per-source eval (issue #10): two random 4 MiB FineWeb windows.
+    """
+
+    if source_bytes <= 0 or streams <= 0:
+        return []
+
+    length = min(stream_bytes, source_bytes)
+    max_offset = source_bytes - length
+    seed_bytes = int(seed).to_bytes(8, "big")
+
+    specs: list[StreamSpec] = []
+    for index in range(streams):
+        if max_offset == 0:
+            local = 0
+        else:
+            digest = hashlib.sha256(seed_bytes + index.to_bytes(4, "big")).digest()
+            local = int.from_bytes(digest, "big") % (max_offset + 1)
+        specs.append(StreamSpec(stream_id=f"s{index}", offset=source_start + local, length=length))
+    return specs
