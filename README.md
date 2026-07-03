@@ -56,11 +56,29 @@ See [docs/MINING.md](docs/MINING.md). Commitments are permanent per hotkey.
 
 ## Validator
 
+**Default eval path is local Docker on an RTX 4090** — every validator running GPU codecs must
+use identical hardware, or compress/decompress throughput isn't comparable across validators
+(DESIGN §4 same-system determinism). This is a network-wide requirement, not a suggestion: a
+validator without Docker + `nvidia-container-toolkit` + a matching GPU **fails closed by
+design** (`DockerRunner` checks the GPU model via `nvidia-smi` and refuses to run on anything
+else). See [docs/VALIDATING.md](docs/VALIDATING.md) for the full requirement and CPU-only opt-out.
+
+```bash
+docker build -f docker/glyph-runner-default.Dockerfile -t glyph-runner-default:latest .   # zstandard-enabled base image
+export GLYPH_MIXED_CORPUS_DIR=/tmp/glyph_mixed_8x2mb       # default mixed launch corpus
+# auto-updating validator under PM2 (edit wallet/netuid) -- --runner docker + --docker-gpu are
+# both the default, so they don't need to be passed explicitly
+./scripts/run_auto_validator.sh --netuid 117 \
+  --wallet-name w --hotkey-name h --docker-image glyph-runner-default:latest \
+  --corpus-dir ./corpus --state-dir ./state
+```
+
+Or dispatch to the deployed Chutes (SN64) eval chutes instead (subject to Chutes' own SKU/
+availability):
+
 ```bash
 cp .env.example .env                                       # CHUTES_API_KEY
 ./scripts/deploy_runner_chute.sh                           # deploy the compress + decompress chutes (once)
-export GLYPH_MIXED_CORPUS_DIR=/tmp/glyph_mixed_8x2mb       # default mixed launch corpus
-# auto-updating validator under PM2 (edit wallet/netuid)
 ./scripts/run_auto_validator.sh --netuid 117 \
   --wallet-name w --hotkey-name h --runner chutes \
   --corpus-url https://<host>/corpus.bin --state-dir ./state

@@ -72,9 +72,14 @@ WINDOW_ANCHOR_BLOCK = 0
 
 # --- Chutes (SN64) evaluation backend -----------------------------------------
 # GPU type pinned via NodeSelector.include so all validators measure identical
-# compressed bytes (DESIGN §4 same-system determinism + reference SKU).
-REFERENCE_SKU = "a100"
-REFERENCE_MIN_VRAM_GB = 24
+# compressed bytes (DESIGN §4 same-system determinism + reference SKU). As an
+# integrated SN64 subnet, Chutes now *mandates* this exact SKU for the eval
+# chutes -- deploys reject anything else ("TEE with node_selector
+# include=['pro_6000'] is required now for integrated subnet chutes"), so this
+# must stay 'pro_6000'. The RTX PRO 6000 (Blackwell) carries 96 GB; the include
+# pin already fixes the SKU, so the VRAM floor below is a consistency check.
+REFERENCE_SKU = "pro_6000"
+REFERENCE_MIN_VRAM_GB = 80
 # The Chutes account that builds/deploys/serves the eval chutes. Deployment-specific, not
 # consensus-critical: every validator targets the same deployed chutes and can override their
 # URLs via GLYPH_COMPRESS_CHUTE_URL / GLYPH_DECOMPRESS_CHUTE_URL (see runner_chutes.py), so this
@@ -86,3 +91,15 @@ CHUTE_NAME = "glyph-runner"  # shared image name
 # decompress worker only ever sees the blob (DESIGN §6; exploit-prevention #14).
 CHUTE_COMPRESSOR_NAME = "glyph-compressor"
 CHUTE_DECOMPRESSOR_NAME = "glyph-decompressor"
+
+# --- Docker runner (local production alternative to Chutes) ------------------
+# Every validator using --runner docker --docker-gpu must run on the SAME GPU model, for the
+# same reason Chutes pins REFERENCE_SKU: compress_secs/decompress_secs (gated against
+# THROUGHPUT_FLOOR_BPS) are only comparable across validators if the hardware is identical
+# (DESIGN §4 same-system determinism). Unlike REFERENCE_SKU (enforced platform-side by Chutes'
+# node_selector), nothing external enforces this for Docker, so DockerRunner checks it itself
+# (nvidia-smi) and fails closed rather than silently running on whatever GPU is present -- see
+# runner_docker.py's _verify_gpu_model(). Network-wide, not a per-operator override (same
+# rationale as WINDOW_ANCHOR_BLOCK): a validator that quietly used a faster/slower card would
+# desync throughput-floor gating from the rest of the network.
+DOCKER_REFERENCE_GPU = "RTX 4090"

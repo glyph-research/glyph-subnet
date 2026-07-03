@@ -1,18 +1,72 @@
 # Validating on Glyph
 
 A validator evaluates committed codecs on fresh, beacon-seeded streams and sets weights
-with the king-of-the-hill + temporal-burn policy. GPU work is bursted to Chutes (SN64);
-the always-on parts are cheap CPU.
+with the king-of-the-hill + temporal-burn policy. GPU work runs on one of two backends,
+chosen with `--runner`:
+
+- **`docker` (default)**: runs compress/decompress as ephemeral local Docker containers on
+  operator-controlled hardware. **`--docker-gpu` is also on by default, and it requires an RTX
+  4090** (`core.constants.DOCKER_REFERENCE_GPU`) -- every validator running GPU codecs must use
+  identical hardware, or `compress_secs`/`decompress_secs` (gated against `THROUGHPUT_FLOOR_BPS`)
+  aren't comparable across validators (DESIGN §4 same-system determinism). This is intentional
+  and network-wide, not a bug: **a validator host without Docker + `nvidia-container-toolkit` +
+  a matching GPU fails closed** (`DockerRunner` checks the GPU model via `nvidia-smi` at startup
+  and refuses to run on anything else, with no bypass flag). Pass `--no-docker-gpu` for CPU-only
+  codecs / a testnet host without an RTX 4090. See "Set up the default Docker runner" below.
+- `chutes`: bursts compress/decompress to Chutes (SN64) instead. Chutes now *mandates* the
+  `pro_6000` GPU SKU for TEE chutes tied to an integrated subnet, and its availability
+  fluctuates independent of anything on the validator side.
+
+The always-on parts (chain polling, precheck, weight setting) are cheap CPU either way.
 
 ## Setup
 
 ```bash
 ./scripts/install_deps.sh
-cp .env.example .env            # set CHUTES_API_KEY=cpk_...  (chutes keys create --admin)
 pytest -q
 ```
 
-## Deploy the evaluation chutes (once)
+## Set up the default Docker runner
+
+`--runner docker` (`src/eval/runner_docker.py`, the default) is a drop-in alternative to
+`--runner chutes`: same contract (`CodecRunner`), same split-worker isolation (compress and
+decompress each run in a fresh, ephemeral `docker run --rm` container with `--network none`, so
+a codec can't stash the raw input during compress and read it back during decompress), but on
+hardware you control instead of Chutes.
+
+```bash
+docker build -f docker/glyph-runner-default.Dockerfile -t glyph-runner-default:latest .   # zstandard-enabled base image
+glyph-validator --docker-image glyph-runner-default:latest \
+  --netuid 117 --wallet-name validator --hotkey-name default \
+  --corpus-dir ./corpus --state-dir ./state
+```
+
+- Requires Docker **and `nvidia-container-toolkit`** on the validator host (the GPU gate is on
+  by default -- see above). Add `--docker-gpu-device 0` to pin a specific card if the host has
+  more than one.
+- No GPU available, or intentionally testing a CPU-only codec? Pass `--no-docker-gpu` --
+  `DockerRunner` then runs with no GPU requirement at all.
+- Pre-pull/build whatever image you pass via `--docker-image`; a cold pull happens inside the
+  timed wall-clock budget. `docker/glyph-runner-default.Dockerfile` covers the reference codec
+  (needs only `zstandard`) -- a codec with heavier deps (e.g. torch for a neural codec) needs
+  its own image with those baked in. Throughput timing includes container startup and there is
+  no `--cpus` cap, so also use comparable host CPUs across validators for tightest
+  same-system determinism, even with the GPU pinned.
+- Like `--runner local`, this fetches each codec artifact to local disk first (no
+  `--corpus-url` range-fetch path), so `needs_local_artifact`-style runners always get inlined
+  streams -- fine for validator-run hardware, unlike the untrusted-worker Chutes path.
+- Live-verified against real LLM-driven compression (RWKV-4 + arithmetic coding, ts_zip-style)
+  on an actual RTX 4090: bit-exact round trips against the real oracle-produced mixed corpus,
+  GPU genuinely used inside the isolated container, and the GPU-model gate both accepts the
+  real RTX 4090 and rejects a simulated mismatched card.
+
+## Use Chutes instead (optional)
+
+```bash
+cp .env.example .env            # set CHUTES_API_KEY=cpk_...  (chutes keys create --admin)
+```
+
+### Deploy the evaluation chutes (once)
 
 Compress and decompress run on **separate** chutes (separate containers), so a codec cannot
 stash the raw input during compress and read it back during decompress to fake the ratio — the
@@ -71,25 +125,28 @@ glyph-oracle --out-dir ./corpus --target-bytes 268435456   # 256 MiB of fresh te
 glyph-validator --corpus-dir ./corpus ...
 ```
 
-For production Chutes runs, also publish the same corpus as one contiguous blob (chunk order ==
-sorted manifest order) and pass its URL via `--corpus-url`. The deployed runner then range-fetches
-each stream itself instead of the validator inlining the 256 MiB sample. Without `--corpus-url`
-(or with `--runner local`), streams are inlined as before — fine for tests and smoke runs.
+With the default `--runner docker` (or `--runner local`), the validator's own host executes
+compress/decompress, so streams are always inlined from `--corpus-dir` -- no publishing step
+needed. `--runner chutes` is the one exception: also publish the same corpus as one contiguous
+blob (chunk order == sorted manifest order) and pass its URL via `--corpus-url`, so the deployed
+runner range-fetches each stream itself instead of the validator inlining the 256 MiB sample.
 
 ## Run
 
-All-in-one — `glyph-validator` is a console entry point; wrap it in PM2 (edit wallet/netuid):
+All-in-one — `glyph-validator` is a console entry point; wrap it in PM2 (edit wallet/netuid).
+`--runner docker` and `--docker-gpu` are both the default, so a plain invocation is the RTX
+4090 + Docker path:
 
 ```bash
 pm2 start glyph-validator --name glyph-validator -- \
-  --netuid 117 --wallet-name validator --hotkey-name default --runner chutes \
-  --corpus-url https://<host>/corpus.bin --state-dir ./state
+  --netuid 117 --wallet-name validator --hotkey-name default \
+  --docker-image glyph-runner-default:latest --corpus-dir ./corpus --state-dir ./state
 ```
 
 Or split into services (each is a console entry point — same `pm2 start <script> -- <args>` form):
 
 ```bash
-pm2 start glyph-reign-worker  --name glyph-reign-worker  -- --netuid 117 --wallet-name validator --hotkey-name default --runner chutes --corpus-url https://<host>/corpus.bin   # evaluate + update crown
+pm2 start glyph-reign-worker  --name glyph-reign-worker  -- --netuid 117 --wallet-name validator --hotkey-name default --docker-image glyph-runner-default:latest --corpus-dir ./corpus   # evaluate + update crown
 pm2 start glyph-weight-setter --name glyph-weight-setter -- --netuid 117 --wallet-name validator --hotkey-name default                                          # temporal-burn weights every tempo
 pm2 start glyph-oracle        --name glyph-oracle        -- --out-dir ./corpus --target-bytes 268435456                                                         # daily fresh corpus
 ```
@@ -98,6 +155,14 @@ Auto-updating validator (tracks `glyph-research/glyph-subnet`):
 
 ```bash
 ./scripts/setup_hooks.sh
+./scripts/run_auto_validator.sh --network finney --netuid 117 \
+  --wallet-name validator --hotkey-name default \
+  --docker-image glyph-runner-default:latest --corpus-dir ./corpus --state-dir ./state
+```
+
+Using Chutes instead:
+
+```bash
 ./scripts/run_auto_validator.sh --network finney --netuid 117 \
   --wallet-name validator --hotkey-name default --runner chutes \
   --corpus-url https://<host>/corpus.bin --state-dir ./state
@@ -108,6 +173,6 @@ Auto-updating validator (tracks `glyph-research/glyph-subnet`):
 - **Version safety**: the validator fail-closes if `core.__version_key__` ≠ the
   on-chain `weights_version`. Bump both together on breaking changes.
 - **Commit-reveal** must be enabled on the subnet for the anti-copy burn schedule to bite.
-- **Offline check** (no chain/Chutes): `glyph-validator --offline-demo --runner local ...`
+- **Offline check** (no chain, no Docker/GPU needed): `glyph-validator --offline-demo --runner local ...`
   uses the mixed corpus by default; pass `--corpus-dir samples/corpus` for the tiny
   bundled sample.
