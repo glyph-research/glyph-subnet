@@ -74,11 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--runner",
         choices=["local", "chutes", "docker"],
-        default="chutes",
-        help="'chutes' dispatches to the deployed Chutes eval chutes (requires the mandated "
-        "pro_6000 SKU, subject to Chutes platform availability). 'docker' runs compress/decompress "
-        "as ephemeral local Docker containers instead -- same split-worker isolation, but on "
-        "operator-controlled hardware/GPU; no Chutes dependency.",
+        default="docker",
+        help="'docker' (default, product direction) runs compress/decompress as ephemeral local "
+        "Docker containers on operator-controlled hardware/GPU -- see --docker-gpu below. "
+        "'chutes' dispatches to the deployed Chutes eval chutes instead (requires the "
+        "platform-mandated pro_6000 SKU, subject to Chutes availability).",
     )
     parser.add_argument(
         "--corpus-dir",
@@ -107,8 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--docker-gpu",
-        action="store_true",
-        help="Pass --gpus to the docker containers (requires nvidia-container-toolkit on this host).",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Pass --gpus to the docker containers and enforce the RTX 4090 gate (requires "
+        "nvidia-container-toolkit on this host). Default ON: GPU execution is the network-wide "
+        "default eval path now, so a validator without a matching GPU fails closed by design. "
+        "Pass --no-docker-gpu for CPU-only codecs / testnet where that's not available.",
     )
     parser.add_argument(
         "--docker-gpu-device",

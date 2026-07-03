@@ -226,8 +226,12 @@ class DockerRunner:
             # happened before this runner was invoked.
             cmd += ["--network", "none"]
         if self.gpu:
+            # NVIDIA_VISIBLE_DEVICES scoped to the actual --gpus selection, not always "all" --
+            # when gpu_device pins a specific card, the container shouldn't see (or be able to
+            # request) any other.
             cmd += ["--gpus", f"device={self.gpu_device}" if self.gpu_device else "all"]
-            cmd += ["-e", "NVIDIA_VISIBLE_DEVICES=all", "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility"]
+            cmd += ["-e", f"NVIDIA_VISIBLE_DEVICES={self.gpu_device or 'all'}",
+                    "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility"]
         for env_var in _FORWARDED_ENV_VARS:
             value = os.environ.get(env_var)
             if value is not None:
