@@ -30,11 +30,13 @@ def find_winner_commitment(state: ValidatorState, winner: WinnerEntry) -> Commit
 def artifact_ref(commitment: CommitmentState, runner) -> ArtifactRef:
     """Build an ArtifactRef for the configured runner.
 
-    The Chutes runner downloads ``repo@rev`` inside the chute. A local runner needs the
-    artifact on disk, so it snapshot-downloads it here.
+    The Chutes runner downloads ``repo@rev`` inside the chute. A runner that executes
+    locally (``LocalSubprocessRunner``, ``DockerRunner``) needs the artifact on disk, so it
+    snapshot-downloads it here -- flagged via ``needs_local_artifact`` rather than an
+    isinstance chain so new local-execution runners don't need a change here.
     """
 
-    if isinstance(runner, LocalSubprocessRunner):
+    if isinstance(runner, LocalSubprocessRunner) or getattr(runner, "needs_local_artifact", False):
         local = getattr(commitment, "local_path", None)
         if not local:
             from huggingface_hub import snapshot_download

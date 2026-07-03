@@ -1,224 +1,70 @@
-"""The glyph eval chutes (DESIGN §6): TWO deployed Chutes (SN64) endpoints.
+"""The glyph eval chutes (DESIGN §6): TWO deployed Chutes (SN64) endpoints (compressor + decompressor
+on separate containers, so a codec cannot stash the raw input during compress and read it during
+decompress, #14). A cord MUST return a plain JSON dict, not a pydantic model.
 
-Compress and decompress run on **separate** chutes -- ``/compress`` (CHUTE_COMPRESSOR_NAME)
-and ``/decompress`` (CHUTE_DECOMPRESSOR_NAME) -- so they execute in separate containers. The
-decompress worker only ever receives the compressed blob, never the raw input, so a codec
-cannot stash the raw bytes during compress and read them back during decompress to fake the
-ratio (exploit-prevention #14). Both pin the reference GPU SKU via ``NodeSelector.include``
-so every validator measures identical compressed bytes.
-
-Deploy both via the wrapper (chutes >=0.6 rejects dotted refs and loads a chute from
-<cwd>/<module>.py, so the wrapper sets up a flat-ref `chute_app:...` load context):
-  glyph-deploy-chute --build --deploy --public --accept-fee
-
-Invocation contract (validated against the live Chutes API):
-- ``POST {base}/compress``   with ``Authorization: Basic <cpk_...>`` -> ``CompressRequest`` /
-  ``CompressResultModel`` (carries ``blob_b64``).
-- ``POST {base}/decompress`` with the same auth -> ``DecompressRequest`` (the blob) /
-  ``DecompressResultModel``. The validator gates bit-exactness on ``output_sha256`` against the
-  hash it computed from the trusted corpus -- never the worker's self-report.
-- A cord MUST return a JSON-serializable dict, not a pydantic model -- returning a model raises
-  ``TypeError: Type is not JSON serializable``, surfaced as a misleading 500 "No infrastructure".
-``tests/test_chute_contract.py`` pins the binding offline; ``scripts/smoke_chute.py`` runs a
-live split round-trip. The boundaries stay isolated here and in ``runner_chutes.ChutesRunner``.
+THIN ENTRY MODULE -- keep this file small. The heavy sandboxed-runner code lives in the sibling
+`glyph_eval_runner.py`, which build_image() bakes into the chute IMAGE (site-packages) and the cords
+import lazily. This matters: the chutes-TEE code-verification (aegis cllmv) trips on a large/complex
+UPLOADED entry module -- such an instance verifies (aegis) but never becomes routable (every
+invocation 500s "No infrastructure available"). Installed/baked packages (chutes SDK, zstandard, and
+this runner) are NOT scanned, so moving the runner into the image keeps this entry under the threshold.
+Verified empirically 2026-06/07 by bisection. Do NOT inline the runner helpers back into this file, and
+do NOT add `from __future__ import annotations` (it stringizes cord hints and breaks app-start).
 """
 
-from __future__ import annotations
-
-import base64
+import os
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
-from core.constants import (
-    CHUTE_COMPRESSOR_NAME,
-    CHUTE_DECOMPRESSOR_NAME,
-    CHUTE_NAME,
-    CHUTE_USERNAME,
-    REFERENCE_MIN_VRAM_GB,
-    REFERENCE_SKU,
-)
-
 try:  # chutes SDK is only needed to build/deploy/run the chute
     from chutes.chute import Chute, NodeSelector
     from chutes.image import Image
-except Exception:  # pragma: no cover - environment without chutes
+except Exception:  # pragma: no cover
     Chute = NodeSelector = Image = None
 
+CHUTE_USERNAME = os.environ.get("GLYPH_CHUTE_USERNAME", "glyph")
+CHUTE_NAME = "glyph-runner"
+CHUTE_COMPRESSOR_NAME = "glyph-compressor"
+CHUTE_DECOMPRESSOR_NAME = "glyph-decompressor"
+# REFERENCE_SKU: as of 2026-07, Chutes HARD-REQUIRES include=["pro_6000"] for TEE chutes tied to an
+# integrated subnet ("TEE with node_selector include=['pro_6000'] is required now for integrated
+# subnet chutes") -- confirmed by a live deploy rejection when this was dropped. So this can't be
+# relaxed to "any GPU" the way the other (non-subnet-scored) chutes in this repo do; pro_6000 is
+# mandatory here, not a stale choice. REFERENCE_MIN_VRAM_GB is set to the actual codec resource cap
+# (glyph_eval_runner.VRAM_CAP_BYTES = 24 * 2**30) rather than pro_6000's own VRAM size, since that's
+# the real requirement -- pro_6000 comfortably exceeds it either way.
+REFERENCE_SKU = "pro_6000"
+REFERENCE_MIN_VRAM_GB = 24
 
-class ArtifactSpec(BaseModel):
-    repo: str
-    rev: str
-    sha256: str | None = None
+_RUNNER_FILE = Path(__file__).with_name("glyph_eval_runner.py")
 
 
-class StreamSource(BaseModel):
-    stream_id: str
-    inline_b64: str | None = None  # small/testing path
-    url: str | None = None  # production: HTTP range fetch from the corpus
-    offset: int = 0
-    length: int = 0
-
-
-class CompressRequest(BaseModel):
-    artifact: ArtifactSpec
-    stream: StreamSource
+class EvalRequest(BaseModel):
+    # ONE small BaseModel in this entry module (bisection: >=~full-runner content trips cllmv; a lone
+    # request model is fine). Shared by both cords; parsed downstream in glyph_eval_runner.
+    artifact: dict
+    stream: dict | None = None      # compress: {stream_id, inline_b64|url, offset, length}
+    stream_id: str | None = None    # decompress
+    blob_b64: str | None = None     # decompress
     wall_clock_secs: float = 3600.0
-
-
-class CompressResultModel(BaseModel):
-    stream_id: str
-    raw_bytes: int
-    compressed_bytes: int
-    compress_secs: float
-    blob_b64: str  # the compressed artifact, handed to a *separate* decompressor chute
-    blob_hash: str
-    source_sha256: str  # the compress worker's view of the raw hash (validator cross-checks)
-    artifact_hash: str | None = None
-    error: str | None = None
-
-
-class DecompressRequest(BaseModel):
-    artifact: ArtifactSpec
-    stream_id: str
-    blob_b64: str
-    wall_clock_secs: float = 3600.0
-
-
-class DecompressResultModel(BaseModel):
-    stream_id: str
-    raw_bytes: int
-    decompress_secs: float
-    output_sha256: str  # sha256 of the reconstructed bytes; the validator gates on this
-    artifact_hash: str | None = None
-    error: str | None = None
-
-
-def _materialize(src: StreamSource) -> bytes:
-    if src.inline_b64 is not None:
-        return base64.b64decode(src.inline_b64)
-    if src.url:
-        import requests
-
-        headers = {}
-        if src.length:
-            headers["Range"] = f"bytes={src.offset}-{src.offset + src.length - 1}"
-        response = requests.get(src.url, headers=headers, timeout=120)
-        response.raise_for_status()
-        return response.content
-    raise ValueError("stream source needs inline_b64 or url")
-
-
-def _prepare_artifact(spec: ArtifactSpec) -> tuple[str, str]:
-    """snapshot_download + re-precheck + hash check on the worker. Returns (local_path, digest).
-
-    Raises ``ValueError`` (with the precheck/hash reason) so the cord can report it as a failed
-    stream rather than a dispatch error.
-    """
-
-    from huggingface_hub import snapshot_download
-
-    from validation.precheck import precheck_artifact_dir
-
-    # Convert any fetch failure (network unreachable, missing repo/rev, auth) into a ValueError so
-    # the cord returns it as a failed-stream error field instead of letting an unhandled exception
-    # bubble up through the ASGI handler -- an unhandled raise here 500s the request AND degrades
-    # the worker, after which the gateway 429s further invocations ("no infrastructure").
-    try:
-        local = snapshot_download(repo_id=spec.repo, revision=spec.rev)
-    except Exception as exc:  # noqa: BLE001 - any download failure is a failed stream, not a crash
-        raise ValueError(f"artifact fetch failed for {spec.repo}@{spec.rev}: {exc}") from exc
-    precheck = precheck_artifact_dir(local, spec.repo, spec.rev)
-    digest = precheck.artifact_hash
-    if not precheck.ok:
-        raise ValueError("artifact precheck failed: " + "; ".join(precheck.errors))
-    if spec.sha256 and digest != spec.sha256:
-        raise ValueError(f"artifact hash mismatch: got {digest}, expected {spec.sha256}")
-    return local, digest
-
-
-def _compress(req: CompressRequest) -> CompressResultModel:
-    """Run only the compress entrypoint on this worker; return the blob for the decompressor."""
-
-    from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps, RunnerError
-
-    data = _materialize(req.stream)
-    try:
-        local, digest = _prepare_artifact(req.artifact)
-    except ValueError as exc:
-        return CompressResultModel(
-            stream_id=req.stream.stream_id, raw_bytes=len(data), compressed_bytes=0,
-            compress_secs=0.0, blob_b64="", blob_hash="", source_sha256="", error=str(exc),
-        )
-    runner = LocalSubprocessRunner(strict_sandbox=True, require_network_isolation=True)
-    artifact = ArtifactRef(repo=req.artifact.repo, rev=req.artifact.rev, sha256=digest, local_path=local)
-    try:
-        out = runner.compress(artifact, data, caps=ResourceCaps(wall_clock_secs=req.wall_clock_secs))
-    except RunnerError as exc:
-        return CompressResultModel(
-            stream_id=req.stream.stream_id, raw_bytes=len(data), compressed_bytes=0,
-            compress_secs=0.0, blob_b64="", blob_hash="", source_sha256="",
-            artifact_hash=digest, error=str(exc),
-        )
-    return CompressResultModel(
-        stream_id=req.stream.stream_id,
-        raw_bytes=out.raw_bytes,
-        compressed_bytes=out.compressed_bytes,
-        compress_secs=out.compress_secs,
-        blob_b64=base64.b64encode(out.blob).decode("ascii"),
-        blob_hash=out.blob_hash,
-        source_sha256=out.source_hash,
-        artifact_hash=digest,
-    )
-
-
-def _decompress(req: DecompressRequest) -> DecompressResultModel:
-    """Run only the decompress entrypoint on this worker, seeded with only the blob."""
-
-    from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps, RunnerError
-
-    try:
-        local, digest = _prepare_artifact(req.artifact)
-    except ValueError as exc:
-        return DecompressResultModel(
-            stream_id=req.stream_id, raw_bytes=0, decompress_secs=0.0, output_sha256="", error=str(exc),
-        )
-    runner = LocalSubprocessRunner(strict_sandbox=True, require_network_isolation=True)
-    artifact = ArtifactRef(repo=req.artifact.repo, rev=req.artifact.rev, sha256=digest, local_path=local)
-    try:
-        blob = base64.b64decode(req.blob_b64)
-        out = runner.decompress(artifact, blob, caps=ResourceCaps(wall_clock_secs=req.wall_clock_secs))
-    except RunnerError as exc:
-        return DecompressResultModel(
-            stream_id=req.stream_id, raw_bytes=0, decompress_secs=0.0, output_sha256="",
-            artifact_hash=digest, error=str(exc),
-        )
-    return DecompressResultModel(
-        stream_id=req.stream_id,
-        raw_bytes=out.raw_bytes,
-        decompress_secs=out.decompress_secs,
-        output_sha256=out.output_hash,
-        artifact_hash=digest,
-    )
 
 
 def build_image() -> "Image":
     if Image is None:
         raise RuntimeError("chutes SDK is not installed; `pip install chutes`")
+    # Ship glyph_eval_runner.py into the image at /opt/glyphrunner via .add (uploaded in the build
+    # context, robust for the ~11KB file). The heavy runner lives in the image, NOT in the uploaded
+    # chute entry module -- cllmv scans the thin entry, so this stays under the threshold. The cords
+    # add /opt/glyphrunner to sys.path and import it lazily. NOTE: glyph_eval_runner.py must sit next
+    # to chute_app.py in the build/deploy context (the build helpers copy both).
     return (
-        Image(
-            username=CHUTE_USERNAME,
-            name=CHUTE_NAME,
-            tag="0.1",
-            readme="Glyph eval chute: sandboxed compressor/decompressor runner for the subnet.",
-        )
+        Image(username=CHUTE_USERNAME, name=CHUTE_NAME, tag="2.5",
+              readme="Glyph eval chute: sandboxed compressor/decompressor runner for the subnet.")
         .from_base("parachutes/python:3.12")
-        # No apt_install: the Chutes image build runs non-root (apt-get can't take the dpkg
-        # lock). The eval needs only the `zstandard` Python package, not the system zstd binary.
-        .run_command("pip install zstandard huggingface_hub requests 'pydantic>=2.8'")
-        .add("src", "/app/src")  # copies all service packages; run `chutes build` from repo root
-        .set_workdir("/app")
-        .with_env("PYTHONPATH", "/app/src")
+        .run_command("pip install zstandard")
+        .add("glyph_eval_runner.py", "/opt/glyphrunner/glyph_eval_runner.py")
     )
 
 
@@ -226,84 +72,40 @@ def _build_chute(name: str):
     if Chute is None:
         raise RuntimeError("chutes SDK is not installed; `pip install chutes`")
     return Chute(
-        username=CHUTE_USERNAME,
-        name=name,
-        image=build_image(),
-        node_selector=NodeSelector(
-            gpu_count=1,
-            min_vram_gb_per_gpu=REFERENCE_MIN_VRAM_GB,
-            include=[REFERENCE_SKU],  # reference-SKU pin: identical bytes across validators
-        ),
-        # Chutes mandates confidential (TEE) execution as of 2026-05-12 -- non-TEE deploys are
-        # rejected ("Only TEE chutes are supported"). TEE also gives the attestation that the
-        # reference SKU / image actually ran, reinforcing same-system determinism.
-        tee=True,
-        # Allow outbound network from the container. The cord's trusted prep
-        # (`_prepare_artifact` -> huggingface_hub.snapshot_download) must reach HuggingFace to
-        # fetch the miner's codec at request time; without this the aegis TEE netnanny blocks all
-        # egress ("BLOCKING non-localhost connection ... Network is unreachable"), snapshot_download
-        # raises LocalEntryNotFoundError, and the cord 500s (degrading the worker so follow-up
-        # invocations 429). Exfiltration is still prevented because the UNTRUSTED codec subprocess
-        # runs under `unshare --net` (LocalSubprocessRunner require_network_isolation=True, which
-        # fails closed): only the trusted, no-untrusted-code prep path uses the network, and it runs
-        # before any stream bytes are handed to the codec. See eval/runner.py `_exec`.
-        allow_external_egress=True,
-        # Keep a warmed instance alive ~2.7h past its last request. Without this the chute inherits
-        # the platform default (~5 min idle) and goes cold between sporadic eval invocations, so
-        # the next validator round hits a cold start and the gateway 500s/429s ("no infrastructure
-        # available") until an instance re-warms. 9600s comfortably bridges normal round gaps
-        # without holding the GPU indefinitely when validation is idle.
-        shutdown_after_seconds=9600,
-        # Invocation-gateway capacity is concurrency * max_instances; too low and concurrent
-        # validator dispatches 429. 16 gives headroom for bursty multi-stream rounds. (The codec
-        # subprocess still enforces the per-run VRAM/RAM caps, so concurrency is a dispatch limit,
-        # not a resource override.)
-        concurrency=16,
+        username=CHUTE_USERNAME, name=name, image=build_image(),
+        # include=[REFERENCE_SKU] is mandatory -- see REFERENCE_SKU note above.
+        node_selector=NodeSelector(gpu_count=1, min_vram_gb_per_gpu=REFERENCE_MIN_VRAM_GB, include=[REFERENCE_SKU]),
+        # allow_external_egress=True: the runner fetches the codec artifact from huggingface.co.
+        tee=True, concurrency=8, max_instances=2, allow_external_egress=True,
     )
 
 
-def build_compressor_chute():
-    """The compress-only chute. Deploy via `glyph-deploy-chute --build --deploy`."""
-
-    chute = _build_chute(CHUTE_COMPRESSOR_NAME)
-
-    @chute.cord(public_api_path="/compress", method="POST")
-    def compress(self, req: CompressRequest) -> dict[str, Any]:  # noqa: ANN001
-        # Plain SYNC cord. Chutes already runs every cord in its own worker thread pool
-        # (cord.py `_run_in_thread` -> `_user_code_executor`, sized to `concurrency`), so
-        # blocking work (snapshot_download + the codec subprocess) belongs here directly. An
-        # `async def` here instead made chutes spin up a *fresh event loop per request*
-        # (`_run_user_coro` -> `loop.run_until_complete`) AND a nested `asyncio.to_thread`
-        # pool -- ~2 threads/request plus per-request loop churn, and on a gateway-timeout
-        # cancel the inner subprocess is orphaned while the throwaway loop tears down. That
-        # churn can degrade the instance under load (probe failures / "can't serve").
-        # Return a plain JSON dict -- a pydantic model trips the serializer as a misleading 500.
-        return _compress(req).model_dump()
-
-    return chute
-
-
-def build_decompressor_chute():
-    """The decompress-only chute. Deploy via `glyph-deploy-chute --build --deploy`."""
-
-    chute = _build_chute(CHUTE_DECOMPRESSOR_NAME)
-
-    @chute.cord(public_api_path="/decompress", method="POST")
-    def decompress(self, req: DecompressRequest) -> dict[str, Any]:  # noqa: ANN001
-        # Plain SYNC cord (see build_compressor_chute for why): chutes runs it directly in its
-        # managed worker pool; an `async def` + asyncio.to_thread double-wraps it with a
-        # per-request throwaway event loop and nested thread pool.
-        return _decompress(req).model_dump()
-
-    return chute
-
-
-# Module-level handles loaded via the flat `chute_app:compressor_chute` /
-# `:decompressor_chute`. Built lazily-safe: importing this module must never fail (e.g. when
-# the build context / cwd is not the repo root). Deploy both as SEPARATE chutes so compress
-# and decompress run in separate containers (exploit-prevention #14).
 try:
-    compressor_chute = build_compressor_chute() if Chute is not None else None
-    decompressor_chute = build_decompressor_chute() if Chute is not None else None
-except Exception:
+    compressor_chute = _build_chute(CHUTE_COMPRESSOR_NAME) if Chute is not None else None
+    decompressor_chute = _build_chute(CHUTE_DECOMPRESSOR_NAME) if Chute is not None else None
+except Exception:  # pragma: no cover
+    # build_image()'s .add() needs glyph_eval_runner.py resolvable in the build context (cwd),
+    # which a plain `import eval.chute_app` for introspection/tests doesn't guarantee. Real
+    # `chutes build`/`chutes deploy` invocations always run from a workdir containing both
+    # files (see glyph-work/deploy_*.py), so this only affects import-time introspection.
     compressor_chute = decompressor_chute = None
+
+if compressor_chute is not None:
+
+    @compressor_chute.cord(public_api_path="/compress", method="POST")
+    def compress(self, req: EvalRequest) -> dict[str, Any]:  # noqa: ANN001
+        import sys  # runner is baked at /opt/glyphrunner in the image; import it lazily at invocation
+
+        sys.path.insert(0, "/opt/glyphrunner")
+        from glyph_eval_runner import run_compress
+
+        return run_compress(req.model_dump())
+
+    @decompressor_chute.cord(public_api_path="/decompress", method="POST")
+    def decompress(self, req: EvalRequest) -> dict[str, Any]:  # noqa: ANN001
+        import sys
+
+        sys.path.insert(0, "/opt/glyphrunner")
+        from glyph_eval_runner import run_decompress
+
+        return run_decompress(req.model_dump())

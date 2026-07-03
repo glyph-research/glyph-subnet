@@ -42,6 +42,7 @@ from core.weights import WinnerEntry, compact_history, promote_winner, should_pr
 from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
+from eval.runner_docker import DEFAULT_DOCKER_IMAGE
 from eval.scoring import zstd_baseline_ratio
 from eval.streams import derive_seed, sample_streams
 from validation.precheck import precheck_artifact_dir, precheck_codec
@@ -50,6 +51,7 @@ from weight_setter.service import decide_weights
 
 if TYPE_CHECKING:
     from eval.runner_chutes import ChutesRunner
+    from eval.runner_docker import DockerRunner
 
 __all__ = ["build_parser", "run_once", "run_reign_only", "run_offline_demo", "decide_weights", "main"]
 
@@ -69,7 +71,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wallet-path", "--wallet.path", dest="wallet_path", default=None)
     parser.add_argument("--state-dir", default="./state")
     parser.add_argument("--salt-file", default=None)
-    parser.add_argument("--runner", choices=["local", "chutes"], default="chutes")
+    parser.add_argument(
+        "--runner",
+        choices=["local", "chutes", "docker"],
+        default="chutes",
+        help="'chutes' dispatches to the deployed Chutes eval chutes (requires the mandated "
+        "pro_6000 SKU, subject to Chutes platform availability). 'docker' runs compress/decompress "
+        "as ephemeral local Docker containers instead -- same split-worker isolation, but on "
+        "operator-controlled hardware/GPU; no Chutes dependency.",
+    )
     parser.add_argument(
         "--corpus-dir",
         default=None,
@@ -89,6 +99,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chutes-key-file", default=None)
     parser.add_argument("--compress-chute-url", default=None, help="Deployed glyph-compressor chute base URL")
     parser.add_argument("--decompress-chute-url", default=None, help="Deployed glyph-decompressor chute base URL")
+    parser.add_argument(
+        "--docker-image",
+        default=None,
+        help="Image used for --runner docker compress/decompress containers "
+        f"(default: {DEFAULT_DOCKER_IMAGE!r}). Pre-pull it -- a cold pull runs inside the timed budget.",
+    )
+    parser.add_argument(
+        "--docker-gpu",
+        action="store_true",
+        help="Pass --gpus to the docker containers (requires nvidia-container-toolkit on this host).",
+    )
+    parser.add_argument(
+        "--docker-gpu-device",
+        default=None,
+        metavar="ID",
+        help="Specific GPU device id(s) for --docker-gpu, e.g. '0' or '0,1' (default: all visible GPUs).",
+    )
     parser.add_argument("--streams", type=int, default=STREAMS_PER_ROUND)
     parser.add_argument("--stream-bytes", type=int, default=STREAM_BYTES)
     parser.add_argument("--floor-bps", type=float, default=THROUGHPUT_FLOOR_BPS)
@@ -253,9 +280,17 @@ def _apply_precheck(
     state.duplicate_hash_owner = valid_hash_owner
 
 
-def _make_runner(args) -> "LocalSubprocessRunner | ChutesRunner":
+def _make_runner(args) -> "LocalSubprocessRunner | ChutesRunner | DockerRunner":
     if args.runner == "local":
         return LocalSubprocessRunner()
+    if args.runner == "docker":
+        from eval.runner_docker import DockerRunner
+
+        return DockerRunner(
+            image=args.docker_image or DEFAULT_DOCKER_IMAGE,
+            gpu=args.docker_gpu,
+            gpu_device=args.docker_gpu_device,
+        )
     from eval.runner_chutes import ChutesRunner
 
     return ChutesRunner(

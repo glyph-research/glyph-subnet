@@ -66,6 +66,15 @@ export GLYPH_MIXED_CORPUS_DIR=/tmp/glyph_mixed_8x2mb       # default mixed launc
   --corpus-url https://<host>/corpus.bin --state-dir ./state
 ```
 
+Or run compress/decompress locally in Docker instead of on Chutes (own GPU, no Chutes SKU/
+availability dependency — see [docs/VALIDATING.md](docs/VALIDATING.md)):
+
+```bash
+docker build -f docker/glyph-runner-default.Dockerfile -t glyph-runner-default:latest .
+glyph-validator --runner docker --docker-image glyph-runner-default:latest --docker-gpu \
+  --netuid 117 --wallet-name w --hotkey-name h --corpus-dir ./corpus --state-dir ./state
+```
+
 Offline M0 demo (no chain, no Chutes) — exercises eval → king-of-the-hill → weights:
 
 ```bash

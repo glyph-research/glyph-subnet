@@ -91,3 +91,15 @@ CHUTE_NAME = "glyph-runner"  # shared image name
 # decompress worker only ever sees the blob (DESIGN §6; exploit-prevention #14).
 CHUTE_COMPRESSOR_NAME = "glyph-compressor"
 CHUTE_DECOMPRESSOR_NAME = "glyph-decompressor"
+
+# --- Docker runner (local production alternative to Chutes) ------------------
+# Every validator using --runner docker --docker-gpu must run on the SAME GPU model, for the
+# same reason Chutes pins REFERENCE_SKU: compress_secs/decompress_secs (gated against
+# THROUGHPUT_FLOOR_BPS) are only comparable across validators if the hardware is identical
+# (DESIGN §4 same-system determinism). Unlike REFERENCE_SKU (enforced platform-side by Chutes'
+# node_selector), nothing external enforces this for Docker, so DockerRunner checks it itself
+# (nvidia-smi) and fails closed rather than silently running on whatever GPU is present -- see
+# runner_docker.py's _verify_gpu_model(). Network-wide, not a per-operator override (same
+# rationale as WINDOW_ANCHOR_BLOCK): a validator that quietly used a faster/slower card would
+# desync throughput-floor gating from the rest of the network.
+DOCKER_REFERENCE_GPU = "RTX 4090"
