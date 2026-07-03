@@ -2,14 +2,17 @@ from eval.scoring import (
     StreamResult,
     aggregate_ratio,
     score_codec,
+    source_ratio_breakdown,
+    scored_ratio,
     zstd_baseline_ratio,
 )
+import pytest
 
 FLOOR = 10 * 1024  # 10 KiB/s
 BUDGET = 100.0
 
 
-def result(sid, raw, comp, ok=True, c_secs=1.0, d_secs=1.0):
+def result(sid, raw, comp, ok=True, c_secs=1.0, d_secs=1.0, source=None, scored=True):
     return StreamResult(
         stream_id=sid,
         raw_bytes=raw,
@@ -18,6 +21,8 @@ def result(sid, raw, comp, ok=True, c_secs=1.0, d_secs=1.0):
         compress_secs=c_secs,
         decompress_secs=d_secs,
         blob_hash="h",
+        source=source,
+        scored=scored,
     )
 
 
@@ -31,6 +36,37 @@ def test_all_pass_is_valid():
     score = score_codec(rs, floor_bps=FLOOR, budget_secs=BUDGET)
     assert score.valid is True
     assert score.ratio == 0.45
+
+
+def test_scored_ratio_equal_weights_dataset_averages():
+    rs = [
+        result("fineweb-0", 10_000, 2_000, source="fineweb"),
+        result("fineweb-1", 10_000, 4_000, source="fineweb"),
+        result("pile-0", 1_000, 900, source="pile"),
+        result("pile-1", 1_000, 700, source="pile"),
+    ]
+    assert source_ratio_breakdown(rs) == pytest.approx({"fineweb": 0.3, "pile": 0.8})
+    assert scored_ratio(rs) == pytest.approx(0.55)
+    assert score_codec(rs, floor_bps=FLOOR, budget_secs=BUDGET).ratio == pytest.approx(0.55)
+
+
+def test_benchmark_only_streams_do_not_affect_score_or_validity():
+    rs = [
+        result("fineweb-0", 1_000_000, 300_000, source="fineweb"),
+        result("pile-0", 1_000_000, 500_000, source="pile"),
+        result(
+            "enwik9-0",
+            1_000_000,
+            990_000,
+            ok=False,
+            d_secs=10_000.0,
+            source="enwik9",
+            scored=False,
+        ),
+    ]
+    score = score_codec(rs, floor_bps=FLOOR, budget_secs=BUDGET)
+    assert score.valid is True
+    assert score.ratio == 0.4
 
 
 def test_any_roundtrip_failure_invalidates():

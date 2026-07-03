@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from eval.corpus import CorpusProvider
 from eval.runner import ArtifactRef, CodecRunner, ResourceCaps, RunnerError, StreamInput
@@ -27,7 +27,7 @@ class EvalOutcome:
     def burn_outputs(self) -> list[tuple[str, int, str]]:
         """Per-stream (id, compressed_bytes, blob_hash) -- the burn-seed material."""
 
-        return [(r.stream_id, r.compressed_bytes, r.blob_hash) for r in self.results]
+        return [(r.stream_id, r.compressed_bytes, r.blob_hash) for r in self.results if r.scored]
 
 
 def _prepare_stream(runner: CodecRunner, provider: CorpusProvider, spec: StreamSpec) -> StreamInput:
@@ -64,7 +64,8 @@ def evaluate_artifact(
     for spec in stream_specs:
         stream_input = _prepare_stream(runner, provider, spec)
         try:
-            results.append(runner.run_stream(artifact, stream_input, caps=caps))
+            result = runner.run_stream(artifact, stream_input, caps=caps)
+            results.append(replace(result, source=spec.source, scored=spec.scored))
         except RunnerError as exc:
             # A crashing entrypoint is a failed (non-bit-exact) stream; the codec is invalid.
             results.append(
@@ -76,6 +77,8 @@ def evaluate_artifact(
                     compress_secs=0.0,
                     decompress_secs=0.0,
                     blob_hash="",
+                    source=spec.source,
+                    scored=spec.scored,
                 )
             )
             score = score_codec(results, floor_bps=floor_bps, budget_secs=budget_secs)

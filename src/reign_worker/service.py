@@ -87,7 +87,9 @@ def run_round(
             repo=commitment.repo,
             revision=commitment.revision,
             ratio=outcome.score.ratio,
-            roundtrip_ok=all(r.roundtrip_ok for r in outcome.results) if outcome.results else False,
+            roundtrip_ok=all(r.roundtrip_ok for r in outcome.results if r.scored)
+            if any(r.scored for r in outcome.results)
+            else False,
             throughput_bps=outcome.score.throughput_bps_min,
             valid=outcome.score.valid,
             commit_block=commitment.block or 0,

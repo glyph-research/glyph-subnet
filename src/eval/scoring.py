@@ -22,6 +22,8 @@ class StreamResult:
     compress_secs: float
     decompress_secs: float
     blob_hash: str
+    source: str | None = None
+    scored: bool = True
 
     @property
     def decompress_throughput_bps(self) -> float:
@@ -46,6 +48,47 @@ def aggregate_ratio(results: Sequence[StreamResult]) -> float:
     return compressed / raw
 
 
+def stream_ratio(result: StreamResult) -> float:
+    if result.raw_bytes <= 0:
+        return float("inf")
+    return result.compressed_bytes / result.raw_bytes
+
+
+def source_ratio_breakdown(results: Sequence[StreamResult]) -> dict[str, float]:
+    """Average per-stream ratios within each labeled scored source."""
+
+    groups: dict[str, list[StreamResult]] = {}
+    for result in results:
+        if not result.scored:
+            continue
+        if result.source is None:
+            continue
+        groups.setdefault(result.source, []).append(result)
+    return {
+        source: sum(stream_ratio(result) for result in source_results) / len(source_results)
+        for source, source_results in groups.items()
+        if source_results
+    }
+
+
+def scored_ratio(results: Sequence[StreamResult]) -> float:
+    """Final scored ratio.
+
+    Labeled streams use the launch aggregation rule: mean ratio per scored dataset first,
+    then the mean of those dataset averages. Unlabeled streams keep the legacy pooled
+    compressed/raw ratio.
+    """
+
+    scored = [result for result in results if result.scored]
+    if not scored:
+        return float("inf")
+    if any(result.source is not None for result in scored):
+        breakdown = source_ratio_breakdown(scored)
+        if breakdown:
+            return sum(breakdown.values()) / len(breakdown)
+    return aggregate_ratio(scored)
+
+
 def score_codec(
     results: Sequence[StreamResult],
     *,
@@ -63,21 +106,25 @@ def score_codec(
 
     reasons: list[str] = []
 
-    failed = [r.stream_id for r in results if not r.roundtrip_ok]
+    scored = [r for r in results if r.scored]
+    if not scored:
+        return CodecScore(False, float("inf"), 0.0, ["no scored streams evaluated"])
+
+    failed = [r.stream_id for r in scored if not r.roundtrip_ok]
     if failed:
         reasons.append(f"round-trip failed on streams: {failed}")
 
-    throughput_min = min(r.decompress_throughput_bps for r in results)
+    throughput_min = min(r.decompress_throughput_bps for r in scored)
     if throughput_min < floor_bps:
         reasons.append(
             f"decompress throughput {throughput_min:.0f} B/s below floor {floor_bps:.0f} B/s"
         )
 
-    slow = [r.stream_id for r in results if r.compress_secs > budget_secs]
+    slow = [r.stream_id for r in scored if r.compress_secs > budget_secs]
     if slow:
         reasons.append(f"compress over budget ({budget_secs:.0f}s) on streams: {slow}")
 
-    ratio = aggregate_ratio(results)
+    ratio = scored_ratio(results)
     return CodecScore(
         valid=not reasons,
         ratio=ratio,
@@ -86,7 +133,12 @@ def score_codec(
     )
 
 
-def zstd_baseline_ratio(streams: Sequence[bytes], level: int = BASELINE_LEVEL) -> float:
+def zstd_baseline_ratio(
+    streams: Sequence[bytes],
+    level: int = BASELINE_LEVEL,
+    *,
+    sources: Sequence[str | None] | None = None,
+) -> float:
     """The zstd -19 vacant-crown floor, computed live on the round's streams.
 
     A codec must beat this ratio to take an empty crown (DESIGN §3.3).
@@ -95,8 +147,17 @@ def zstd_baseline_ratio(streams: Sequence[bytes], level: int = BASELINE_LEVEL) -
     import zstandard as zstd
 
     compressor = zstd.ZstdCompressor(level=level)
-    raw = sum(len(s) for s in streams)
-    compressed = sum(len(compressor.compress(s)) for s in streams)
-    if raw <= 0:
-        return float("inf")
-    return compressed / raw
+    results = [
+        StreamResult(
+            stream_id=f"zstd-{index}",
+            raw_bytes=len(stream),
+            compressed_bytes=len(compressor.compress(stream)),
+            roundtrip_ok=True,
+            compress_secs=0.0,
+            decompress_secs=0.0,
+            blob_hash="",
+            source=sources[index] if sources is not None else None,
+        )
+        for index, stream in enumerate(streams)
+    ]
+    return scored_ratio(results)

@@ -123,6 +123,44 @@ class StaticLocalProvider:
             return None
         return RangeSource(url=self.base_url, offset=spec.offset, length=spec.length)
 
+    def source_range(self, source: str) -> tuple[int, int] | None:
+        """Global ``(start, total_bytes)`` of one provenance source's chunks, or None.
+
+        Reads ``provenance.json`` (a list of ``{"source", "chunk_ids": [...]}`` entries written
+        beside the corpus) and maps the named source's chunk files to their byte span in the
+        concatenated corpus. Returns None when there is no provenance, the source is absent, or
+        its chunks are not contiguous (the per-source eval then falls back to whole-corpus
+        sampling). Used by the FineWeb-only eval (issue #10).
+        """
+
+        import json
+
+        prov_path = self.directory / "provenance.json"
+        if not prov_path.is_file():
+            return None
+        try:
+            entries = json.loads(prov_path.read_text())
+        except (ValueError, OSError):
+            return None
+        by_id = {path.relative_to(self.directory).as_posix(): (start, size) for start, size, path in self._index}
+        for entry in entries:
+            if entry.get("source") != source:
+                continue
+            spans = [by_id[c] for c in (entry.get("chunk_ids") or []) if c in by_id]
+            if not spans:
+                return None
+            spans.sort()
+            start = spans[0][0]
+            total = 0
+            cursor = start
+            for s, size in spans:
+                if s != cursor:  # non-contiguous -> can't treat as a single source span
+                    return None
+                cursor += size
+                total += size
+            return start, total
+        return None
+
 
 class OracleProvider(StaticLocalProvider):
     """A corpus produced by the data oracle, verified against its published manifest hash.
