@@ -51,16 +51,15 @@ SAMPLE_BYTES = STREAM_BYTES * STREAMS_PER_ROUND
 MAX_CHALLENGERS_PER_ROUND = 32
 
 # --- Per-source evaluation (issue #10) ----------------------------------------
-# Score each miner on EVAL_STREAMS windows of EVAL_STREAM_BYTES drawn ONLY from the named
-# source (FineWeb) -- two random 4 MiB FineWeb windows per round -- instead of random windows
-# over the whole mixed corpus. enwik9 and Pile are intentionally not scored. The window start
-# offsets are salt-seeded (see eval/streams.derive_seed), so each validator independently picks
-# fresh random windows every benchmarking round; this is deliberately NOT the beacon-only,
-# byte-identical-across-validators model under design in #22 (the per-validator-private salt
-# stays on the data path here). The source is matched by the `source` field in the corpus
-# provenance.json.
-EVAL_SOURCE = "fineweb"
+# Score each miner on two random 4 MiB FineWeb windows and two random 4 MiB Pile windows.
+# The score is the mean of the FineWeb average and the Pile average, so each dataset carries
+# equal weight. enwik9 runs as a one-window benchmark display only: it is not scored and
+# does not affect validity. Window starts are salt-seeded (see eval/streams.derive_seed), so
+# each validator independently picks fresh random windows every benchmarking round.
+EVAL_SOURCE = "fineweb,pile"
+EVAL_BENCHMARK_SOURCE = "enwik9"
 EVAL_STREAMS = 2
+EVAL_BENCHMARK_STREAMS = 1
 EVAL_STREAM_BYTES = 4 * 2**20  # 4 MiB per stream
 
 # --- Gates (DESIGN §3.3, §7) --------------------------------------------------

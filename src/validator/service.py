@@ -9,6 +9,7 @@ offline M0 demo.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import time
 import traceback
@@ -30,6 +31,8 @@ from core.constants import (
     DEFAULT_MAX_ARTIFACT_BYTES,
     DEFAULT_NETUID,
     DEFAULT_WIN_MARGIN,
+    EVAL_BENCHMARK_SOURCE,
+    EVAL_BENCHMARK_STREAMS,
     EVAL_SOURCE,
     EVAL_STREAM_BYTES,
     EVAL_STREAMS,
@@ -46,7 +49,7 @@ from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
 from eval.runner_docker import DEFAULT_DOCKER_IMAGE
-from eval.scoring import zstd_baseline_ratio
+from eval.scoring import source_ratio_breakdown, stream_ratio, zstd_baseline_ratio
 from eval.streams import derive_seed, sample_source_streams, sample_streams
 from validation.precheck import precheck_artifact_dir, precheck_codec
 from reign_worker.service import run_round
@@ -125,14 +128,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--streams", type=int, default=STREAMS_PER_ROUND)
     parser.add_argument("--stream-bytes", type=int, default=STREAM_BYTES)
-    # Per-source eval (issue #10): score on EVAL_STREAMS windows drawn only from this
-    # provenance source (FineWeb). Empty --eval-source disables it and reverts to whole-corpus
-    # sampling (--streams/--stream-bytes). Falls back to whole-corpus sampling automatically if
-    # the corpus has no provenance for the source.
+    # Per-source eval (issue #10): score on EVAL_STREAMS windows per source. Empty
+    # --eval-source disables it and reverts to whole-corpus sampling (--streams/--stream-bytes).
     parser.add_argument("--eval-source", default=EVAL_SOURCE,
-                        help="provenance source to draw eval streams from ('' = whole corpus)")
+                        help="comma-separated provenance sources to score ('' = whole corpus)")
     parser.add_argument("--eval-streams", type=int, default=EVAL_STREAMS)
     parser.add_argument("--eval-stream-bytes", type=int, default=EVAL_STREAM_BYTES)
+    parser.add_argument("--eval-benchmark-source", default=EVAL_BENCHMARK_SOURCE,
+                        help="provenance source to run for benchmark display only")
+    parser.add_argument("--eval-benchmark-streams", type=int, default=EVAL_BENCHMARK_STREAMS)
     parser.add_argument("--floor-bps", type=float, default=THROUGHPUT_FLOOR_BPS)
     parser.add_argument("--compress-budget-secs", type=float, default=COMPRESS_BUDGET_SECS)
     parser.add_argument("--max-artifact-bytes", type=int, default=DEFAULT_MAX_ARTIFACT_BYTES)
@@ -341,21 +345,55 @@ def _make_provider(args) -> StaticLocalProvider:
     return provider
 
 
+def _parse_sources(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _source_seed(seed: int, source: str) -> int:
+    payload = int(seed).to_bytes(8, "big") + source.encode("utf-8")
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+
+def _source_specs(args, provider, seed: int, source: str, *, scored: bool, streams: int):
+    if not hasattr(provider, "source_range"):
+        raise SystemExit("per-source eval requires a provider with source_range()")
+    rng = provider.source_range(source)
+    if rng is None:
+        raise SystemExit(f"corpus provenance does not contain a contiguous source range for {source!r}")
+    start, span = rng
+    return sample_source_streams(
+        _source_seed(seed, source),
+        start,
+        span,
+        stream_bytes=args.eval_stream_bytes,
+        streams=streams,
+        source=source,
+        scored=scored,
+    )
+
+
 def _select_specs(args, provider, seed):
-    """Per-round stream selection. With --eval-source set (default FineWeb) and that source
-    resolvable in the corpus provenance, draw --eval-streams windows of --eval-stream-bytes
-    from that source only (issue #10); otherwise fall back to whole-corpus sampling."""
+    """Select scored FineWeb/Pile streams plus benchmark-only enwik9 streams."""
 
     source = getattr(args, "eval_source", "") or ""
-    if source and hasattr(provider, "source_range"):
-        rng = provider.source_range(source)
-        if rng is not None:
-            start, span = rng
-            return sample_source_streams(
-                seed, start, span,
-                stream_bytes=args.eval_stream_bytes, streams=args.eval_streams,
-            )
-    return sample_streams(seed, provider.total_bytes, stream_bytes=args.stream_bytes, streams=args.streams)
+    sources = _parse_sources(source)
+    if not sources:
+        return sample_streams(seed, provider.total_bytes, stream_bytes=args.stream_bytes, streams=args.streams)
+
+    specs = []
+    for scored_source in sources:
+        specs.extend(_source_specs(args, provider, seed, scored_source, scored=True, streams=args.eval_streams))
+    benchmark_source = (getattr(args, "eval_benchmark_source", "") or "").strip()
+    benchmark_streams = getattr(args, "eval_benchmark_streams", 0)
+    if benchmark_source and benchmark_streams > 0:
+        specs.extend(
+            _source_specs(args, provider, seed, benchmark_source, scored=False, streams=benchmark_streams)
+        )
+    return specs
+
+
+def _scored_specs(specs):
+    return [spec for spec in specs if spec.scored]
 
 
 def _make_chain(args) -> BittensorChain:
@@ -406,7 +444,12 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
         provider = _make_provider(args)
         seed = derive_seed(chain.block_hash(block), salt, block)
         specs = _select_specs(args, provider, seed)
-        baseline = zstd_baseline_ratio([provider.materialize(s) for s in specs], level=args.baseline_level)
+        scored_specs = _scored_specs(specs)
+        baseline = zstd_baseline_ratio(
+            [provider.materialize(s) for s in scored_specs],
+            level=args.baseline_level,
+            sources=[s.source for s in scored_specs],
+        )
         runner = _make_runner(args)
         caps = ResourceCaps(wall_clock_secs=args.compress_budget_secs, artifact_bytes=args.max_artifact_bytes)
         print(f"round: {len(challengers)} challenger(s), baseline zstd ratio={baseline:.4f}")
@@ -478,7 +521,12 @@ def run_offline_demo(args: argparse.Namespace) -> None:
     provider = _make_provider(args)
     seed = derive_seed("offline-demo-block", "offline-demo-salt", 0)
     specs = _select_specs(args, provider, seed)
-    baseline = zstd_baseline_ratio([provider.materialize(s) for s in specs], level=args.baseline_level)
+    scored_specs = _scored_specs(specs)
+    baseline = zstd_baseline_ratio(
+        [provider.materialize(s) for s in scored_specs],
+        level=args.baseline_level,
+        sources=[s.source for s in scored_specs],
+    )
 
     hotkeys = ["uid0_burn"]
     artifacts: list[tuple[str, ArtifactRef]] = []
@@ -498,11 +546,16 @@ def run_offline_demo(args: argparse.Namespace) -> None:
         floor_bps=args.floor_bps, budget_secs=args.compress_budget_secs,
     )
 
+    scored_counts = {}
+    benchmark_counts = {}
+    for spec in specs:
+        counts = scored_counts if spec.scored else benchmark_counts
+        counts[spec.source or "whole-corpus"] = counts.get(spec.source or "whole-corpus", 0) + 1
     sampled_bytes = specs[0].length if specs else 0
-    source = (getattr(args, "eval_source", "") or "") if sampled_bytes else ""
     print(
         f"streams={len(specs)} stream_bytes={sampled_bytes}"
-        f"{f' source={source}' if source else ''} "
+        f" scored={scored_counts}"
+        f" benchmark_only={benchmark_counts} "
         f"baseline zstd-{args.baseline_level} ratio={baseline:.4f}"
     )
     history: list[WinnerEntry] = []
@@ -510,8 +563,16 @@ def run_offline_demo(args: argparse.Namespace) -> None:
         outcome = outcomes[hotkey]
         beats = outcome.score.valid and outcome.score.ratio < baseline
         status = "valid" if outcome.score.valid else f"INVALID {outcome.score.reasons}"
+        scored_breakdown = source_ratio_breakdown(outcome.results)
+        benchmark = {
+            result.source or result.stream_id: stream_ratio(result)
+            for result in outcome.results
+            if not result.scored
+        }
         print(
             f"  {hotkey}: ratio={outcome.score.ratio:.4f} "
+            f"scored_sources={{{', '.join(f'{k}: {v:.4f}' for k, v in scored_breakdown.items())}}} "
+            f"benchmark_only={{{', '.join(f'{k}: {v:.4f}' for k, v in benchmark.items())}}} "
             f"min_throughput={outcome.score.throughput_bps_min:.0f} B/s "
             f"beats_baseline={beats} [{status}]"
         )

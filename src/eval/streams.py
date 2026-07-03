@@ -24,6 +24,8 @@ class StreamSpec:
     stream_id: str
     offset: int
     length: int
+    source: str | None = None
+    scored: bool = True
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,8 @@ def sample_source_streams(
     *,
     stream_bytes: int = STREAM_BYTES,
     streams: int = STREAMS_PER_ROUND,
+    source: str | None = None,
+    scored: bool = True,
 ) -> list[StreamSpec]:
     """Pick ``streams`` windows of ``stream_bytes`` confined to a single source's byte range.
 
@@ -103,11 +107,20 @@ def sample_source_streams(
     seed_bytes = int(seed).to_bytes(8, "big")
 
     specs: list[StreamSpec] = []
+    prefix = source or "source"
     for index in range(streams):
         if max_offset == 0:
             local = 0
         else:
             digest = hashlib.sha256(seed_bytes + index.to_bytes(4, "big")).digest()
             local = int.from_bytes(digest, "big") % (max_offset + 1)
-        specs.append(StreamSpec(stream_id=f"s{index}", offset=source_start + local, length=length))
+        specs.append(
+            StreamSpec(
+                stream_id=f"{prefix}-{index}",
+                offset=source_start + local,
+                length=length,
+                source=source,
+                scored=scored,
+            )
+        )
     return specs
