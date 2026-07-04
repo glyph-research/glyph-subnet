@@ -28,6 +28,10 @@ _ENV_ALLOWLIST = {
     "LD_LIBRARY_PATH", "NVIDIA_DRIVER_CAPABILITIES", "NVIDIA_VISIBLE_DEVICES", "PATH", "PYTHONPATH",
 }
 _HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
+_PRIVDROP_UID_ENV = "GLYPH_CODEC_PRIVDROP_UID"
+_PRIVDROP_GID_ENV = "GLYPH_CODEC_PRIVDROP_GID"
+_PRIVDROP_REQUIRE_ENV = "GLYPH_CODEC_REQUIRE_PRIVDROP"
+_NO_NEW_PRIVS_ENV = "GLYPH_CODEC_NO_NEW_PRIVS"
 
 
 def sha256_file(path: Path) -> str:
@@ -105,13 +109,40 @@ def _subprocess_env(home: Path) -> dict:
     return env
 
 
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _setpriv_prefix() -> list[str]:
+    uid = os.environ.get(_PRIVDROP_UID_ENV)
+    gid = os.environ.get(_PRIVDROP_GID_ENV)
+    requested = bool(uid or gid or _env_truthy(_NO_NEW_PRIVS_ENV))
+    if not requested:
+        return []
+    if bool(uid) != bool(gid):
+        raise RunnerError(f"{_PRIVDROP_UID_ENV} and {_PRIVDROP_GID_ENV} must be set together")
+    setpriv = shutil.which("setpriv")
+    if setpriv is None:
+        if _env_truthy(_PRIVDROP_REQUIRE_ENV):
+            raise RunnerError("setpriv unavailable for required codec privilege drop")
+        return []
+    prefix = [setpriv, "--no-new-privs", "--bounding-set=-all"]
+    if uid and gid:
+        prefix += ["--reuid", uid, "--regid", gid, "--clear-groups"]
+    return [*prefix, "--"]
+
+
 def _exec(argv: list[str], cwd: Path, caps: ResourceCaps, home: Path) -> float:
     # Untrusted codec runs here with the network dropped (unshare --net) while the stream is
     # present; trusted prep (download) runs before this with no untrusted code.
     wrapped = argv
+    setpriv_prefix = _setpriv_prefix()
+    if setpriv_prefix:
+        home.chmod(0o777)
+        wrapped = [*setpriv_prefix, *wrapped]
     if not caps.network:
         if shutil.which("unshare"):
-            wrapped = ["unshare", "--net", "--", *argv]
+            wrapped = ["unshare", "--net", "--", *wrapped]
         else:
             raise RunnerError("network isolation unavailable for untrusted artifact execution")
     start = time.perf_counter()

@@ -4,7 +4,18 @@ These guard the exfiltration boundary -- a malicious codec/dep/weights can't rea
 and can't reach the network (offline HF + NO_PROXY complement the `unshare --net` isolation).
 """
 
-from eval.runner import _SUBPROCESS_ENV_ALLOWLIST, _subprocess_env
+import subprocess
+
+import pytest
+
+from eval.runner import (
+    LocalSubprocessRunner,
+    ResourceCaps,
+    RunnerError,
+    _SUBPROCESS_ENV_ALLOWLIST,
+    _setpriv_prefix,
+    _subprocess_env,
+)
 
 _INJECTED = {
     "HOME", "XDG_CACHE_HOME", "TMPDIR", "NO_PROXY",
@@ -34,3 +45,35 @@ def test_subprocess_env_scrubs_secrets(tmp_path, monkeypatch):
     # Nothing in the env is outside the allowlist or the injected isolation vars.
     for key in env:
         assert key in _SUBPROCESS_ENV_ALLOWLIST or key in _INJECTED, f"unexpected env key {key}"
+
+
+def test_setpriv_prefix_requires_uid_and_gid_together(monkeypatch):
+    monkeypatch.setenv("GLYPH_CODEC_PRIVDROP_UID", "65534")
+    monkeypatch.delenv("GLYPH_CODEC_PRIVDROP_GID", raising=False)
+
+    with pytest.raises(RunnerError, match="must be set together"):
+        _setpriv_prefix()
+
+
+def test_strict_sandbox_wraps_unshare_outside_setpriv(monkeypatch, tmp_path):
+    seen = {}
+
+    def _which(name):
+        return f"/usr/bin/{name}" if name in {"unshare", "setpriv"} else None
+
+    def _run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setenv("GLYPH_CODEC_PRIVDROP_UID", "65534")
+    monkeypatch.setenv("GLYPH_CODEC_PRIVDROP_GID", "65534")
+    monkeypatch.setattr("eval.runner.shutil.which", _which)
+    monkeypatch.setattr("eval.runner.subprocess.run", _run)
+
+    runner = LocalSubprocessRunner(strict_sandbox=True, require_network_isolation=True)
+    runner._exec(["python3", "compress.py"], tmp_path, ResourceCaps(wall_clock_secs=1), home=tmp_path)
+
+    assert seen["cmd"][:4] == ["unshare", "--net", "--", "/usr/bin/setpriv"]
+    assert "--no-new-privs" in seen["cmd"]
+    assert "--bounding-set=-all" in seen["cmd"]
+    assert seen["cmd"][-2:] == ["python3", "compress.py"]
