@@ -59,9 +59,19 @@ DEFAULT_DOCKER_IMAGE = "python:3.12-slim"
 
 _CONTAINER_ARTIFACT_DIR = "/artifact"
 _CONTAINER_SCRATCH_DIR = "/scratch"
+_DEFAULT_CONTAINER_USER = "65534:65534"
 # Host env vars forwarded into the container only when the host itself has them set --
 # never blanket-inherited (see module docstring).
 _FORWARDED_ENV_VARS = ("CUDA_VISIBLE_DEVICES", "GLYPH_TS_ZIP_DEVICE", "GLYPH_TS_ZIP_THREADS")
+
+
+def _allow_sandbox_read_tree(root: Path) -> None:
+    for dirpath, _dirnames, filenames in os.walk(root):
+        directory = Path(dirpath)
+        directory.chmod(directory.stat().st_mode | 0o755)
+        for filename in filenames:
+            path = directory / filename
+            path.chmod(path.stat().st_mode | 0o444)
 
 
 def _verify_gpu_model(gpu_device: str | None, reference_gpu: str) -> None:
@@ -110,6 +120,8 @@ class DockerRunner:
         gpu: bool = False,
         gpu_device: str | None = None,
         docker_bin: str = "docker",
+        seccomp_profile: str | None = None,
+        container_user: str = _DEFAULT_CONTAINER_USER,
     ):
         if shutil.which(docker_bin) is None:
             raise RunnerError(
@@ -123,6 +135,8 @@ class DockerRunner:
         self.gpu = gpu
         self.gpu_device = gpu_device
         self.docker_bin = docker_bin
+        self.seccomp_profile = seccomp_profile
+        self.container_user = container_user
 
     def _artifact_dir(self, artifact: ArtifactRef) -> Path:
         if not artifact.local_path:
@@ -211,6 +225,10 @@ class DockerRunner:
         self, argv: list[str], artifact_dir: Path, scratch_dir: Path, caps: ResourceCaps
     ) -> float:
         name = f"glyph-runner-{uuid.uuid4().hex[:12]}"
+        # The codec process runs as a non-root uid. The host temp dir is otherwise owned by the
+        # validator user, so make only this ephemeral scratch mount writable to the sandbox uid.
+        scratch_dir.chmod(0o777)
+        _allow_sandbox_read_tree(artifact_dir)
         cmd = [
             self.docker_bin, "run", "--rm", "--name", name,
             "-w", _CONTAINER_ARTIFACT_DIR,
@@ -218,7 +236,12 @@ class DockerRunner:
             "-v", f"{scratch_dir}:{_CONTAINER_SCRATCH_DIR}",
             "--memory", str(caps.ram_bytes),
             "--pids-limit", "512",
+            "--user", self.container_user,
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges:true",
         ]
+        if self.seccomp_profile:
+            cmd += ["--security-opt", f"seccomp={self.seccomp_profile}"]
         if not caps.network:
             # Untrusted codec code only ever runs HERE, with the network dropped while the
             # corpus stream/blob is present -- same invariant as LocalSubprocessRunner's

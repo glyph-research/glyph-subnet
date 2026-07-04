@@ -116,6 +116,34 @@ _SUBPROCESS_ENV_ALLOWLIST = {
     "PYTHONPATH",
 }
 
+_PRIVDROP_UID_ENV = "GLYPH_CODEC_PRIVDROP_UID"
+_PRIVDROP_GID_ENV = "GLYPH_CODEC_PRIVDROP_GID"
+_PRIVDROP_REQUIRE_ENV = "GLYPH_CODEC_REQUIRE_PRIVDROP"
+_NO_NEW_PRIVS_ENV = "GLYPH_CODEC_NO_NEW_PRIVS"
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _setpriv_prefix() -> list[str]:
+    uid = os.environ.get(_PRIVDROP_UID_ENV)
+    gid = os.environ.get(_PRIVDROP_GID_ENV)
+    requested = bool(uid or gid or _env_truthy(_NO_NEW_PRIVS_ENV))
+    if not requested:
+        return []
+    if bool(uid) != bool(gid):
+        raise RunnerError(f"{_PRIVDROP_UID_ENV} and {_PRIVDROP_GID_ENV} must be set together")
+    setpriv = shutil.which("setpriv")
+    if setpriv is None:
+        if _env_truthy(_PRIVDROP_REQUIRE_ENV):
+            raise RunnerError("setpriv unavailable for required codec privilege drop")
+        return []
+    prefix = [setpriv, "--no-new-privs", "--bounding-set=-all"]
+    if uid and gid:
+        prefix += ["--reuid", uid, "--regid", gid, "--clear-groups"]
+    return [*prefix, "--"]
+
 
 def _subprocess_env(home: Path) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key in _SUBPROCESS_ENV_ALLOWLIST}
@@ -237,9 +265,13 @@ class LocalSubprocessRunner:
         # malicious deps cannot exfiltrate: the data is only present when there is no network, and
         # `_subprocess_env` also pins the HF stack offline as a second layer.
         wrapped = argv
+        setpriv_prefix = _setpriv_prefix()
+        if setpriv_prefix:
+            home.chmod(0o777)
+            wrapped = [*setpriv_prefix, *wrapped]
         if self.strict_sandbox and not caps.network:
             if shutil.which("unshare"):
-                wrapped = ["unshare", "--net", "--", *argv]
+                wrapped = ["unshare", "--net", "--", *wrapped]
             elif self.require_network_isolation:
                 raise RunnerError("network isolation unavailable for untrusted artifact execution")
         start = time.perf_counter()

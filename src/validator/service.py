@@ -126,6 +126,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="ID",
         help="Specific GPU device id(s) for --docker-gpu, e.g. '0' or '0,1' (default: all visible GPUs).",
     )
+    parser.add_argument(
+        "--docker-seccomp-profile",
+        default=None,
+        metavar="PATH",
+        help="Optional seccomp profile JSON passed to Docker codec containers. When omitted, "
+        "Docker's default seccomp profile remains active.",
+    )
     parser.add_argument("--streams", type=int, default=STREAMS_PER_ROUND)
     parser.add_argument("--stream-bytes", type=int, default=STREAM_BYTES)
     # Per-source eval (issue #10): score on EVAL_STREAMS windows per source. Empty
@@ -309,6 +316,7 @@ def _make_runner(args) -> "LocalSubprocessRunner | ChutesRunner | DockerRunner":
             image=args.docker_image or DEFAULT_DOCKER_IMAGE,
             gpu=args.docker_gpu,
             gpu_device=args.docker_gpu_device,
+            seccomp_profile=args.docker_seccomp_profile,
         )
     from eval.runner_chutes import ChutesRunner
 

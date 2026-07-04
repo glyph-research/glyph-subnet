@@ -52,6 +52,10 @@ glyph-validator --docker-image glyph-runner-default:latest \
   its own image with those baked in. Throughput timing includes container startup and there is
   no `--cpus` cap, so also use comparable host CPUs across validators for tightest
   same-system determinism, even with the GPU pinned.
+- Codec containers run as non-root UID/GID `65534:65534`, drop all Linux capabilities, set
+  `no-new-privileges`, and use Docker's default seccomp profile. To test a reviewed stricter
+  profile, pass `--docker-seccomp-profile /path/to/seccomp-codec.json`. See
+  [`CODEC_SANDBOX_HARDENING.md`](CODEC_SANDBOX_HARDENING.md).
 - Like `--runner local`, this fetches each codec artifact to local disk first (no
   `--corpus-url` range-fetch path), so `needs_local_artifact`-style runners always get inlined
   streams -- fine for validator-run hardware, unlike the untrusted-worker Chutes path.
