@@ -44,6 +44,7 @@ from core.constants import (
 )
 from core.state import CommitmentState, ValidatorState, load_state, save_state
 from core.version import assert_weights_version_matches, local_version_key
+from core.wandb_logger import WandbLogger, build_round_metrics, build_weights_metrics, make_wandb_logger
 from core.weights import WinnerEntry, compact_history, promote_winner, should_promote
 from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
@@ -132,6 +133,29 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Optional seccomp profile JSON passed to Docker codec containers. When omitted, "
         "Docker's default seccomp profile remains active.",
+    )
+    parser.add_argument(
+        "--wandb.off",
+        dest="wandb_off",
+        action="store_true",
+        help="Disable Weights & Biases logging (default: ON). Pure observability -- disabling "
+        "it changes nothing about scoring/promotion/weights/burn.",
+    )
+    parser.add_argument("--wandb.project", dest="wandb_project", default="glyph-subnet")
+    parser.add_argument(
+        "--wandb.entity", dest="wandb_entity", default=None,
+        help="wandb entity (team/org). Defaults to your wandb account if unset.",
+    )
+    parser.add_argument(
+        "--wandb.offline", dest="wandb_offline", action="store_true",
+        help="Log locally only, no network (for tests/CI -- no WANDB_API_KEY needed).",
+    )
+    parser.add_argument("--wandb.notes", dest="wandb_notes", default=None)
+    parser.add_argument(
+        "--wandb.restart_interval", dest="wandb_restart_interval", type=float, default=24.0,
+        metavar="HOURS",
+        help="Finish and reopen the wandb run after this many hours, so long-lived validator "
+        "processes don't accumulate one unbounded run. 0 disables the restart.",
     )
     parser.add_argument("--streams", type=int, default=STREAMS_PER_ROUND)
     parser.add_argument("--stream-bytes", type=int, default=STREAM_BYTES)
@@ -416,8 +440,14 @@ def _make_chain(args) -> BittensorChain:
     )
 
 
-def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: str) -> int:
-    """Precheck commitments and, if there are new challengers, run one reign round."""
+def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: str) -> tuple[int, dict | None]:
+    """Precheck commitments and, if there are new challengers, run one reign round.
+
+    Returns ``(block, round_metrics)``; ``round_metrics`` is ``None`` when no challengers ran
+    this round (nothing new to report). ``round_metrics`` is a plain dict built by
+    ``core.wandb_logger.build_round_metrics`` purely from what this round already decided --
+    reporting it changes nothing about scoring/promotion (issue #41).
+    """
 
     block = chain.current_block()
     if state.window_anchor_block is None:
@@ -448,6 +478,7 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
         for c in state.commitments.values()
         if c.valid and c.key not in state.scores and c.hotkey not in state.excluded_hotkeys
     ]
+    round_metrics = None
     if challengers:
         provider = _make_provider(args)
         seed = derive_seed(chain.block_hash(block), salt, block)
@@ -461,64 +492,94 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
         runner = _make_runner(args)
         caps = ResourceCaps(wall_clock_secs=args.compress_budget_secs, artifact_bytes=args.max_artifact_bytes)
         print(f"round: {len(challengers)} challenger(s), baseline zstd ratio={baseline:.4f}")
-        run_round(
+        champion_before = state.winner_history[0].hotkey if state.winner_history else None
+        outcomes = run_round(
             state, runner, challengers, provider, specs,
             caps=caps, floor_bps=args.floor_bps, budget_secs=args.compress_budget_secs,
             margin=args.win_margin, block=block, eligible_hotkeys=eligible, baseline_ratio=baseline,
         )
-    return block
+        champion_after = state.winner_history[0] if state.winner_history else None
+        round_metrics = build_round_metrics(
+            block=block,
+            baseline_ratio=baseline,
+            num_challengers=len(challengers),
+            outcomes=outcomes,
+            excluded_hotkeys_count=len(state.excluded_hotkeys),
+            commit_phase_seen_count=sum(len(v) for v in state.commit_phase_seen.values()),
+            winner_hotkey=champion_after.hotkey if champion_after else None,
+            winner_ratio=champion_after.ratio if champion_after else None,
+            crown_changed=bool(champion_after) and champion_after.hotkey != champion_before,
+        )
+    return block, round_metrics
 
 
 # Production paths (require chain access)
 
 
-def run_once(args: argparse.Namespace) -> None:
-    state_dir = Path(args.state_dir)
-    state_path = state_dir / "validator_state.json"
-    state = load_state(state_path)
-    salt = _load_salt(state_dir, args.salt_file)
+def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) -> None:
+    owns_logger = wandb_logger is None
+    wandb_logger = wandb_logger or make_wandb_logger(args)
+    try:
+        state_dir = Path(args.state_dir)
+        state_path = state_dir / "validator_state.json"
+        state = load_state(state_path)
+        salt = _load_salt(state_dir, args.salt_file)
 
-    chain = _make_chain(args)
-    version_key = _local_version_key()
-    print(f"version key ok: {_assert_version_key_matches(chain)}")
-    if not chain.commit_reveal_enabled():
-        print("WARNING: commit-reveal is not enabled on this subnet; anti-copy weights are weaker")
+        chain = _make_chain(args)
+        version_key = _local_version_key()
+        print(f"version key ok: {_assert_version_key_matches(chain)}")
+        if not chain.commit_reveal_enabled():
+            print("WARNING: commit-reveal is not enabled on this subnet; anti-copy weights are weaker")
 
-    block = _evaluate_round(args, state, chain, salt)
-    tempo = chain.tempo()
-    anchor = state.window_anchor_block
+        block, round_metrics = _evaluate_round(args, state, chain, salt)
+        if round_metrics is not None:
+            wandb_logger.log(round_metrics)
+        tempo = chain.tempo()
+        anchor = state.window_anchor_block
 
-    metagraph = chain.metagraph()
-    hotkeys = list(metagraph.hotkeys)
-    uids = [int(uid) for uid in metagraph.uids]
+        metagraph = chain.metagraph()
+        hotkeys = list(metagraph.hotkeys)
+        uids = [int(uid) for uid in metagraph.uids]
 
-    weights, burn = decide_weights(
-        hotkeys, state.winner_history, block=block, tempo=tempo,
-        last_round_outputs=state.last_round_outputs, anchor=anchor, burn_uid=args.burn_uid,
-    )
-    save_state(state_path, state)
+        weights, burn = decide_weights(
+            hotkeys, state.winner_history, block=block, tempo=tempo,
+            last_round_outputs=state.last_round_outputs, anchor=anchor, burn_uid=args.burn_uid,
+        )
+        wandb_logger.log(build_weights_metrics(block=block, tempo=tempo, is_burn_tempo=burn, uids=uids, weights=weights))
+        save_state(state_path, state)
 
-    nonzero = [(uids[i], round(w, 4)) for i, w in enumerate(weights) if w > 0]
-    print(f"block={block} tempo={tempo} burn_tempo={burn} weights={nonzero}")
-    if args.dry_run:
-        print("dry-run: not submitting weights")
-        return
-    print(f"set_weights response: {chain.set_weights(uids, weights, version_key=version_key)}")
+        nonzero = [(uids[i], round(w, 4)) for i, w in enumerate(weights) if w > 0]
+        print(f"block={block} tempo={tempo} burn_tempo={burn} weights={nonzero}")
+        if args.dry_run:
+            print("dry-run: not submitting weights")
+            return
+        print(f"set_weights response: {chain.set_weights(uids, weights, version_key=version_key)}")
+    finally:
+        if owns_logger:
+            wandb_logger.finish()
 
 
-def run_reign_only(args: argparse.Namespace) -> None:
+def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) -> None:
     """The reign half only (evaluate + update crown), no weight setting."""
 
-    state_dir = Path(args.state_dir)
-    state_path = state_dir / "validator_state.json"
-    state = load_state(state_path)
-    salt = _load_salt(state_dir, args.salt_file)
+    owns_logger = wandb_logger is None
+    wandb_logger = wandb_logger or make_wandb_logger(args)
+    try:
+        state_dir = Path(args.state_dir)
+        state_path = state_dir / "validator_state.json"
+        state = load_state(state_path)
+        salt = _load_salt(state_dir, args.salt_file)
 
-    chain = _make_chain(args)
-    print(f"version key ok: {_assert_version_key_matches(chain)}")
-    _evaluate_round(args, state, chain, salt)
-    save_state(state_path, state)
-    print(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in state.winner_history]}")
+        chain = _make_chain(args)
+        print(f"version key ok: {_assert_version_key_matches(chain)}")
+        _block, round_metrics = _evaluate_round(args, state, chain, salt)
+        if round_metrics is not None:
+            wandb_logger.log(round_metrics)
+        save_state(state_path, state)
+        print(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in state.winner_history]}")
+    finally:
+        if owns_logger:
+            wandb_logger.finish()
 
 
 # Offline M0 demo (no chain): eval -> score -> king-of-the-hill -> weights end to end
@@ -642,21 +703,28 @@ def main() -> None:
     if args.offline_demo:
         run_offline_demo(args)
         return
+    # One wandb run for the whole process lifetime (not one per --loop iteration) so console
+    # capture starts before the first round and metrics from every round land in the same run
+    # (see core.wandb_logger's own restart_interval for keeping very long runs bounded).
+    wandb_logger = make_wandb_logger(args)
     poll_chain = None
-    while True:
-        try:
-            run_once(args)
-        except KeyboardInterrupt:
-            break
-        except Exception:
-            traceback.print_exc()
-        if not args.loop:
-            break
-        # Poll at block cadence between rounds so a reveal's commit-phase block is captured
-        # rather than degrading to the reveal-observation block (exploit vector #9).
-        if poll_chain is None:
-            poll_chain = _make_chain(args)
-        _sleep_with_commit_polls(args, poll_chain)
+    try:
+        while True:
+            try:
+                run_once(args, wandb_logger=wandb_logger)
+            except KeyboardInterrupt:
+                break
+            except Exception:
+                traceback.print_exc()
+            if not args.loop:
+                break
+            # Poll at block cadence between rounds so a reveal's commit-phase block is captured
+            # rather than degrading to the reveal-observation block (exploit vector #9).
+            if poll_chain is None:
+                poll_chain = _make_chain(args)
+            _sleep_with_commit_polls(args, poll_chain)
+    finally:
+        wandb_logger.finish()
 
 
 if __name__ == "__main__":

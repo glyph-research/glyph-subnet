@@ -172,6 +172,39 @@ Using Chutes instead:
   --corpus-url https://<host>/corpus.bin --state-dir ./state
 ```
 
+## Observability (wandb)
+
+Every validator process (`glyph-validator`, and `glyph-reign-worker` in the split-service
+form) streams per-round metrics to [Weights & Biases](https://wandb.ai) by default —
+per-challenger ratio/throughput/validity, the scored FineWeb/Pile breakdown, the
+enwik9 benchmark-only ratio, crown changes, and (all-in-one path only) the weights/burn
+decision. It also mirrors the process's own stdout/stderr into the run's Logs tab. This is
+pure observability: wandb is never read back into scoring, promotion, or weight-setting, and
+a wandb outage (network down, bad credentials, quota) only disables further logging — it
+never crashes or delays a round.
+
+With no `WANDB_API_KEY` set, the validator falls back to an **anonymous run**: a real,
+shareable wandb run created without requiring a login to view. The run URL is printed to
+stdout on start (`[wandb] run started: https://wandb.ai/...`) — share that link to let
+others watch your validator's rounds live.
+
+To log to your own wandb project/entity instead, set `WANDB_API_KEY` in the environment (or
+`.env`) and pass:
+
+```bash
+--wandb.project glyph-subnet --wandb.entity <your-wandb-entity>
+```
+
+Other flags:
+
+- `--wandb.off` — disable wandb entirely (no import, no network, byte-identical behavior
+  to a build without this feature).
+- `--wandb.offline` — log locally only (writes under `./wandb/`, no network), useful for
+  CI or air-gapped testing.
+- `--wandb.notes "..."` — free-text note attached to the run.
+- `--wandb.restart_interval <hours>` — finish and reopen the run on this cadence so a
+  long-lived `--loop` validator doesn't accumulate one unbounded run (default 24h; 0 disables).
+
 ## Notes
 
 - **Version safety**: the validator fail-closes if `core.__version_key__` ≠ the
