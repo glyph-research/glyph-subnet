@@ -62,8 +62,13 @@ def run_round(
     block: int | None,
     eligible_hotkeys: set[str],
     baseline_ratio: float | None = None,
-) -> None:
-    """Evaluate incumbent + challengers on identical streams and update the crown."""
+) -> dict:
+    """Evaluate incumbent + challengers on identical streams and update the crown.
+
+    Returns the raw ``{hotkey: EvalOutcome}`` this round produced (e.g. for wandb's
+    per-source-breakdown reporting, issue #41) -- purely a read of what was already
+    computed; nothing here changes because it's returned.
+    """
 
     artifacts: list[tuple[str, ArtifactRef]] = []
     incumbent = state.winner_history[0] if state.winner_history else None
@@ -141,6 +146,8 @@ def run_round(
             winner_outputs = inc.burn_outputs()
     if winner_outputs is not None:
         state.last_round_outputs = list(winner_outputs)
+
+    return outcomes
 
 
 def main() -> None:
