@@ -14,7 +14,7 @@ import traceback
 from pathlib import Path
 
 from core.burn_schedule import derive_burn_seed, is_burn_tempo
-from core.constants import BURN_UID, DEFAULT_NETUID, WINDOW_ANCHOR_BLOCK
+from core.constants import BURN_ENABLED, BURN_UID, DEFAULT_NETUID, WINDOW_ANCHOR_BLOCK
 from core.state import load_state
 from core.version import assert_weights_version_matches, local_version_key
 from core.weights import WinnerEntry, compute_weights
@@ -30,10 +30,14 @@ def decide_weights(
     anchor: int = WINDOW_ANCHOR_BLOCK,
     burn_uid: int = BURN_UID,
 ) -> tuple[list[float], bool]:
-    """Compute the weights for the current tempo, applying the temporal burn schedule."""
+    """Compute the weights for the current tempo, applying the temporal burn schedule.
+
+    Short-circuits to "never a burn tempo" when ``core.constants.BURN_ENABLED`` is False
+    (issue #43) -- a network-wide, source-committed switch, not a per-operator override.
+    """
 
     seed = derive_burn_seed(last_round_outputs)
-    burn = is_burn_tempo(block, tempo, seed, anchor)
+    burn = BURN_ENABLED and is_burn_tempo(block, tempo, seed, anchor)
     weights = compute_weights(hotkeys, history, is_burn_tempo=burn, burn_uid=burn_uid)
     return weights, burn
 

@@ -73,6 +73,13 @@ BASELINE_LEVEL = 19  # zstd -19: the vacant-crown floor a codec must beat
 # sets weights 100% to BURN_UID.
 BURN_WINDOW_TEMPOS = 4
 BURN_UID = 0
+# Network-wide on/off switch for the temporal burn feature (issue #43), currently disabled:
+# with this False, no tempo is ever a burn tempo and weights are the pure rolling-winner
+# distribution. Burn-tempo alignment feeds consensus, so -- same rationale as
+# WINDOW_ANCHOR_BLOCK -- this MUST be identical on every validator and is a committed
+# constant, never a per-operator override. Flip it and ship the change to all validators
+# together to re-enable; the burn_schedule module itself is left intact either way.
+BURN_ENABLED = False
 # Network-wide origin so every validator's window index aligns. This MUST be identical on
 # every validator: a per-operator override would desync the burn windows and split consensus,
 # so it is a committed constant (not an env var). 0 anchors the windows at genesis, which is a
