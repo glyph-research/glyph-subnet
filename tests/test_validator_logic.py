@@ -168,7 +168,25 @@ def _window_blocks():
     return [i * TEMPO for i in range(4)]
 
 
-def test_exactly_one_burn_tempo_per_window_in_decide_weights():
+def test_burn_disabled_never_burns_in_decide_weights():
+    """issue #43: BURN_ENABLED = False is the shipped default -- no tempo ever burns."""
+
+    history = [WinnerEntry("hkA", "a/c", "rev123456", 0.5, 1)]
+    outputs = [("s0", 100, "hash0")]
+    for block in _window_blocks():
+        weights, burn = decide_weights(
+            HOTKEYS, history, block=block, tempo=TEMPO, last_round_outputs=outputs, anchor=ANCHOR
+        )
+        assert burn is False
+        assert weights[1] == 1.0  # sole winner takes everything, every tempo
+
+
+def test_burn_reenabled_gives_exactly_one_burn_tempo_per_window(monkeypatch):
+    """Flipping BURN_ENABLED back to True must restore the original schedule exactly."""
+
+    import weight_setter.service as weight_setter_service
+
+    monkeypatch.setattr(weight_setter_service, "BURN_ENABLED", True)
     history = [WinnerEntry("hkA", "a/c", "rev123456", 0.5, 1)]
     outputs = [("s0", 100, "hash0")]
     flags = []
