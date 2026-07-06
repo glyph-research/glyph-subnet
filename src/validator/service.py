@@ -85,7 +85,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="'docker' (default, product direction) runs compress/decompress as ephemeral local "
         "Docker containers on operator-controlled hardware/GPU -- see --docker-gpu below. "
         "'chutes' dispatches to the deployed Chutes eval chutes instead (requires the "
-        "platform-mandated pro_6000 SKU, subject to Chutes availability).",
+        "platform-mandated pro_6000 SKU, subject to Chutes availability). 'local' runs "
+        "on this host's own OS user, network-isolated by default (see --unsafe-local-no-sandbox).",
+    )
+    parser.add_argument(
+        "--unsafe-local-no-sandbox",
+        action="store_true",
+        help="Refused for --runner local: this path always evaluates real on-chain "
+        "commitments (even on testnet), never your own local codec, so it is always "
+        "network-isolated and this flag is rejected outright. To test your OWN codec "
+        "unsandboxed, use --offline-demo --local-codec instead (no chain, no real "
+        "commitments involved).",
     )
     parser.add_argument(
         "--corpus-dir",
@@ -347,7 +357,22 @@ def _apply_precheck(
 
 def _make_runner(args) -> "LocalSubprocessRunner | ChutesRunner | DockerRunner":
     if args.runner == "local":
-        return LocalSubprocessRunner()
+        if getattr(args, "unsafe_local_no_sandbox", False):
+            # This path is only ever reached while evaluating real on-chain commitments
+            # (_evaluate_round -> chain.get_all_commitments()) -- unlike run_offline_demo,
+            # which never touches the chain and stays unsandboxed for testing your OWN
+            # codec. There is no "safe" way to honor this flag here, so refuse outright
+            # (issue #56) rather than silently running an untrusted commitment unisolated.
+            raise SystemExit(
+                "--unsafe-local-no-sandbox refused: --runner local always evaluates real "
+                "on-chain commitments here, never your own local codec. Use "
+                "--offline-demo --local-codec instead to test your own codec unsandboxed."
+            )
+        # Network-wide default, not a per-operator override: an untrusted miner codec must
+        # never run as the validator's own OS user with full network + wallet-key access
+        # (issue #56). Fails closed (RunnerError) if `unshare` is unavailable rather than
+        # silently running unisolated -- see require_network_isolation in eval/runner.py.
+        return LocalSubprocessRunner(strict_sandbox=True, require_network_isolation=True)
     if args.runner == "docker":
         from eval.runner_docker import DockerRunner
 
