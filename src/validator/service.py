@@ -272,7 +272,8 @@ def _apply_precheck(
     """
 
     local_artifacts = local_artifacts or {}
-    valid_hash_owner = dict(state.duplicate_hash_owner)
+    persisted_owner = dict(state.duplicate_hash_owner)
+    entries: dict[str, CommitmentState] = {}
     for parsed in sorted(parsed_commitments, key=lambda p: p.hotkey):
         if parsed.hotkey in state.excluded_hotkeys:
             continue
@@ -306,7 +307,7 @@ def _apply_precheck(
         else:
             commit_block = block
         artifact_hash = result.artifact_hash or (existing.artifact_hash if existing else None)
-        entry = CommitmentState(
+        entries[key] = CommitmentState(
             hotkey=parsed.hotkey,
             repo=parsed.commitment.repo,
             revision=parsed.commitment.rev,
@@ -319,15 +320,29 @@ def _apply_precheck(
             disqualification_reason=None if result.ok else "; ".join(result.errors),
             local_path=local_dir,
         )
-        if entry.valid and artifact_hash:
-            owner = valid_hash_owner.get(artifact_hash)
-            if owner and owner != parsed.hotkey:
+
+    # Duplicate-artifact ownership: earliest commit_block wins, hotkey only as the final
+    # deterministic tie-break for genuinely equal blocks -- NOT hotkey sort order (issue #58).
+    # A copier who re-hosts a victim's artifact byte-for-byte and reveals in the same round
+    # must not win ownership merely by having a lexicographically-earlier hotkey. A hash's
+    # owner, once decided (this round or a previous one), still stays sticky thereafter.
+    by_hash: dict[str, list[CommitmentState]] = {}
+    for entry in entries.values():
+        if entry.valid and entry.artifact_hash:
+            by_hash.setdefault(entry.artifact_hash, []).append(entry)
+    for artifact_hash, candidates in by_hash.items():
+        owner = persisted_owner.get(artifact_hash)
+        if owner is None:
+            best = min(candidates, key=lambda e: (e.block if e.block is not None else float("inf"), e.hotkey))
+            owner = best.hotkey
+            persisted_owner[artifact_hash] = owner
+        for entry in candidates:
+            if entry.hotkey != owner:
                 entry.valid = False
                 entry.disqualification_reason = f"duplicate artifact; first owner is {owner}"
-            else:
-                valid_hash_owner[artifact_hash] = parsed.hotkey
-        state.commitments[key] = entry
-    state.duplicate_hash_owner = valid_hash_owner
+
+    state.commitments.update(entries)
+    state.duplicate_hash_owner = persisted_owner
 
 
 def _make_runner(args) -> "LocalSubprocessRunner | ChutesRunner | DockerRunner":
