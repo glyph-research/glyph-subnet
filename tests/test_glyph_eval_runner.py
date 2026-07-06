@@ -4,12 +4,40 @@ artifact tree listing escape the download destination (zip-slip)."""
 
 import json
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
 import pytest
 
 from eval.glyph_eval_runner import ResourceCaps, RunnerError, _run_codec, _safe_join, _setpriv_prefix
+
+
+def _setpriv_usable() -> bool:
+    """True iff this host can both find AND actually use setpriv to change uid/gid (review
+    feedback on PR #65): GitHub Actions runners have the binary but lack the capability to
+    setuid/setgid (unprivileged container), so `shutil.which` alone gives a false pass there
+    and the test hard-fails with "Operation not permitted" instead of skipping."""
+
+    if shutil.which("setpriv") is None:
+        return False
+    try:
+        proc = subprocess.run(
+            ["setpriv", "--reuid", "65534", "--regid", "65534", "--clear-groups", "true"],
+            capture_output=True,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _unshare_net_usable() -> bool:
+    if shutil.which("unshare") is None:
+        return False
+    try:
+        return subprocess.run(["unshare", "--net", "true"], capture_output=True).returncode == 0
+    except Exception:
+        return False
 
 
 # --- privilege drop is requested by default, no env vars needed -----------------------------
@@ -85,8 +113,8 @@ def _mkdtemp_under_tmp():
 def test_run_codec_executes_untrusted_codec_as_nonroot_uid():
     # Real setpriv/unshare, not mocked -- the codec must observe a non-root uid and must be
     # able to read its own entrypoint despite the artifact dir defaulting to 0700.
-    if shutil.which("setpriv") is None or shutil.which("unshare") is None:
-        pytest.skip("setpriv/unshare not available on this host")
+    if not _setpriv_usable() or not _unshare_net_usable():
+        pytest.skip("setpriv/unshare --net not permitted on this host")
     artifact_dir = _mkdtemp_under_tmp()
     try:
         _write_uid_reporting_codec(artifact_dir)
