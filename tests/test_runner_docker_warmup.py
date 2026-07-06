@@ -239,6 +239,66 @@ def test_established_connection_stops_delivering_after_seal(tmp_path):
     )
 
 
+# --- scratch disk cap applies to the networked lifecycle too (issue #54) --------------------
+# The same scratch mount backs both the networked warmup (downloads/deps) and the sealed
+# benchmark, so a single cap must cover both phases. scratch_cap_bytes is overridden tiny here
+# so the test doesn't need to write real gigabytes.
+
+_DISK_HOG_LOOP = (
+    "for i in range(20):\n"
+    "    open(f'/scratch/hog_{i}.bin', 'wb').write(b'x' * (8 * 1024))\n"  # 8 KiB per file
+    "    time.sleep(0.3)\n"
+)
+
+
+@requires_digest
+def test_networked_lifecycle_disk_cap_kills_codec_during_benchmark(tmp_path):
+    # 20 x 8 KiB = 160 KiB total, each file individually well under the 64 KiB cap -- only the
+    # watchdog's cumulative check can catch this.
+    compress_body = (
+        "import argparse, time\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--input'); p.add_argument('--output')\n"
+        "a = p.parse_args()\n" + _DISK_HOG_LOOP + "open(a.output, 'wb').write(open(a.input, 'rb').read())\n"
+    )
+    _write_networked_codec(
+        tmp_path,
+        _manifest(image=_DIGEST, warmup={"command": ["true"], "timeout_secs": 30}),
+        compress_body=compress_body,
+    )
+    runner = DockerRunner(scratch_cap_bytes=64 * 1024)
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    with pytest.raises(RunnerError, match="disk cap"):
+        runner.compress(artifact, b"data" * 100, caps=ResourceCaps())
+
+
+@requires_digest
+def test_networked_lifecycle_disk_cap_kills_codec_during_warmup(tmp_path):
+    # A runaway warmup (e.g. an unexpectedly huge pip install / weights download) must be
+    # capped too -- the same scratch mount backs HOME/TMPDIR/XDG_CACHE_HOME during warmup.
+    warmup_hog = "import time\n" + _DISK_HOG_LOOP
+    _write_networked_codec(
+        tmp_path,
+        _manifest(image=_DIGEST, warmup={"command": ["python3", "-c", warmup_hog], "timeout_secs": 30}),
+    )
+    runner = DockerRunner(scratch_cap_bytes=64 * 1024)
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    with pytest.raises(RunnerError, match="disk cap"):
+        runner.compress(artifact, b"data" * 100, caps=ResourceCaps())
+
+
+@requires_digest
+def test_networked_lifecycle_codec_under_disk_cap_still_roundtrips(tmp_path):
+    _write_networked_codec(
+        tmp_path, _manifest(image=_DIGEST, warmup={"command": ["true"], "timeout_secs": 30})
+    )
+    runner = DockerRunner(scratch_cap_bytes=16 * 1024 * 1024)  # 16 MiB -- comfortably clear
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    raw = b"under the cap, networked lifecycle" * 50
+    comp = runner.compress(artifact, raw, caps=ResourceCaps())
+    decomp = runner.decompress(artifact, comp.blob, caps=ResourceCaps())
+    assert decomp.output_hash == hashlib.sha256(raw).hexdigest()
+
+
 # --- warmup timeout kills the container and fails closed ---------------------------------
 
 

@@ -43,6 +43,12 @@ DEFAULT_WIN_MARGIN = 0.05  # epsilon: 5% relative ratio improvement required to 
 DEFAULT_MAX_ARTIFACT_BYTES = 10 * 2**30  # 10 GiB
 VRAM_CAP_BYTES = 24 * 2**30  # 24 GiB
 RAM_CAP_BYTES = 32 * 2**30  # 32 GiB
+# Max total bytes a codec may write to the validator host's disk during either DockerRunner
+# path (issue #54): the classic --network none-from-start path and the miner-published-image
+# warmup/seal/benchmark lifecycle (whose warmup downloads -- pip installs, model weights --
+# also land in this same scratch mount). Network-wide, not a per-operator override, same
+# rationale as VRAM_CAP_BYTES/RAM_CAP_BYTES.
+SCRATCH_CAP_BYTES = 117 * 2**30  # 117 GiB
 
 # --- Evaluation streams: 8 x 32 MiB = 256 MiB paired sample ---------------------
 STREAM_BYTES = 32 * 2**20
