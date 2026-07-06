@@ -5,7 +5,9 @@
 Glyph is a lossless **neural text-compression** benchmark subnet — a perpetual,
 decentralized Hutter Prize. Miners commit one permanent codec per hotkey. Validators
 sample fresh, never-before-seen text, run each codec's compress→decompress round-trip on
-Chutes (SN64) serverless GPU, and set weights with a king-of-the-hill policy:
+local Docker on an RTX 4090 (Chutes (SN64) serverless GPU is available as an optional
+secondary path — see [docs/VALIDATING.md](docs/VALIDATING.md)), and set weights with a
+king-of-the-hill policy:
 
 - current winner: `70%` · previous winner: `30%`
 - plus a `25%` **temporal burn** (one unpredictable tempo per 4-tempo window → UID 0) that
@@ -35,7 +37,7 @@ miner/               commit | check | publish | register      (glyph-miner)
 scripts/             install, genesis king, deploy chute, auto-update (run_auto_validator.sh)
 reference_codec/     minimal zstd codec (artifact contract example)
 samples/             bundled corpus + demo codec for the offline demo
-docs/  website/  tests/
+docs/  tests/
 ```
 
 ## Install
