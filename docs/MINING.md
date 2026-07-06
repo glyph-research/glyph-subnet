@@ -31,6 +31,8 @@ ships a neural arithmetic coder (LLM/NN next-token probabilities → range coder
 - bit-exact round-trip on every stream; decompress throughput ≥ 10 KiB/s.
 - artifact under the size cap (default 10 GiB); must beat the zstd-19 baseline to take a
   vacant crown, and beat the incumbent by ≥ 5% (relative) to dethrone it.
+- resource caps enforced during evaluation: ≤ 24 GiB VRAM, ≤ 32 GiB RAM
+  (`core.constants.VRAM_CAP_BYTES` / `RAM_CAP_BYTES`).
 - no outbound network, cloud storage, shell download/upload helpers, or hidden fetches.
   Validators statically review artifact source for common exfiltration paths and the
   production Chutes runner executes entrypoints with network isolation and scrubbed secrets.
