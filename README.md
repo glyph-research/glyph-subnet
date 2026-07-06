@@ -1,5 +1,7 @@
 # Glyph Subnet
 
+[![CI](https://github.com/glyph-research/glyph-subnet/actions/workflows/ci.yml/badge.svg)](https://github.com/glyph-research/glyph-subnet/actions/workflows/ci.yml)
+
 Glyph is a lossless **neural text-compression** benchmark subnet — a perpetual,
 decentralized Hutter Prize. Miners commit one permanent codec per hotkey. Validators
 sample fresh, never-before-seen text, run each codec's compress→decompress round-trip on
