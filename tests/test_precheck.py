@@ -47,6 +47,36 @@ def test_size_cap_enforced():
     assert any("cap is" in e for e in result.errors)
 
 
+def _manifest_with_image(image):
+    return {
+        "schema_version": 1,
+        "entrypoints": {
+            "compress": ["python3", "compress.py", "--input", "{input}", "--output", "{output}"],
+            "decompress": ["python3", "decompress.py", "--input", "{input}", "--output", "{output}"],
+        },
+        "image": image,
+    }
+
+
+def test_manifest_image_mutable_tag_fails_precheck(tmp_path):
+    (tmp_path / "manifest.json").write_text(json.dumps(_manifest_with_image("ghcr.io/user/mycodec:latest")))
+    (tmp_path / "compress.py").write_text("x")
+    (tmp_path / "decompress.py").write_text("x")
+    result = precheck_artifact_dir(tmp_path)
+    assert result.ok is False
+    assert any("digest" in e for e in result.errors)
+
+
+def test_manifest_image_digest_pinned_passes_precheck(tmp_path):
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(_manifest_with_image("ghcr.io/user/mycodec@sha256:" + "a" * 64))
+    )
+    (tmp_path / "compress.py").write_text("x")
+    (tmp_path / "decompress.py").write_text("x")
+    result = precheck_artifact_dir(tmp_path)
+    assert result.ok is True
+
+
 def test_entrypoint_missing_script_warns(tmp_path):
     (tmp_path / "manifest.json").write_text(
         json.dumps(
