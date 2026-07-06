@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -115,6 +116,31 @@ def test_strict_runner_fails_closed_without_network_isolation(monkeypatch, tmp_p
     artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
     with pytest.raises(RunnerError, match="network isolation unavailable"):
         runner.run_stream(artifact, StreamInput("s0", b"data" * 100), caps=ResourceCaps())
+
+
+def test_strict_sandbox_actually_blocks_network_connect(tmp_path):
+    # Real `unshare --net`, not mocked (issue #56) -- a codec trying to reach the network
+    # under strict_sandbox must fail, not silently succeed, mirroring the Docker runner's
+    # equivalent test_network_is_dropped_during_untrusted_execution.
+    if shutil.which("unshare") is None:
+        pytest.skip("unshare not available on this host")
+    _write_codec(
+        tmp_path,
+        "import argparse, socket, sys\n"
+        "p=argparse.ArgumentParser();p.add_argument('--input');p.add_argument('--output')\n"
+        "a=p.parse_args()\n"
+        "s=socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        "s.settimeout(3)\n"
+        "try:\n"
+        "    s.connect(('8.8.8.8', 53))\n"
+        "    sys.exit(9)\n"  # reached the network -- isolation failed
+        "except OSError:\n"
+        "    open(a.output,'wb').write(open(a.input,'rb').read())\n",
+    )
+    runner = LocalSubprocessRunner(strict_sandbox=True, require_network_isolation=True)
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    result = runner.run_stream(artifact, StreamInput("s0", b"data" * 100), caps=ResourceCaps())
+    assert result.roundtrip_ok is True  # only reachable if the network connect raised OSError
 
 
 # --- split compress/decompress: separate sandboxes defeat the stash cheat (#14) --

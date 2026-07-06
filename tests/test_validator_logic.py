@@ -4,7 +4,13 @@ import core
 from core.commitments import CodecCommitment, ParsedCommitment
 from validation.precheck import PrecheckResult
 from core.state import CommitmentState, ValidatorState
-from validator.service import _apply_precheck, _assert_version_key_matches, _make_provider, decide_weights
+from validator.service import (
+    _apply_precheck,
+    _assert_version_key_matches,
+    _make_provider,
+    _make_runner,
+    decide_weights,
+)
 from core.weights import WinnerEntry
 
 TEMPO = 360
@@ -203,6 +209,28 @@ def test_duplicate_owner_stays_sticky_across_rounds(monkeypatch):
     z = state.commitments["hotkey-z:z/codec@rev00002"]
     assert z.valid is False
     assert "hotkey-a" in z.disqualification_reason
+
+
+# --- local runner defaults to strict sandbox (issue #56) ------------------------
+
+
+def _args(**overrides):
+    defaults = {"runner": "local", "unsafe_local_no_sandbox": False}
+    return type("Args", (), {**defaults, **overrides})()
+
+
+def test_make_runner_local_defaults_to_strict_sandbox():
+    from eval.runner import LocalSubprocessRunner
+
+    runner = _make_runner(_args())
+    assert isinstance(runner, LocalSubprocessRunner)
+    assert runner.strict_sandbox is True
+    assert runner.require_network_isolation is True
+
+
+def test_make_runner_local_unsafe_flag_is_refused():
+    with pytest.raises(SystemExit, match="refused"):
+        _make_runner(_args(unsafe_local_no_sandbox=True))
 
 
 # --- commit-reveal tie-break block (exploit vector #9) --------------------------

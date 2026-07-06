@@ -138,6 +138,23 @@ It downloads the codec from `--repo@--rev` on the GPU worker, runs a small inlin
 (and a URL/range one when `--corpus-url` is given), and exits non-zero unless every round-trip
 is bit-exact. The codec must be published on HuggingFace first (`glyph-miner publish`).
 
+## `--runner local` (dev/CI fallback, not recommended for production)
+
+Runs compress/decompress as a subprocess on the validator's own OS user rather than an
+isolated Docker container or a Chutes worker. Since this still evaluates real on-chain
+commitments (untrusted miner code), it is **network-isolated by default**
+(`unshare --net`) and fails closed (`RunnerError`) if `unshare` is unavailable on the host,
+rather than silently running the codec unisolated with full network + wallet-key access.
+
+There is no way to opt out of this for real commitments: `--unsafe-local-no-sandbox` is
+refused outright with a `SystemExit` if passed alongside `--runner local`. To run your own
+codec unsandboxed for local testing, use the offline demo instead (no chain, no real
+commitments involved):
+
+```bash
+glyph-validator --offline-demo --runner local --local-codec mine=./my-codec ...
+```
+
 ## Provide a corpus
 
 By default, the validator reads the mixed launch corpus from `/tmp/glyph_mixed_8x2mb`
