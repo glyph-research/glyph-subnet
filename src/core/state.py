@@ -54,7 +54,7 @@ class ValidatorState(BaseModel):
     winner_history: list[WinnerEntry] = Field(default_factory=list)
     duplicate_hash_owner: dict[str, str] = Field(default_factory=dict)
     # Per-stream (stream_id, compressed_bytes, blob_sha256) of the most recent challenge
-    # round's winner -- the material the temporal burn seed is derived from (DESIGN §6.1).
+    # round's winner -- the material the temporal burn seed is derived from.
     last_round_outputs: list[tuple[str, int, str]] = Field(default_factory=list)
     # One-shot losers: a challenger that did not win is excluded from future rounds.
     excluded_hotkeys: set[str] = Field(default_factory=set)

@@ -166,7 +166,7 @@ def test_docker_binary_missing_raises_runner_error(monkeypatch):
         DockerRunner()
 
 
-# --- GPU model pin: every validator's --docker-gpu must be the same card (DESIGN §4) --------
+# --- GPU model pin: every validator's --docker-gpu must be the same card --------------------
 # core.constants.DOCKER_REFERENCE_GPU = "RTX 4090"; DockerRunner(gpu=True) must fail closed on
 # anything else. Mocked here (no real GPU needed); the live RTX 4090 box confirms the real
 # nvidia-smi path separately.

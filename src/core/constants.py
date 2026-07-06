@@ -1,6 +1,6 @@
 """Shared constants for the Glyph lossless-compression subnet.
 
-Values follow glyph/DESIGN.md (v0.1). Two classes of value live here:
+Two classes of value live here:
 
 * Network-wide constants (e.g. ``WINDOW_ANCHOR_BLOCK``) MUST be identical across every
   validator — they feed consensus (burn-tempo alignment), so they are committed in source,
@@ -18,8 +18,8 @@ COMMITMENT_PREFIX = "glyph:"
 COMPACT_COMMITMENT_PREFIX = "g1|"
 # Commit-reveal of the commitment itself (exploit vector #9, front-running). A miner first
 # publishes ``g1c|<sha256(repo|rev|salt)>`` (reveals nothing), then on the next block reveals
-# ``g1r|repo|rev|salt``. The earliest-commit tie-break (DESIGN §3.5) keys off the commit-phase
-# block, so a mempool watcher who only learns repo|rev at reveal time can never commit earlier.
+# ``g1r|repo|rev|salt``. The earliest-commit tie-break keys off the commit-phase block, so a
+# mempool watcher who only learns repo|rev at reveal time can never commit earlier.
 COMMIT_PHASE_PREFIX = "g1c|"
 REVEAL_PHASE_PREFIX = "g1r|"
 # Commit-reveal polling/pruning (exploit vector #9 follow-ups, issue #21).
@@ -32,19 +32,19 @@ COMMIT_POLL_INTERVAL_SECS = 12
 # pruned, so persisted ``commit_phase_seen`` stays bounded. ~300 blocks ≈ 1h of slack.
 COMMIT_PHASE_MAX_AGE_BLOCKS = 300
 
-# --- Rolling-winner policy (DESIGN §3.5) --------------------------------------
+# --- Rolling-winner policy -----------------------------------------------------
 # current winner / previous winner. Effective split after the temporal burn is
 # 52.5% / 22.5% / 25% burned (see burn_schedule).
 WINNER_WEIGHTS = (0.70, 0.30)
 WINNER_LIMIT = 2
 DEFAULT_WIN_MARGIN = 0.05  # epsilon: 5% relative ratio improvement required to dethrone
 
-# --- Codec artifact limits (DESIGN §4, §7) ------------------------------------
+# --- Codec artifact limits ------------------------------------------------------
 DEFAULT_MAX_ARTIFACT_BYTES = 10 * 2**30  # 10 GiB
 VRAM_CAP_BYTES = 24 * 2**30  # 24 GiB
 RAM_CAP_BYTES = 32 * 2**30  # 32 GiB
 
-# --- Evaluation streams (DESIGN §7): 8 x 32 MiB = 256 MiB paired sample -------
+# --- Evaluation streams: 8 x 32 MiB = 256 MiB paired sample ---------------------
 STREAM_BYTES = 32 * 2**20
 STREAMS_PER_ROUND = 8
 SAMPLE_BYTES = STREAM_BYTES * STREAMS_PER_ROUND
@@ -62,13 +62,13 @@ EVAL_STREAMS = 2
 EVAL_BENCHMARK_STREAMS = 1
 EVAL_STREAM_BYTES = 4 * 2**20  # 4 MiB per stream
 
-# --- Gates (DESIGN §3.3, §7) --------------------------------------------------
+# --- Gates -----------------------------------------------------------------------
 THROUGHPUT_FLOOR_BPS = 10 * 1024  # >= 10 KiB/s decompress throughput, per GPU
 # Compress wall-clock budget per stream, symmetric with the decompress floor.
 COMPRESS_BUDGET_SECS = STREAM_BYTES / THROUGHPUT_FLOOR_BPS
 BASELINE_LEVEL = 19  # zstd -19: the vacant-crown floor a codec must beat
 
-# --- Temporal burn schedule (DESIGN §6.1) -------------------------------------
+# --- Temporal burn schedule ------------------------------------------------------
 # 25% daily burn applied temporally: 1 unpredictable tempo per 4-tempo window
 # sets weights 100% to BURN_UID.
 BURN_WINDOW_TEMPOS = 4
@@ -91,7 +91,7 @@ WINDOW_ANCHOR_BLOCK = 0
 
 # --- Chutes (SN64) evaluation backend -----------------------------------------
 # GPU type pinned via NodeSelector.include so all validators measure identical
-# compressed bytes (DESIGN §4 same-system determinism + reference SKU). As an
+# compressed bytes (same-system determinism + reference SKU). As an
 # integrated SN64 subnet, Chutes now *mandates* this exact SKU for the eval
 # chutes -- deploys reject anything else ("TEE with node_selector
 # include=['pro_6000'] is required now for integrated subnet chutes"), so this
@@ -107,7 +107,7 @@ CHUTE_USERNAME = os.environ.get("GLYPH_CHUTE_USERNAME", "glyph")
 CHUTE_NAME = "glyph-runner"  # shared image name
 # Compress and decompress run on SEPARATE deployed chutes (separate containers), so a codec
 # cannot stash the raw input during compress and read it back during decompress -- the
-# decompress worker only ever sees the blob (DESIGN §6; exploit-prevention #14).
+# decompress worker only ever sees the blob (exploit-prevention #14).
 CHUTE_COMPRESSOR_NAME = "glyph-compressor"
 CHUTE_DECOMPRESSOR_NAME = "glyph-decompressor"
 
@@ -115,7 +115,7 @@ CHUTE_DECOMPRESSOR_NAME = "glyph-decompressor"
 # Every validator using --runner docker --docker-gpu must run on the SAME GPU model, for the
 # same reason Chutes pins REFERENCE_SKU: compress_secs/decompress_secs (gated against
 # THROUGHPUT_FLOOR_BPS) are only comparable across validators if the hardware is identical
-# (DESIGN §4 same-system determinism). Unlike REFERENCE_SKU (enforced platform-side by Chutes'
+# (same-system determinism). Unlike REFERENCE_SKU (enforced platform-side by Chutes'
 # node_selector), nothing external enforces this for Docker, so DockerRunner checks it itself
 # (nvidia-smi) and fails closed rather than silently running on whatever GPU is present -- see
 # runner_docker.py's _verify_gpu_model(). Network-wide, not a per-operator override (same

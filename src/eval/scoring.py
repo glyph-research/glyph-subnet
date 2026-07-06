@@ -1,4 +1,4 @@
-"""Compression scoring: ratio aggregation and the validity gates (DESIGN §3.3, §7).
+"""Compression scoring: ratio aggregation and the validity gates.
 
 Score = total compressed bytes / total raw bytes over the round's streams (lower is
 better). A codec is *valid* only if it passes every gate; an invalid codec is never
@@ -141,7 +141,7 @@ def zstd_baseline_ratio(
 ) -> float:
     """The zstd -19 vacant-crown floor, computed live on the round's streams.
 
-    A codec must beat this ratio to take an empty crown (DESIGN §3.3).
+    A codec must beat this ratio to take an empty crown.
     """
 
     import zstandard as zstd

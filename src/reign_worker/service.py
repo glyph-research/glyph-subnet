@@ -1,4 +1,4 @@
-"""King-of-the-hill reign worker (DESIGN §3).
+"""King-of-the-hill reign worker.
 
 Runs one challenge round: the incumbent and all challengers are evaluated on identical
 beacon-seeded streams (paired), the crown changes only on a strict epsilon ratio beat,

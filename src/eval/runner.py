@@ -1,8 +1,8 @@
 """Codec execution backends.
 
 A ``CodecRunner`` runs one stream's full round-trip -- compress then decompress -- on a
-**single worker**, which is what lets Glyph require only same-system determinism (DESIGN
-§4). Two implementations share the contract:
+**single worker**, which is what lets Glyph require only same-system determinism. Two
+implementations share the contract:
 
 - ``LocalSubprocessRunner``: executes the artifact's entrypoints in a subprocess on the
   host. DEV/CI/own-codec only -- a key-holding validator host must not execute arbitrary

@@ -1,4 +1,4 @@
-"""Temporal burn schedule (DESIGN §6.1).
+"""Temporal burn schedule.
 
 25% daily burn, applied temporally rather than as a static weight carve-out: tempos are
 grouped into windows of ``BURN_WINDOW_TEMPOS`` (4). Exactly one tempo per window is a
@@ -29,7 +29,7 @@ def derive_burn_seed(
 
     Honest validators ran the same beacon-seeded jobs and therefore compute the same
     ``S``. Before the first challenge round there are no outputs, so a fixed bootstrap
-    seed keeps the schedule deterministic (DESIGN §6.1 edge case).
+    seed keeps the schedule deterministic (an edge case worth naming explicitly).
     """
 
     outputs = list(last_round_outputs or [])

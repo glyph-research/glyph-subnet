@@ -1,4 +1,4 @@
-"""Build and deploy the glyph eval chutes (DESIGN §6, build step 11).
+"""Build and deploy the glyph eval chutes.
 
 Stands up the SEPARATE compressor and decompressor evaluation chutes (separate containers so a
 codec cannot stash the raw input during compress and read it back during decompress, #14).

@@ -1,8 +1,7 @@
 """Local miner preflight: validate a codec artifact and round-trip it locally.
 
 Lets a miner self-benchmark against the public incumbent and the zstd baseline before
-paying to commit (DESIGN §3.3). Accepts either a HuggingFace repo or a local artifact
-directory.
+paying to commit. Accepts either a HuggingFace repo or a local artifact directory.
 """
 
 from __future__ import annotations
