@@ -21,9 +21,12 @@ MANIFEST_NAME = "manifest.json"
 PLACEHOLDER_INPUT = "{input}"
 PLACEHOLDER_OUTPUT = "{output}"
 _EXCLUDED_PARTS = {"__pycache__", ".git", ".cache"}
-# A digest-pinned OCI image reference: anything@sha256:<64 hex chars>. Deliberately excludes
-# bare tags (":latest", ":1.0") -- see is_image_digest_pinned()/Manifest.image_issues().
-_IMAGE_DIGEST_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
+# A digest-pinned OCI image reference: name@sha256:<64 lowercase hex chars>. The name portion
+# excludes '@' (so an embedded/second '@sha256:...' can't be swallowed as part of the name --
+# a reference syntactically has exactly one '@') and whitespace (rejects leading/trailing
+# whitespace or a trailing newline). Deliberately excludes bare tags (":latest", ":1.0") --
+# see is_image_digest_pinned()/Manifest.image_issues().
+_IMAGE_DIGEST_RE = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
 DEFAULT_WARMUP_READY_FILE = "/scratch/.glyph_ready"
 DEFAULT_WARMUP_TIMEOUT_SECS = 300.0
 
@@ -31,7 +34,7 @@ DEFAULT_WARMUP_TIMEOUT_SECS = 300.0
 def is_image_digest_pinned(image: str) -> bool:
     """True iff ``image`` is pinned by an OCI sha256 digest, not a mutable tag (issue #48)."""
 
-    return bool(_IMAGE_DIGEST_RE.match(image))
+    return bool(_IMAGE_DIGEST_RE.fullmatch(image))
 
 
 class Entrypoints(BaseModel):

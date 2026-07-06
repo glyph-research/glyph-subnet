@@ -109,9 +109,17 @@ def test_eval_input_not_present_during_warmup(tmp_path):
 
 @requires_digest
 def test_network_severed_before_benchmark_entrypoint_runs(tmp_path):
-    # The (scored) compress entrypoint itself tries to reach the network; if the seal didn't
-    # actually happen, the connect would succeed and the entrypoint would exit 9 (isolation
-    # failure) instead of writing output -- run_stream would then raise, failing the test.
+    # Non-vacuous (review feedback on PR #53): first PROVE real egress exists during warmup
+    # -- a warmup command that itself does the same connect and raises (failing the whole
+    # test loudly) if it doesn't, so a host with no outbound internet can't make this test
+    # pass for the wrong reason -- THEN prove the scored entrypoint's own connect attempt
+    # fails once sealed.
+    warmup_probe = (
+        "import socket\n"
+        "s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        "s.settimeout(3)\n"
+        "s.connect(('8.8.8.8', 53))\n"  # raises (failing warmup, and the test) if no real egress
+    )
     probe_body = (
         "import argparse, socket, sys\n"
         "p = argparse.ArgumentParser(); p.add_argument('--input'); p.add_argument('--output')\n"
@@ -126,13 +134,109 @@ def test_network_severed_before_benchmark_entrypoint_runs(tmp_path):
     )
     _write_networked_codec(
         tmp_path,
-        _manifest(image=_DIGEST, warmup={"command": ["true"], "timeout_secs": 30}),
+        _manifest(image=_DIGEST, warmup={"command": ["python3", "-c", warmup_probe], "timeout_secs": 30}),
         compress_body=probe_body,
     )
     runner = DockerRunner()
     artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    # If warmup's own connect had failed, _await_warmup would raise here -- reaching a
+    # successful compress() is itself proof warmup genuinely had working network.
     comp = runner.compress(artifact, b"data" * 100, caps=ResourceCaps())
-    assert comp.compressed_bytes > 0  # only reachable if the network connect raised OSError
+    assert comp.compressed_bytes > 0  # only reachable if the POST-seal connect raised OSError
+
+
+@requires_digest
+def test_established_connection_stops_delivering_after_seal(tmp_path):
+    """A connection opened during warmup and held open across the seal.
+
+    Ground-truth check, not a send()-return-value check: manual investigation (see PR #53
+    review discussion) found ``send()`` on an already-established socket keeps reporting
+    success after ``docker network disconnect`` -- TCP buffers writes locally regardless of
+    whether the interface is gone, so a bare "does send() raise" test would be misleading.
+    What actually matters is whether bytes are ever genuinely DELIVERED: this test holds one
+    real DNS-over-TCP connection to 8.8.8.8:53 open across the seal and requires an actual
+    valid response (a full round trip) before warmup is allowed to complete, then keeps
+    probing afterward. If any round trip still completes after a timeout was observed, the
+    seal has a real residual exfiltration channel and this test fails.
+    """
+
+    dns_probe = (
+        "import socket, struct, time\n"
+        "def query():\n"
+        "    header = struct.pack('>HHHHHH', 0x1234, 0x0100, 1, 0, 0, 0)\n"
+        "    qname = b''.join(bytes([len(p)]) + p.encode() for p in 'example.com'.split('.')) + b'\\x00'\n"
+        "    body = header + qname + struct.pack('>HH', 1, 1)\n"
+        "    return struct.pack('>H', len(body)) + body\n"
+        "s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        "s.settimeout(1.5)\n"
+        "log = []\n"
+        "s.connect(('8.8.8.8', 53))\n"
+        "log.append('connect_ok')\n"
+        "s.send(query())\n"
+        "resp = s.recv(512)\n"
+        "log.append(f'0 recv_ok len={len(resp)}')\n"
+        "open('/scratch/dns_probe.log', 'w').write(chr(10).join(log))\n"
+        # Only NOW (after a genuine pre-seal round trip already completed) signal the
+        # spawner it may let warmup finish -- this removes the race entirely: the seal
+        # cannot happen until a real round trip is already proven to have worked.
+        "open('/scratch/dns_probe_marker', 'w').write('ok')\n"
+        "for i in range(1, 8):\n"
+        "    time.sleep(0.5)\n"
+        "    try:\n"
+        "        s.send(query())\n"
+        "    except OSError as e:\n"
+        "        log.append(f'{i} send_failed:{e}')\n"
+        "        open('/scratch/dns_probe.log', 'w').write(chr(10).join(log))\n"
+        "        continue\n"
+        "    try:\n"
+        "        resp = s.recv(512)\n"
+        "        log.append(f'{i} recv_ok len={len(resp)}')\n"
+        "    except socket.timeout:\n"
+        "        log.append(f'{i} recv_timeout')\n"
+        "    except OSError as e:\n"
+        "        log.append(f'{i} recv_failed:{e}')\n"
+        "    open('/scratch/dns_probe.log', 'w').write(chr(10).join(log))\n"
+    )
+    spawn_probe = (
+        "import subprocess, time, os\n"
+        "subprocess.Popen(['python3', '/artifact/dns_probe.py'], start_new_session=True)\n"
+        "deadline = time.time() + 15\n"
+        "while time.time() < deadline:\n"
+        "    if os.path.exists('/scratch/dns_probe_marker'):\n"
+        "        break\n"
+        "    time.sleep(0.2)\n"
+        "else:\n"
+        "    raise SystemExit('pre-seal round trip never completed -- no real egress during warmup?')\n"
+    )
+    compress_body = (
+        "import argparse, time\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--input'); p.add_argument('--output')\n"
+        "a = p.parse_args()\n"
+        "time.sleep(6)\n"  # let the still-running background probe attempt several post-seal round trips
+        "log = open('/scratch/dns_probe.log', 'rb').read()\n"
+        "open(a.output, 'wb').write(log)\n"
+    )
+    tmp_path.joinpath("manifest.json").write_text(
+        json.dumps(_manifest(image=_DIGEST, warmup={"command": ["python3", "/artifact/spawn_probe.py"], "timeout_secs": 30}))
+    )
+    tmp_path.joinpath("spawn_probe.py").write_text(spawn_probe)
+    tmp_path.joinpath("dns_probe.py").write_text(dns_probe)
+    tmp_path.joinpath("compress.py").write_text(compress_body)
+    tmp_path.joinpath("decompress.py").write_text(_PASSTHROUGH)
+
+    runner = DockerRunner()
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    comp = runner.compress(artifact, b"eval data", caps=ResourceCaps(wall_clock_secs=60))
+    log_lines = comp.blob.decode().splitlines()
+
+    assert any("recv_ok" in line for line in log_lines), (
+        f"expected at least one genuine pre-seal round trip; log:\n{comp.blob.decode()}"
+    )
+    first_timeout = next(i for i, line in enumerate(log_lines) if "recv_timeout" in line)
+    assert not any("recv_ok" in line for line in log_lines[first_timeout:]), (
+        "a round trip completed AFTER a recv_timeout was already observed -- the seal has a "
+        f"residual delivery channel; log:\n{comp.blob.decode()}"
+    )
 
 
 # --- warmup timeout kills the container and fails closed ---------------------------------

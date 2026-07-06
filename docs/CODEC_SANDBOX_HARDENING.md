@@ -45,6 +45,17 @@ could race. Compress and decompress each get their own fresh container and warmu
 stash-defeat invariant as the default path -- see below) -- a manifest with no `image` is
 entirely unaffected and keeps the original single-shot `--network none`-from-start path.
 
+**A subtlety verified during review (PR #53):** a socket a codec opened *during* warmup and
+kept open across the seal keeps reporting `send()` success afterward -- TCP buffers writes
+into the local kernel send buffer regardless of whether the underlying interface still
+exists, so "does `send()` raise" is not the right thing to check, and `docker network
+disconnect --force` does not change this either. What was verified directly (both by hand
+against a controlled receiver, and in `test_established_connection_stops_delivering_after_seal`
+against a real external endpoint) is the property that actually matters: no round trip -- no
+bytes genuinely delivered anywhere -- completes once the interface is severed, even on a
+connection that was alive and working moments before. The seal is real at the delivery layer;
+it just doesn't surface as an immediate error at the socket API layer.
+
 Note this shifts part of the security model: static source review (below) has much less to
 say about a codec that ships an opaque image -- the actual compress/decompress code and deps
 are baked into layers, not present as reviewable files in the mounted artifact dir. Isolation
@@ -94,11 +105,18 @@ Unit coverage asserts:
 - Miner-published-image lifecycle (`tests/test_runner_docker_warmup.py`, real Docker, no GPU
   needed): a mutable-tag image is rejected before any container runs; the eval input is
   genuinely absent from the scratch mount during warmup (a warmup command that asserts this
-  and fails otherwise); the scored entrypoint's own attempted network connect fails (proving
-  the seal actually happened, not just a flag); a warmup that never signals ready is killed
-  and raises rather than hanging; a digest-pinned image round-trips end to end. Live-verified
-  against a real pushed-and-digest-pinned image (`samples/docker_codec_template/`) through a
-  throwaway local registry.
+  and fails otherwise); the scored entrypoint's own attempted network connect fails, with a
+  non-vacuous warmup-side check that real egress existed in the first place (proving the seal
+  actually happened, not just a flag, and not a false pass from a host with no internet); a
+  connection opened during warmup and held open across the seal genuinely stops delivering
+  round trips afterward (ground-truth delivery check against a real external endpoint, not a
+  `send()`-return-value check -- see the subtlety noted above); a warmup that never signals
+  ready is killed and raises rather than hanging; a digest-pinned image round-trips end to
+  end. The image-digest regex itself is unit-tested (`tests/test_artifact.py`) against
+  mutable tags, trailing/leading whitespace, a trailing newline, and an embedded second
+  `@sha256:...` being swallowed into the name portion. Live-verified against a real
+  pushed-and-digest-pinned image (`samples/docker_codec_template/`) through a throwaway local
+  registry.
 
 Round-trip compatibility still needs a live Docker/GPU validation pass with the reference codec
 and a representative neural codec before making a stricter custom seccomp profile mandatory.
