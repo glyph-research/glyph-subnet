@@ -92,10 +92,30 @@ may install.
 ## Split-Worker Isolation (Default Path)
 
 The local subprocess and Chutes helper retain the existing `unshare --net` network isolation.
-They can also apply `setpriv` when the operator sets both `GLYPH_CODEC_PRIVDROP_UID` and
-`GLYPH_CODEC_PRIVDROP_GID`. Set `GLYPH_CODEC_REQUIRE_PRIVDROP=1` to fail closed if `setpriv`
-is unavailable. This is intentionally environment-gated because Chutes and some CI containers
-may not permit UID/GID changes even when network isolation is available.
+`LocalSubprocessRunner` (`eval/runner.py`) can also apply `setpriv` when the operator sets
+both `GLYPH_CODEC_PRIVDROP_UID` and `GLYPH_CODEC_PRIVDROP_GID`, and fail closed via
+`GLYPH_CODEC_REQUIRE_PRIVDROP=1` -- intentionally opt-in there, since some CI containers may
+not permit UID/GID changes even when network isolation is available.
+
+**The Chutes eval runner (`eval/glyph_eval_runner.py`) drops privileges by default now**
+(issue #57): it previously only applied `setpriv` when those same env vars were explicitly
+set, and they were never set on the deployed Chutes path -- the untrusted codec ran there as
+**root**, isolated only by `unshare --net`, materially weaker than the Docker path's `--user
+65534:65534`. It now requests `--reuid 65534 --regid 65534` (matching Docker's non-root
+default) unconditionally, still overridable via `GLYPH_CODEC_PRIVDROP_UID`/`_GID`, and fails
+closed (`RunnerError`) if `setpriv` is unavailable -- set `GLYPH_CODEC_ALLOW_UNPRIVILEGED=1`
+to opt back into the old soft-fail behavior for an environment that genuinely can't apply it.
+Since `tempfile.mkdtemp()` defaults to mode 0700, `_run_codec` now also makes the artifact
+directory tree traversable/readable for that dropped uid before exec'ing into it (mirroring
+`DockerRunner`'s `_allow_sandbox_read_tree`) -- without this the codec couldn't even open its
+own entrypoint script once root was actually dropped, caught while adding this fix's own
+tests.
+
+**Also fixed (issue #57): zip-slip in the artifact download.** `_hf_snapshot`'s stdlib-only
+`snapshot_download` equivalent joined a miner-controlled HF tree-listing path directly onto
+the download destination with no containment check; a `rel` containing `../` (or an absolute
+path) could write outside the artifact directory. `_safe_join` now resolves and rejects any
+entry that would escape the destination before ever writing to disk.
 
 ## Seccomp Rationale
 
@@ -152,6 +172,14 @@ Unit coverage asserts:
   the per-file `--ulimit fsize` cap fails instantly via the kernel (`EFBIG`), the complementary
   case the watchdog alone wouldn't catch as fast; a normal codec comfortably under the cap
   still round-trips bit-exact on both paths.
+- Chutes eval runner hardening (`tests/test_glyph_eval_runner.py`, issue #57): privilege drop
+  is requested by default with no env vars set (uid/gid default to 65534, overridable);
+  fails closed when `setpriv` is unavailable, with an explicit opt-out
+  (`GLYPH_CODEC_ALLOW_UNPRIVILEGED`) for environments that genuinely can't apply it. A real
+  (not mocked) end-to-end run confirms the codec observes a non-root uid AND can still read
+  its own entrypoint despite `tempfile.mkdtemp()`'s default 0700 mode. `_safe_join` rejects a
+  crafted artifact tree-listing path (`../`, absolute) before ever writing to disk, covering
+  the zip-slip fix.
 
 Round-trip compatibility still needs a live Docker/GPU validation pass with the reference codec
 and a representative neural codec before making a stricter custom seccomp profile mandatory.

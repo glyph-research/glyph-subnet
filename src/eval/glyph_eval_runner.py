@@ -30,8 +30,10 @@ _ENV_ALLOWLIST = {
 _HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
 _PRIVDROP_UID_ENV = "GLYPH_CODEC_PRIVDROP_UID"
 _PRIVDROP_GID_ENV = "GLYPH_CODEC_PRIVDROP_GID"
-_PRIVDROP_REQUIRE_ENV = "GLYPH_CODEC_REQUIRE_PRIVDROP"
-_NO_NEW_PRIVS_ENV = "GLYPH_CODEC_NO_NEW_PRIVS"
+_ALLOW_UNPRIVILEGED_ENV = "GLYPH_CODEC_ALLOW_UNPRIVILEGED"
+# Matches the Docker path's --user 65534:65534 (nobody:nogroup) default (issue #57).
+_DEFAULT_PRIVDROP_UID = "65534"
+_DEFAULT_PRIVDROP_GID = "65534"
 
 
 def sha256_file(path: Path) -> str:
@@ -114,18 +116,25 @@ def _env_truthy(name: str) -> bool:
 
 
 def _setpriv_prefix() -> list[str]:
-    uid = os.environ.get(_PRIVDROP_UID_ENV)
-    gid = os.environ.get(_PRIVDROP_GID_ENV)
-    requested = bool(uid or gid or _env_truthy(_NO_NEW_PRIVS_ENV))
-    if not requested:
-        return []
+    """Drop the untrusted codec to a non-root uid/gid before exec, matching the Docker path's
+    ``--user 65534:65534`` posture as closely as this environment allows (issue #57).
+
+    Requested by default -- unlike the old opt-in-via-env-vars behavior, which left the
+    deployed Chutes path running the codec as root because those vars were never set there.
+    Set ``GLYPH_CODEC_ALLOW_UNPRIVILEGED=1`` to fall back to unprivileged (soft-fail) only in
+    an environment that genuinely cannot apply setpriv (e.g. some CI containers); the default
+    is to fail closed instead of silently running untrusted code as root.
+    """
+
+    uid = os.environ.get(_PRIVDROP_UID_ENV, _DEFAULT_PRIVDROP_UID)
+    gid = os.environ.get(_PRIVDROP_GID_ENV, _DEFAULT_PRIVDROP_GID)
     if bool(uid) != bool(gid):
         raise RunnerError(f"{_PRIVDROP_UID_ENV} and {_PRIVDROP_GID_ENV} must be set together")
     setpriv = shutil.which("setpriv")
     if setpriv is None:
-        if _env_truthy(_PRIVDROP_REQUIRE_ENV):
-            raise RunnerError("setpriv unavailable for required codec privilege drop")
-        return []
+        if _env_truthy(_ALLOW_UNPRIVILEGED_ENV):
+            return []
+        raise RunnerError("setpriv unavailable for required codec privilege drop")
     prefix = [setpriv, "--no-new-privs", "--bounding-set=-all"]
     if uid and gid:
         prefix += ["--reuid", uid, "--regid", gid, "--clear-groups"]
@@ -156,10 +165,27 @@ def _exec(argv: list[str], cwd: Path, caps: ResourceCaps, home: Path) -> float:
     return time.perf_counter() - start
 
 
+def _allow_sandbox_read_tree(root: Path) -> None:
+    """Make ``root`` traversable/readable for the dropped-privilege uid (issue #57).
+
+    ``tempfile.mkdtemp()`` (used for both the artifact dir and the scratch dir) defaults to
+    mode 0700 -- owner-only -- so without this the sandboxed uid can't even open its own
+    entrypoint script once ``_setpriv_prefix`` actually drops root.
+    """
+
+    for dirpath, _dirnames, filenames in os.walk(root):
+        directory = Path(dirpath)
+        directory.chmod(directory.stat().st_mode | 0o755)
+        for filename in filenames:
+            path = directory / filename
+            path.chmod(path.stat().st_mode | 0o444)
+
+
 def _run_codec(artifact_dir: Path, which: str, data: bytes, caps: ResourceCaps) -> tuple[bytes, float]:
     """Run the compress|decompress entrypoint in a fresh network-dropped sandbox; return (out, secs)."""
     manifest = _load_manifest(artifact_dir)
     argv_tpl = manifest["entrypoints"][which]
+    _allow_sandbox_read_tree(artifact_dir)
     with tempfile.TemporaryDirectory(prefix=f"glyph-{which}-") as tmp:
         td = Path(tmp)
         infile = td / "in.bin"
@@ -169,6 +195,17 @@ def _run_codec(artifact_dir: Path, which: str, data: bytes, caps: ResourceCaps) 
         if not outfile.exists():
             raise RunnerError(f"{which} produced no output")
         return outfile.read_bytes(), secs
+
+
+def _safe_join(dest: Path, rel: str) -> Path:
+    """Resolve ``rel`` under ``dest``, rejecting anything that would escape it via `..` or an
+    absolute path (zip-slip, issue #57) -- ``rel`` comes from a miner-controlled tree listing.
+    """
+
+    target = (dest / rel).resolve()
+    if not target.is_relative_to(dest.resolve()):
+        raise ValueError(f"artifact tree entry escapes destination directory: {rel!r}")
+    return target
 
 
 def _hf_snapshot(repo: str, rev: str, dest: Path) -> Path:
@@ -194,7 +231,7 @@ def _hf_snapshot(repo: str, rev: str, dest: Path) -> Path:
         raise ValueError("artifact repo has no files")
     for rel in files:
         url = f"{_HF_ENDPOINT}/{quoted}/resolve/{urllib.parse.quote(rev, safe='')}/{urllib.parse.quote(rel)}"
-        target = dest / rel
+        target = _safe_join(dest, rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(_get(url))
     return dest
