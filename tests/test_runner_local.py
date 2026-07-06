@@ -1,5 +1,6 @@
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,20 @@ from core.artifact import hash_artifact, load_manifest
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps, RunnerError, StreamInput
 
 REFERENCE_CODEC = Path(__file__).resolve().parents[1] / "reference_codec"
+
+
+def _unshare_net_usable() -> bool:
+    """True iff this host can both find AND actually use `unshare --net` (review feedback on
+    PR #64): GitHub Actions runners have the binary but lack the capability to create a net
+    namespace (unprivileged container), so `shutil.which` alone gives a false pass there and
+    the test hard-fails with "Operation not permitted" instead of skipping."""
+
+    if shutil.which("unshare") is None:
+        return False
+    try:
+        return subprocess.run(["unshare", "--net", "true"], capture_output=True).returncode == 0
+    except Exception:
+        return False
 
 
 def test_reference_codec_round_trips():
@@ -122,8 +137,8 @@ def test_strict_sandbox_actually_blocks_network_connect(tmp_path):
     # Real `unshare --net`, not mocked (issue #56) -- a codec trying to reach the network
     # under strict_sandbox must fail, not silently succeed, mirroring the Docker runner's
     # equivalent test_network_is_dropped_during_untrusted_execution.
-    if shutil.which("unshare") is None:
-        pytest.skip("unshare not available on this host")
+    if not _unshare_net_usable():
+        pytest.skip("unshare --net not permitted on this host")
     _write_codec(
         tmp_path,
         "import argparse, socket, sys\n"
