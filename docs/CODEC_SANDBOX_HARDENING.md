@@ -13,12 +13,39 @@ fresh `docker run --rm` container with:
 - `--user 65534:65534` so untrusted codec code does not run as root,
 - `--cap-drop ALL` so Linux capabilities are unavailable inside the codec process,
 - `--security-opt no-new-privileges:true`,
-- Docker's default seccomp profile unless `--docker-seccomp-profile PATH` is provided.
+- Docker's default seccomp profile unless `--docker-seccomp-profile PATH` is provided,
+- `--ulimit fsize=<core.constants.SCRATCH_CAP_BYTES>` plus a background disk watchdog (below).
 
 The scratch directory is made writable before launch because the sandbox UID is intentionally
 not the validator host user. The artifact tree is made readable/traversable for that UID and
 then mounted read-only. The scratch directory is temporary and only contains that phase's input
 and output files.
+
+## Scratch Disk Cap (issue #54)
+
+The scratch mount is an unbounded host bind mount by construction (needed so the runner can
+read compressed/decompressed output back off the host side), so nothing stopped a codec from
+filling the validator's disk until this was added. Two complementary mechanisms, both driven
+by `core.constants.SCRATCH_CAP_BYTES` (117 GiB default -- a host-safety limit, not a
+consensus-relevant value like `DOCKER_REFERENCE_GPU`/`REFERENCE_SKU`, so `DockerRunner`
+exposes it as an overridable `scratch_cap_bytes` constructor parameter mainly so tests don't
+need to write real gigabytes):
+
+- **`--ulimit fsize=<cap>`** on the container: a kernel-enforced per-file size limit
+  (`RLIMIT_FSIZE`). Catches a single oversized file instantly (`EFBIG`), with zero polling
+  overhead, but doesn't bound the sum of many smaller files.
+- **`_DiskWatchdog`** (a background thread, `eval/runner_docker.py`): polls the scratch
+  directory's total size every 2s while a blocking `docker run`/`docker exec` call is in
+  progress and kills the container the instant the cumulative total exceeds the cap -- the
+  many-small-files case the per-file ulimit alone wouldn't catch. `subprocess.run(...,
+  timeout=...)` alone only bounds wall-clock time, not how much disk a codec could fill
+  before that timeout elapses (the compress/decompress budget can be tens of minutes).
+
+Applies to **both** DockerRunner paths: the classic single-shot `_run_container` (one
+watchdog per phase) and the miner-published-image `_run_networked_lifecycle` (one watchdog
+spanning both the networked warmup -- where `HOME`/`TMPDIR`/`XDG_CACHE_HOME` all point at
+`/scratch`, so pip installs / weight downloads count against the same budget -- and the
+sealed benchmark, since both phases share the same scratch mount).
 
 ## Miner-Published Images: Networked Warmup (issue #48)
 
@@ -117,6 +144,14 @@ Unit coverage asserts:
   `@sha256:...` being swallowed into the name portion. Live-verified against a real
   pushed-and-digest-pinned image (`samples/docker_codec_template/`) through a throwaway local
   registry.
+- Scratch disk cap (`tests/test_runner_docker.py`, `tests/test_runner_docker_warmup.py`, real
+  Docker): a codec writing many small files that cumulatively exceed a (tiny, test-only)
+  `scratch_cap_bytes` is killed and fails with a clear "disk cap" error on both the classic
+  single-shot path and the networked lifecycle -- during the sealed benchmark AND during the
+  networked warmup itself (a runaway pip install / weights download); a single file exceeding
+  the per-file `--ulimit fsize` cap fails instantly via the kernel (`EFBIG`), the complementary
+  case the watchdog alone wouldn't catch as fast; a normal codec comfortably under the cap
+  still round-trips bit-exact on both paths.
 
 Round-trip compatibility still needs a live Docker/GPU validation pass with the reference codec
 and a representative neural codec before making a stricter custom seccomp profile mandatory.

@@ -166,6 +166,105 @@ def test_docker_binary_missing_raises_runner_error(monkeypatch):
         DockerRunner()
 
 
+# --- scratch disk cap: a codec can't fill the validator host's disk (issue #54) -------------
+# scratch_cap_bytes is overridden tiny here so the test doesn't need to write real gigabytes;
+# production uses core.constants.SCRATCH_CAP_BYTES (117 GiB) by default.
+
+
+def _write_disk_hog_codec(directory: Path, num_files: int = 20, chunk_bytes: int = 8 * 1024, sleep_secs: float = 0.3):
+    """A codec that writes ``num_files`` separate ``chunk_bytes``-sized files, spaced out so
+    the background disk watchdog (2s poll interval) gets a real chance to catch a cumulative
+    overage mid-write rather than the whole loop completing before the first poll. Each
+    individual file stays well under any reasonable per-file (``--ulimit fsize``) cap -- this
+    exercises the watchdog's total-directory-size check specifically, the many-small-files
+    case a per-file ulimit alone wouldn't catch.
+    """
+
+    (directory / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "disk-hog-codec",
+                "entrypoints": {
+                    "compress": ["python3", "compress.py", "--input", "{input}", "--output", "{output}"],
+                    "decompress": ["python3", "decompress.py", "--input", "{input}", "--output", "{output}"],
+                },
+                "license": "MIT",
+            }
+        )
+    )
+    (directory / "compress.py").write_text(
+        "import argparse, time\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--input'); p.add_argument('--output')\n"
+        "a = p.parse_args()\n"
+        f"for i in range({num_files}):\n"
+        f"    open(f'/scratch/hog_{{i}}.bin', 'wb').write(b'x' * {chunk_bytes})\n"
+        f"    time.sleep({sleep_secs})\n"
+        "open(a.output, 'wb').write(open(a.input, 'rb').read())\n"
+    )
+    (directory / "decompress.py").write_text(
+        "import argparse\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--input'); p.add_argument('--output')\n"
+        "a = p.parse_args()\n"
+        "open(a.output, 'wb').write(open(a.input, 'rb').read())\n"
+    )
+
+
+def test_codec_exceeding_disk_cap_is_killed(tmp_path):
+    # 20 files x 8 KiB = 160 KiB total, each individually well under the 64 KiB cap (so the
+    # per-file --ulimit fsize doesn't fire first) -- only the watchdog's cumulative check can
+    # catch this, after roughly the 8th file.
+    _write_disk_hog_codec(tmp_path, num_files=20, chunk_bytes=8 * 1024, sleep_secs=0.3)
+    runner = DockerRunner(scratch_cap_bytes=64 * 1024)
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    with pytest.raises(RunnerError, match="disk cap"):
+        runner.compress(artifact, b"data" * 100, caps=ResourceCaps())
+
+
+def test_single_file_over_cap_fails_via_ulimit(tmp_path):
+    # A single write past --ulimit fsize fails instantly at the kernel level (EFBIG), before
+    # the watchdog's first poll -- the complementary per-file enforcement.
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "entrypoints": {
+                    "compress": ["python3", "compress.py", "--input", "{input}", "--output", "{output}"],
+                    "decompress": ["python3", "decompress.py", "--input", "{input}", "--output", "{output}"],
+                },
+                "license": "MIT",
+            }
+        )
+    )
+    (tmp_path / "compress.py").write_text(
+        "import argparse\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--input'); p.add_argument('--output')\n"
+        "a = p.parse_args()\n"
+        "open('/scratch/hog.bin', 'wb').write(b'x' * (1024 * 1024))\n"  # 1 MiB in one file
+        "open(a.output, 'wb').write(open(a.input, 'rb').read())\n"
+    )
+    (tmp_path / "decompress.py").write_text(
+        "import argparse\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--input'); p.add_argument('--output')\n"
+        "a = p.parse_args()\n"
+        "open(a.output, 'wb').write(open(a.input, 'rb').read())\n"
+    )
+    runner = DockerRunner(scratch_cap_bytes=64 * 1024)  # 64 KiB -- the 1 MiB write exceeds it
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    with pytest.raises(RunnerError, match="entrypoint exited"):
+        runner.compress(artifact, b"data" * 100, caps=ResourceCaps())
+
+
+def test_codec_under_disk_cap_still_roundtrips(tmp_path):
+    _write_disk_hog_codec(tmp_path, num_files=2, chunk_bytes=8 * 1024, sleep_secs=0.1)  # 16 KiB total
+    runner = DockerRunner(scratch_cap_bytes=16 * 1024 * 1024)  # 16 MiB -- comfortably clear
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    raw = b"under the cap" * 50
+    comp = runner.compress(artifact, raw, caps=ResourceCaps())
+    decomp = runner.decompress(artifact, comp.blob, caps=ResourceCaps())
+    assert decomp.output_hash == comp.source_hash
+
+
 # --- GPU model pin: every validator's --docker-gpu must be the same card --------------------
 # core.constants.DOCKER_REFERENCE_GPU = "RTX 4090"; DockerRunner(gpu=True) must fail closed on
 # anything else. Mocked here (no real GPU needed); the live RTX 4090 box confirms the real

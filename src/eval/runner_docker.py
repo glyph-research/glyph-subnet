@@ -45,12 +45,13 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
 
 from core.artifact import Warmup, is_image_digest_pinned, load_manifest, resolve_argv
-from core.constants import DOCKER_REFERENCE_GPU
+from core.constants import DOCKER_REFERENCE_GPU, SCRATCH_CAP_BYTES
 from core.hashing import sha256_file
 from eval.runner import (
     ArtifactRef,
@@ -75,6 +76,7 @@ _DEFAULT_CONTAINER_USER = "65534:65534"
 # never blanket-inherited (see module docstring).
 _FORWARDED_ENV_VARS = ("CUDA_VISIBLE_DEVICES", "GLYPH_TS_ZIP_DEVICE", "GLYPH_TS_ZIP_THREADS")
 _WARMUP_READY_POLL_SECS = 1.0
+_MIN_CONTAINER_CREATE_TIMEOUT_SECS = 60.0
 
 
 def _allow_sandbox_read_tree(root: Path) -> None:
@@ -84,6 +86,58 @@ def _allow_sandbox_read_tree(root: Path) -> None:
         for filename in filenames:
             path = directory / filename
             path.chmod(path.stat().st_mode | 0o444)
+
+
+def _dir_size_bytes(root: Path) -> int:
+    total = 0
+    for path in root.rglob("*"):
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except OSError:
+            pass  # file removed/replaced mid-walk by the still-running codec; skip it
+    return total
+
+
+class _DiskWatchdog:
+    """Kills ``container_name`` if ``scratch_dir``'s total size exceeds ``cap_bytes`` while a
+    blocking docker run/exec call is in progress (issue #54).
+
+    ``subprocess.run(..., timeout=...)`` alone only bounds wall-clock time, not how much disk
+    a codec can fill before that timeout elapses (the compress/decompress wall-clock budget
+    can be tens of minutes) -- this polls in the background and kills the container the
+    moment the cap is exceeded, real-time rather than only detected after the fact.
+    ``--ulimit fsize=`` (set on the container itself) is the complementary per-file kernel
+    cap; this catches the many-small-files case that alone wouldn't.
+    """
+
+    def __init__(self, docker_bin: str, container_name: str, scratch_dir: Path, cap_bytes: int, poll_secs: float = 2.0):
+        self._docker_bin = docker_bin
+        self._container_name = container_name
+        self._scratch_dir = scratch_dir
+        self._cap_bytes = cap_bytes
+        self._poll_secs = poll_secs
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+        self.triggered = False
+
+    def _poll(self) -> None:
+        while not self._stop.wait(self._poll_secs):
+            if _dir_size_bytes(self._scratch_dir) > self._cap_bytes:
+                self.triggered = True
+                subprocess.run(
+                    [self._docker_bin, "kill", self._container_name],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                return
+
+    def __enter__(self) -> "_DiskWatchdog":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
 
 
 def _verify_gpu_model(gpu_device: str | None, reference_gpu: str) -> None:
@@ -134,6 +188,7 @@ class DockerRunner:
         docker_bin: str = "docker",
         seccomp_profile: str | None = None,
         container_user: str = _DEFAULT_CONTAINER_USER,
+        scratch_cap_bytes: int = SCRATCH_CAP_BYTES,
     ):
         if shutil.which(docker_bin) is None:
             raise RunnerError(
@@ -149,6 +204,11 @@ class DockerRunner:
         self.docker_bin = docker_bin
         self.seccomp_profile = seccomp_profile
         self.container_user = container_user
+        # Unlike DOCKER_REFERENCE_GPU/REFERENCE_SKU, this is a host-safety limit, not something
+        # that needs to be bit-identical across validators for scoring -- overridable (mainly
+        # for tests exercising the cap without writing tens of GiB), defaults to the
+        # network-wide constant.
+        self.scratch_cap_bytes = scratch_cap_bytes
 
     def _artifact_dir(self, artifact: ArtifactRef) -> Path:
         if not artifact.local_path:
@@ -312,6 +372,10 @@ class DockerRunner:
                 "--user", self.container_user,
                 "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges:true",
+                # Per-file kernel cap; covers both the networked warmup's downloads and the
+                # scored benchmark. The background _DiskWatchdog below covers the
+                # many-small-files case this alone wouldn't (issue #54).
+                "--ulimit", f"fsize={self.scratch_cap_bytes}",
             ]
             if self.seccomp_profile:
                 run_cmd += ["--security-opt", f"seccomp={self.seccomp_profile}"]
@@ -341,32 +405,47 @@ class DockerRunner:
                 # `ready_file` itself) -- do not override it in that case.
                 run_cmd += ["sleep", "infinity"]
             # A cold pull of an uncached image happens here too (same convention as the
-            # default path: pre-pull to avoid eating into a timed budget) -- give it the same
-            # allowance as warmup itself rather than an arbitrary short constant.
-            self._docker(run_cmd, timeout=warmup.timeout_secs)
-            try:
-                self._await_warmup(name, warmup)
-                # SEAL: sever network before any eval byte exists anywhere the container can
-                # see it.
-                self._docker(["network", "disconnect", network, name], timeout=15)
-            except Exception:
-                self._docker(["kill", name], timeout=15, check=False)
-                raise
-            # Only now does the eval input exist in the (already-mounted) scratch dir.
-            (scratch_dir / "in.bin").write_bytes(input_data)
-            exec_cmd = ["exec", "--user", self.container_user, name, *argv]
-            start = time.perf_counter()
-            try:
-                proc = subprocess.run(
-                    [self.docker_bin, *exec_cmd],
-                    timeout=caps.wall_clock_secs, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise RunnerError(f"entrypoint timed out after {caps.wall_clock_secs:.0f}s") from exc
-            elapsed = time.perf_counter() - start
-            if proc.returncode != 0:
-                tail = proc.stderr.decode("utf-8", "replace")[-500:]
-                raise RunnerError(f"entrypoint exited {proc.returncode}: {tail}")
+            # default path: pre-pull to avoid eating into a timed budget). Container creation
+            # (this call) is a distinct concern from the readiness wait below -- floor it at a
+            # sane minimum so a caller's intentionally-short warmup.timeout_secs (e.g. a test
+            # asserting the *readiness* deadline fires quickly) can't also starve `docker run
+            # -d` itself under host load, leaking a container that never finished starting.
+            self._docker(run_cmd, timeout=max(warmup.timeout_secs, _MIN_CONTAINER_CREATE_TIMEOUT_SECS))
+            # One watchdog spans both warmup (downloads/deps) and the scored benchmark --
+            # the same scratch mount and disk budget apply across both (issue #54).
+            with _DiskWatchdog(self.docker_bin, name, scratch_dir, self.scratch_cap_bytes) as watchdog:
+                try:
+                    self._await_warmup(name, warmup)
+                    # SEAL: sever network before any eval byte exists anywhere the container
+                    # can see it.
+                    self._docker(["network", "disconnect", network, name], timeout=15)
+                except Exception as exc:
+                    self._docker(["kill", name], timeout=15, check=False)
+                    if watchdog.triggered:
+                        raise RunnerError(
+                            f"codec exceeded the {self.scratch_cap_bytes:,}-byte scratch disk cap "
+                            "during warmup and was killed"
+                        ) from None
+                    raise exc
+                # Only now does the eval input exist in the (already-mounted) scratch dir.
+                (scratch_dir / "in.bin").write_bytes(input_data)
+                exec_cmd = ["exec", "--user", self.container_user, name, *argv]
+                start = time.perf_counter()
+                try:
+                    proc = subprocess.run(
+                        [self.docker_bin, *exec_cmd],
+                        timeout=caps.wall_clock_secs, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise RunnerError(f"entrypoint timed out after {caps.wall_clock_secs:.0f}s") from exc
+                elapsed = time.perf_counter() - start
+                if proc.returncode != 0:
+                    if watchdog.triggered:
+                        raise RunnerError(
+                            f"codec exceeded the {self.scratch_cap_bytes:,}-byte scratch disk cap and was killed"
+                        )
+                    tail = proc.stderr.decode("utf-8", "replace")[-500:]
+                    raise RunnerError(f"entrypoint exited {proc.returncode}: {tail}")
             return elapsed
         finally:
             self._docker(["rm", "-f", name], timeout=15, check=False)
@@ -409,6 +488,9 @@ class DockerRunner:
             "--user", self.container_user,
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges:true",
+            # Per-file kernel cap (RLIMIT_FSIZE); the background _DiskWatchdog below covers
+            # the many-small-files case this alone wouldn't (issue #54).
+            "--ulimit", f"fsize={self.scratch_cap_bytes}",
         ]
         if self.seccomp_profile:
             cmd += ["--security-opt", f"seccomp={self.seccomp_profile}"]
@@ -444,17 +526,22 @@ class DockerRunner:
             *argv,
         ]
         start = time.perf_counter()
-        try:
-            proc = subprocess.run(cmd, timeout=caps.wall_clock_secs, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except subprocess.TimeoutExpired as exc:
-            # `docker run`'s own process dying on timeout does NOT stop the daemon-side
-            # container; kill it explicitly (best-effort) so it doesn't keep running/billing.
-            subprocess.run(
-                [self.docker_bin, "kill", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            raise RunnerError(f"entrypoint timed out after {caps.wall_clock_secs:.0f}s") from exc
-        elapsed = time.perf_counter() - start
-        if proc.returncode != 0:
-            tail = proc.stderr.decode("utf-8", "replace")[-500:]
-            raise RunnerError(f"entrypoint exited {proc.returncode}: {tail}")
-        return elapsed
+        with _DiskWatchdog(self.docker_bin, name, scratch_dir, self.scratch_cap_bytes) as watchdog:
+            try:
+                proc = subprocess.run(cmd, timeout=caps.wall_clock_secs, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except subprocess.TimeoutExpired as exc:
+                # `docker run`'s own process dying on timeout does NOT stop the daemon-side
+                # container; kill it explicitly (best-effort) so it doesn't keep running/billing.
+                subprocess.run(
+                    [self.docker_bin, "kill", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                raise RunnerError(f"entrypoint timed out after {caps.wall_clock_secs:.0f}s") from exc
+            elapsed = time.perf_counter() - start
+            if proc.returncode != 0:
+                if watchdog.triggered:
+                    raise RunnerError(
+                        f"codec exceeded the {self.scratch_cap_bytes:,}-byte scratch disk cap and was killed"
+                    )
+                tail = proc.stderr.decode("utf-8", "replace")[-500:]
+                raise RunnerError(f"entrypoint exited {proc.returncode}: {tail}")
+            return elapsed
