@@ -3,7 +3,7 @@ import pytest
 import core
 from core.commitments import CodecCommitment, ParsedCommitment
 from validation.precheck import PrecheckResult
-from core.state import ValidatorState
+from core.state import CommitmentState, ValidatorState
 from validator.service import _apply_precheck, _assert_version_key_matches, _make_provider, decide_weights
 from core.weights import WinnerEntry
 
@@ -120,6 +120,89 @@ def test_apply_precheck_disqualifies_duplicate_hash(monkeypatch):
     assert first.valid is True
     assert second.valid is False
     assert "duplicate artifact" in second.disqualification_reason
+
+
+# --- duplicate-artifact ownership: earliest commit_block wins, not hotkey order (#58) -------
+
+
+def _same_hash_precheck(repo, revision, *, max_artifact_bytes, download=True):
+    return PrecheckResult(repo=repo, revision=revision, ok=True, artifact_hash="same-hash", artifact_bytes=10)
+
+
+def _seed_existing_commitment(state, hotkey, repo, rev, block):
+    key = f"{hotkey}:{repo}@{rev}"
+    state.commitments[key] = CommitmentState(
+        hotkey=hotkey, repo=repo, revision=rev, block=block, artifact_hash=None, valid=False
+    )
+
+
+def test_duplicate_owner_prefers_earlier_block_when_earlier_hotkey_sorts_first(monkeypatch):
+    # hotkey-a committed earlier (block 5) AND sorts first -- both signals agree, so this
+    # alone wouldn't distinguish the fix from the old (buggy) hotkey-sort behavior.
+    monkeypatch.setattr("validator.service.precheck_codec", _same_hash_precheck)
+    state = ValidatorState()
+    _seed_existing_commitment(state, "hotkey-a", "a/codec", "rev00001", block=5)
+    _seed_existing_commitment(state, "hotkey-z", "z/codec", "rev00002", block=20)
+    parsed = [
+        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev="rev00001"), "raw-a"),
+        ParsedCommitment("hotkey-z", CodecCommitment(repo="z/codec", rev="rev00002"), "raw-z"),
+    ]
+    _apply_precheck(state, parsed, max_artifact_bytes=100, block=999)
+    a = state.commitments["hotkey-a:a/codec@rev00001"]
+    z = state.commitments["hotkey-z:z/codec@rev00002"]
+    assert a.valid is True
+    assert z.valid is False
+    assert "hotkey-a" in z.disqualification_reason
+
+
+def test_duplicate_owner_prefers_earlier_block_when_later_hotkey_sorts_first(monkeypatch):
+    # hotkey-a sorts first lexicographically but committed LATER (block 20); hotkey-z sorts
+    # last but committed EARLIER (block 5). The old hotkey-sort-order logic would have made
+    # hotkey-a the owner here -- this is the exact copy-cat exploit scenario from the issue.
+    monkeypatch.setattr("validator.service.precheck_codec", _same_hash_precheck)
+    state = ValidatorState()
+    _seed_existing_commitment(state, "hotkey-a", "a/codec", "rev00001", block=20)
+    _seed_existing_commitment(state, "hotkey-z", "z/codec", "rev00002", block=5)
+    parsed = [
+        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev="rev00001"), "raw-a"),
+        ParsedCommitment("hotkey-z", CodecCommitment(repo="z/codec", rev="rev00002"), "raw-z"),
+    ]
+    _apply_precheck(state, parsed, max_artifact_bytes=100, block=999)
+    a = state.commitments["hotkey-a:a/codec@rev00001"]
+    z = state.commitments["hotkey-z:z/codec@rev00002"]
+    assert z.valid is True
+    assert a.valid is False
+    assert "hotkey-z" in a.disqualification_reason
+
+
+def test_duplicate_owner_equal_commit_block_ties_break_by_hotkey(monkeypatch):
+    monkeypatch.setattr("validator.service.precheck_codec", _same_hash_precheck)
+    state = ValidatorState()
+    _seed_existing_commitment(state, "hotkey-a", "a/codec", "rev00001", block=10)
+    _seed_existing_commitment(state, "hotkey-z", "z/codec", "rev00002", block=10)
+    parsed = [
+        ParsedCommitment("hotkey-z", CodecCommitment(repo="z/codec", rev="rev00002"), "raw-z"),
+        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev="rev00001"), "raw-a"),
+    ]
+    _apply_precheck(state, parsed, max_artifact_bytes=100, block=999)
+    a = state.commitments["hotkey-a:a/codec@rev00001"]
+    z = state.commitments["hotkey-z:z/codec@rev00002"]
+    assert a.valid is True
+    assert z.valid is False
+
+
+def test_duplicate_owner_stays_sticky_across_rounds(monkeypatch):
+    # Once decided, a hash's owner doesn't get re-litigated by a later round just because a
+    # new contender happens to have an earlier commit_block -- first-decided sticks.
+    monkeypatch.setattr("validator.service.precheck_codec", _same_hash_precheck)
+    state = ValidatorState()
+    state.duplicate_hash_owner = {"same-hash": "hotkey-a"}
+    _seed_existing_commitment(state, "hotkey-z", "z/codec", "rev00002", block=0)  # earlier than any real block
+    parsed = [ParsedCommitment("hotkey-z", CodecCommitment(repo="z/codec", rev="rev00002"), "raw-z")]
+    _apply_precheck(state, parsed, max_artifact_bytes=100, block=999)
+    z = state.commitments["hotkey-z:z/codec@rev00002"]
+    assert z.valid is False
+    assert "hotkey-a" in z.disqualification_reason
 
 
 # --- commit-reveal tie-break block (exploit vector #9) --------------------------
