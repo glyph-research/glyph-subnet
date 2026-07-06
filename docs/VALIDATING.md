@@ -8,7 +8,7 @@ chosen with `--runner`:
   operator-controlled hardware. **`--docker-gpu` is also on by default, and it requires an RTX
   4090** (`core.constants.DOCKER_REFERENCE_GPU`) -- every validator running GPU codecs must use
   identical hardware, or `compress_secs`/`decompress_secs` (gated against `THROUGHPUT_FLOOR_BPS`)
-  aren't comparable across validators (DESIGN §4 same-system determinism). This is intentional
+  aren't comparable across validators (same-system determinism). This is intentional
   and network-wide, not a bug: **a validator host without Docker + `nvidia-container-toolkit` +
   a matching GPU fails closed** (`DockerRunner` checks the GPU model via `nvidia-smi` at startup
   and refuses to run on anything else, with no bypass flag). Pass `--no-docker-gpu` for CPU-only

@@ -8,8 +8,8 @@ correctness (see ``chute_app.py``'s module docstring for the full diagnosis). Ru
 compress/decompress locally in Docker sidesteps both: the operator controls their own
 GPU/image, and there is no remote platform to fight with.
 
-Isolation model mirrors ``LocalSubprocessRunner``/``ChutesRunner`` (DESIGN §6,
-exploit-prevention #14): compress and decompress each run in a FRESH, ephemeral container
+Isolation model mirrors ``LocalSubprocessRunner``/``ChutesRunner`` (exploit-prevention #14):
+compress and decompress each run in a FRESH, ephemeral container
 (``docker run --rm``) with no shared filesystem, network, or process table between them, so a
 codec cannot stash the raw input during compress and read it back during decompress. Untrusted
 code execution gets ``--network none`` (the container-native equivalent of
@@ -24,8 +24,8 @@ runner is invoked, exactly like ``LocalSubprocessRunner`` -- see ``needs_local_a
 ``gpu=True`` requires the host's GPU to match ``core.constants.DOCKER_REFERENCE_GPU`` (checked
 once at construction via ``nvidia-smi``, fail-closed) -- see ``_verify_gpu_model``. Every
 validator using ``--docker-gpu`` must run on identical hardware, or compress_secs/decompress_secs
-are not comparable across validators (DESIGN §4 same-system determinism), same rationale as
-Chutes' ``REFERENCE_SKU`` pin.
+are not comparable across validators (same-system determinism), same rationale as Chutes'
+``REFERENCE_SKU`` pin.
 """
 
 from __future__ import annotations
@@ -77,9 +77,9 @@ def _allow_sandbox_read_tree(root: Path) -> None:
 def _verify_gpu_model(gpu_device: str | None, reference_gpu: str) -> None:
     """Fail closed unless every GPU this runner would use matches ``reference_gpu`` (see
     ``core.constants.DOCKER_REFERENCE_GPU``): compress_secs/decompress_secs are only comparable
-    across validators (DESIGN §4 same-system determinism) if the hardware is identical. Checked
-    once per ``DockerRunner`` construction via the HOST's ``nvidia-smi`` -- GPU hardware doesn't
-    change mid-process, so this doesn't need to run per-invocation.
+    across validators (same-system determinism) if the hardware is identical. Checked once per
+    ``DockerRunner`` construction via the HOST's ``nvidia-smi`` -- GPU hardware doesn't change
+    mid-process, so this doesn't need to run per-invocation.
     """
 
     if shutil.which("nvidia-smi") is None:
@@ -103,7 +103,7 @@ def _verify_gpu_model(gpu_device: str | None, reference_gpu: str) -> None:
     if mismatched:
         raise RunnerError(
             f"DockerRunner requires GPU model containing {reference_gpu!r} for cross-validator "
-            f"throughput comparability (DESIGN §4); found: {', '.join(mismatched)}"
+            f"throughput comparability; found: {', '.join(mismatched)}"
         )
 
 

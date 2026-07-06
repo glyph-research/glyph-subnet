@@ -1,4 +1,4 @@
-"""Corpus providers (DESIGN §5).
+"""Corpus providers.
 
 The corpus is a single logical byte sequence that streams are sampled from. A
 ``CorpusProvider`` exposes its manifest (so the sample is reproducible and the data is
@@ -7,7 +7,7 @@ freshness-auditable) and materializes byte ranges.
 - ``StaticLocalProvider``: concatenates files in a directory; used for tests and M0
   dry-runs.
 - ``OracleProvider``: resolves the owner-published fresh-data corpus by its on-chain
-  manifest hash (implemented with the data oracle, DESIGN §5 / glyph-oracle).
+  manifest hash (implemented with the data oracle, glyph-oracle).
 """
 
 from __future__ import annotations
@@ -167,7 +167,7 @@ class OracleProvider(StaticLocalProvider):
 
     In production the owner-run oracle scrapes fresh, attested-timestamp text daily,
     publishes the corpus, and commits the manifest hash on-chain. Validators resolve the
-    corpus locally and assert it matches the committed hash (DESIGN §5).
+    corpus locally and assert it matches the committed hash.
     """
 
     def __init__(

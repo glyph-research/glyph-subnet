@@ -12,9 +12,9 @@ the same hotkey, one block apart:
 * **commit phase** -- ``g1c|<sha256(repo|rev|salt)>``. This reveals nothing about the repo,
   so a mempool watcher cannot copy it.
 * **reveal phase** -- ``g1r|repo|revision|salt``. Validators recompute the digest and match
-  it against the commit-phase value they observed, and key the earliest-commit tie-break
-  (DESIGN §3.5) off the *commit-phase* block. A copier who only learns ``repo|rev`` at reveal
-  time therefore cannot land an earlier commit.
+  it against the commit-phase value they observed, and key the earliest-commit tie-break off
+  the *commit-phase* block. A copier who only learns ``repo|rev`` at reveal time therefore
+  cannot land an earlier commit.
 
 Legacy single-phase ``g1|repo|rev`` / ``glyph:{json}`` commitments are still parsed (they
 simply carry no front-running protection and tie-break on first observation).

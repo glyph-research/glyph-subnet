@@ -1,4 +1,4 @@
-"""Temporal-burn weight setting (DESIGN §6.1).
+"""Temporal-burn weight setting.
 
 ``decide_weights`` computes the weights for a single tempo from the winner history and the
 burn seed. ``main`` is a standalone service that reads validator state, computes weights

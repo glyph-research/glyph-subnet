@@ -24,7 +24,7 @@ a burn tempo, `weight_setter.decide_weights` always short-circuits `burn` to `Fa
 all emission flows to the normal rolling-winner distribution (70% / 30%) every tempo. The
 schedule below describes the feature as designed and as it runs when re-enabled.
 
-A 25% daily burn is applied *in time*, not as a static carve-out (DESIGN §6.1):
+A 25% daily burn is applied *in time*, not as a static carve-out:
 
 - Tempos are grouped into windows of 4. Exactly one tempo per window is a **burn tempo**:
   weights go 100% to UID 0.

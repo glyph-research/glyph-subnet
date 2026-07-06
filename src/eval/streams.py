@@ -1,4 +1,4 @@
-"""Beacon-seeded stream sampling (DESIGN §3.2, §5).
+"""Beacon-seeded stream sampling.
 
 ``derive_seed`` mixes a post-corpus block hash with a per-validator **private salt** and the
 round index; ``sample_streams`` turns the seed into a deterministic set of long contiguous
@@ -60,7 +60,7 @@ def sample_streams(
 
     Each window's start offset is derived from ``seed`` and the stream index, so the
     selection is identical across validators and stable across runs. Windows are long and
-    contiguous (DESIGN §4) so online-learning codecs warm up within a stream.
+    contiguous so online-learning codecs warm up within a stream.
     """
 
     if total_bytes <= 0 or streams <= 0:

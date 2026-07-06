@@ -1,4 +1,4 @@
-"""The glyph eval chutes (DESIGN §6): TWO deployed Chutes (SN64) endpoints (compressor + decompressor
+"""The glyph eval chutes: TWO deployed Chutes (SN64) endpoints (compressor + decompressor
 on separate containers, so a codec cannot stash the raw input during compress and read it during
 decompress, #14). A cord MUST return a plain JSON dict, not a pydantic model.
 

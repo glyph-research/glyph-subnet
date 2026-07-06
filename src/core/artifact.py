@@ -80,8 +80,7 @@ def hash_artifact(root: str | Path) -> tuple[str, int]:
     """Deterministic (path, file-hash) tree sha256 over the artifact, plus total bytes.
 
     This is the canonical artifact hash used for the on-chain-commitment match (recomputed
-    at precheck) and for the cross-hotkey duplicate-hash disqualification (DESIGN anti-copy
-    gate).
+    at precheck) and for the cross-hotkey duplicate-hash disqualification (anti-copy gate).
     """
 
     root = Path(root)

@@ -1,4 +1,4 @@
-"""Paired evaluation of codecs over identical beacon-seeded streams (DESIGN §3.2).
+"""Paired evaluation of codecs over identical beacon-seeded streams.
 
 The incumbent and every challenger are run on the *same* streams in a round, so shared
 data difficulty cancels and one-shot scoring is fair. Each stream's compress+decompress

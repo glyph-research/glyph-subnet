@@ -15,7 +15,7 @@ Score = compression ratio (compressed ÷ raw, lower is better) with a hard **bit
 round-trip** gate. A challenger takes the crown only by beating the incumbent by `ε`
 (default `5%`); ties go to the earliest commit; losers are excluded forever (one shot).
 
-See [`../DESIGN.md`](../DESIGN.md) for the full spec and [`docs/`](docs) for guides.
+See [`docs/`](docs) for guides.
 
 ## Repository layout
 
@@ -60,7 +60,7 @@ See [docs/MINING.md](docs/MINING.md). Commitments are permanent per hotkey.
 
 **Default eval path is local Docker on an RTX 4090** — every validator running GPU codecs must
 use identical hardware, or compress/decompress throughput isn't comparable across validators
-(DESIGN §4 same-system determinism). This is a network-wide requirement, not a suggestion: a
+(same-system determinism). This is a network-wide requirement, not a suggestion: a
 validator without Docker + `nvidia-container-toolkit` + a matching GPU **fails closed by
 design** (`DockerRunner` checks the GPU model via `nvidia-smi` and refuses to run on anything
 else). See [docs/VALIDATING.md](docs/VALIDATING.md) for the full requirement and CPU-only opt-out.

@@ -1,4 +1,4 @@
-"""Glyph data oracle (DESIGN §5): build the evaluation corpus from large, mixed sources.
+"""Glyph data oracle: build the evaluation corpus from large, mixed sources.
 
 The owner runs this to (re)build the corpus. Earlier versions scraped the live Wikipedia
 recent-changes stream for *freshness* (data that provably postdates miner commitments).

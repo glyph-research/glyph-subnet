@@ -2,9 +2,8 @@
 
 Glyph scores codecs by compression ratio, where **lower is better**, so the promotion
 comparator is inverted relative to a benchmark-accuracy subnet. Weights follow a
-two-slot rolling winner policy (current 70% / previous 30%, DESIGN §3.5), overlaid with
-the temporal burn schedule (DESIGN §6.1): on a burn tempo all weight goes to the burn
-UID.
+two-slot rolling winner policy (current 70% / previous 30%), overlaid with the temporal
+burn schedule: on a burn tempo all weight goes to the burn UID.
 """
 
 from __future__ import annotations
@@ -105,7 +104,7 @@ def compute_weights(
 ) -> list[float]:
     """Final validator weights for a single tempo.
 
-    On a burn tempo (DESIGN §6.1) all weight goes to ``burn_uid``. On a normal tempo
+    On a burn tempo all weight goes to ``burn_uid``. On a normal tempo
     weight follows the rolling 70/30 winners; if there is no eligible winner yet the
     emission is burned rather than spread arbitrarily.
     """
