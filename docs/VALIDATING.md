@@ -64,6 +64,28 @@ glyph-validator --docker-image glyph-runner-default:latest \
   GPU genuinely used inside the isolated container, and the GPU-model gate both accepts the
   real RTX 4090 and rejects a simulated mismatched card.
 
+### Miner-published images (issue #48)
+
+A codec whose manifest declares its own digest-pinned `image` (see `docs/MINING.md`) runs a
+different lifecycle than the default single-shot path above: `DockerRunner` starts that
+container **detached with network access and no eval data present**, waits for it to signal
+ready (bounded by the manifest's `warmup.timeout_secs`, default 300s), **severs its network**,
+and only then writes the eval input into its scratch mount and `docker exec`s the scored
+compress/decompress entrypoint -- offline, same GPU/RAM caps and wall-clock budget as any
+other codec. Operationally:
+
+- This is why `--docker-gpu`/RTX-4090 host requirements still apply identically -- the GPU
+  cap attaches at container start and persists through warmup and the sealed benchmark.
+- A validator host firewall that normally blocks all outbound Docker traffic needs to permit
+  it during this specific warmup window (a per-invocation dedicated bridge network, not the
+  shared default bridge); the runner severs it again before any eval byte is ever written to
+  disk inside the container, so the exposure window is bounded and never overlaps with the
+  corpus/blob being present.
+- A codec whose manifest omits `image` is entirely unaffected -- it keeps the original
+  `--network none`-from-start, no-warmup path with no behavior change.
+- See [`CODEC_SANDBOX_HARDENING.md`](CODEC_SANDBOX_HARDENING.md) for the security rationale
+  (why the networked window can't leak eval data) and current test coverage.
+
 ## Use Chutes instead (optional)
 
 ```bash

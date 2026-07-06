@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "name": "docker-codec-template",
+  "entrypoints": {
+    "compress": ["python3", "/app/compress.py", "--input", "{input}", "--output", "{output}"],
+    "decompress": ["python3", "/app/decompress.py", "--input", "{input}", "--output", "{output}"]
+  },
+  "image": "ghcr.io/your-user/your-codec@sha256:REPLACE_WITH_YOUR_PUSHED_IMAGE_DIGEST",
+  "warmup": {
+    "command": ["python3", "/app/warmup.py"],
+    "timeout_secs": 300
+  },
+  "resources": {"vram_gb": 24, "ram_gb": 32},
+  "license": "MIT"
+}

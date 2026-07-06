@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -20,11 +21,50 @@ MANIFEST_NAME = "manifest.json"
 PLACEHOLDER_INPUT = "{input}"
 PLACEHOLDER_OUTPUT = "{output}"
 _EXCLUDED_PARTS = {"__pycache__", ".git", ".cache"}
+# A digest-pinned OCI image reference: name@sha256:<64 lowercase hex chars>. The name portion
+# excludes '@' (so an embedded/second '@sha256:...' can't be swallowed as part of the name --
+# a reference syntactically has exactly one '@') and whitespace (rejects leading/trailing
+# whitespace or a trailing newline). Deliberately excludes bare tags (":latest", ":1.0") --
+# see is_image_digest_pinned()/Manifest.image_issues().
+_IMAGE_DIGEST_RE = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
+DEFAULT_WARMUP_READY_FILE = "/scratch/.glyph_ready"
+DEFAULT_WARMUP_TIMEOUT_SECS = 300.0
+
+
+def is_image_digest_pinned(image: str) -> bool:
+    """True iff ``image`` is pinned by an OCI sha256 digest, not a mutable tag (issue #48)."""
+
+    return bool(_IMAGE_DIGEST_RE.fullmatch(image))
 
 
 class Entrypoints(BaseModel):
     compress: list[str] = Field(min_length=1)
     decompress: list[str] = Field(min_length=1)
+
+
+class Warmup(BaseModel):
+    """Networked warmup config for a manifest-declared ``image`` (issue #48).
+
+    Only meaningful when ``Manifest.image`` is set: a miner-published image may need
+    network access once to install/download deps or weights before the sealed, offline
+    benchmark run. Two mutually exclusive readiness protocols, chosen by whether
+    ``command`` is set:
+
+    - ``command`` set (recommended, simpler): the container's own CMD/ENTRYPOINT is
+      overridden with a lightweight keep-alive, and ``command`` is run via ``docker exec``
+      as the actual warmup step -- readiness = it exits 0.
+    - ``command`` unset: the image's own CMD/ENTRYPOINT runs unmodified and must be a
+      long-running process that does its own initialization and creates ``ready_file``
+      when done (it must not exit, or there is nothing left to ``docker exec`` the scored
+      entrypoint into afterward) -- polled from the host up to ``timeout_secs``.
+
+    Either way this is a hard, fail-closed deadline: a codec that never signals ready is
+    killed and fails the round rather than running unbounded.
+    """
+
+    command: list[str] | None = None
+    ready_file: str = DEFAULT_WARMUP_READY_FILE
+    timeout_secs: float = DEFAULT_WARMUP_TIMEOUT_SECS
 
 
 class Manifest(BaseModel):
@@ -33,6 +73,12 @@ class Manifest(BaseModel):
     entrypoints: Entrypoints
     resources: dict = Field(default_factory=dict)
     license: str = "unknown"
+    # Digest-pinned Docker image the codec runs in (e.g. "ghcr.io/user/mycodec@sha256:...").
+    # None (default) -> the operator-supplied --docker-image / DEFAULT_DOCKER_IMAGE, the
+    # existing ephemeral --network-none-from-start path with no warmup. Set -> the
+    # warmup(network on) -> seal(network off) -> benchmark lifecycle in runner_docker.py.
+    image: str | None = None
+    warmup: Warmup | None = None
 
     def placeholder_issues(self) -> list[str]:
         issues: list[str] = []
@@ -43,6 +89,23 @@ class Manifest(BaseModel):
             if PLACEHOLDER_OUTPUT not in joined:
                 issues.append(f"{label} entrypoint is missing the {PLACEHOLDER_OUTPUT} placeholder")
         return issues
+
+    def image_issues(self) -> list[str]:
+        """Fail-closed: a declared ``image`` MUST be pinned by digest, never a mutable tag.
+
+        All validators must run byte-identical containers or scores diverge on-chain (issue
+        #48) -- a floating tag could resolve to different bytes depending on when/where each
+        validator pulled it.
+        """
+
+        if self.image is None:
+            return []
+        if not is_image_digest_pinned(self.image):
+            return [
+                f"manifest image {self.image!r} must be pinned by digest "
+                "(e.g. 'repo@sha256:<64 hex chars>'), not a mutable tag"
+            ]
+        return []
 
 
 def manifest_path(artifact_dir: str | Path) -> Path:

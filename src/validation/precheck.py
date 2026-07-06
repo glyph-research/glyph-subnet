@@ -384,6 +384,7 @@ def precheck_artifact_dir(
     result.name = manifest.name
     result.license = manifest.license
     result.errors.extend(manifest.placeholder_issues())
+    result.errors.extend(manifest.image_issues())
     result.warnings.extend(_entrypoint_script_warnings(path, manifest))
     result.errors.extend(artifact_security_errors(path, manifest))
 
@@ -443,6 +444,7 @@ def precheck_codec(
         result.name = manifest.name
         result.license = manifest.license
         result.errors.extend(manifest.placeholder_issues())
+        result.errors.extend(manifest.image_issues())
         result.warnings.append("artifact download skipped; hash/size not computed")
         result.ok = not result.errors
         return result
