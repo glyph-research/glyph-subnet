@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -106,6 +107,32 @@ class Manifest(BaseModel):
                 "(e.g. 'repo@sha256:<64 hex chars>'), not a mutable tag"
             ]
         return []
+
+
+_UNSAFE_PATH_CHARS_RE = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def local_snapshot_dir(repo: str, revision: str) -> Path:
+    """A stable, per-(repo, revision) directory for a materialized HuggingFace snapshot.
+
+    Passing this as ``snapshot_download``'s ``local_dir`` makes it write real files instead
+    of the cache's default symlinks-into-``blobs/`` layout -- those symlinks dangle once the
+    snapshot directory is bind-mounted into a container alone, without the separate ``blobs/``
+    directory they point into (issue #66). ``revision`` is a specific pinned commit, so the
+    same (repo, revision) always resolves to identical content -- safe to reuse indefinitely
+    and share across rounds (the incumbent is re-evaluated every round) rather than
+    re-downloading into a fresh temp dir on every call.
+
+    Keyed off a hash of the exact (repo, revision) pair, not a naive char-sanitized path: two
+    different repos (e.g. ``"a/b"`` and ``"a_b"``) could otherwise sanitize to the same
+    directory name, and repo/revision are commitment-controlled strings that must not be
+    trusted as raw path components (path traversal via ``..``). The sanitized prefix is kept
+    only for human debuggability -- the hash suffix is what actually guarantees uniqueness.
+    """
+
+    digest = hashlib.sha256(f"{repo}@{revision}".encode("utf-8")).hexdigest()
+    readable_prefix = _UNSAFE_PATH_CHARS_RE.sub("_", f"{repo}@{revision}")[:80]
+    return Path(tempfile.gettempdir()) / "glyph-artifact-snapshots" / f"{readable_prefix}-{digest}"
 
 
 def manifest_path(artifact_dir: str | Path) -> Path:

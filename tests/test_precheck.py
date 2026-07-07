@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
+from unittest.mock import patch
 
-from validation.precheck import precheck_artifact_dir
+from core.artifact import local_snapshot_dir
+from validation.precheck import precheck_artifact_dir, precheck_codec
 
 REFERENCE_CODEC = Path(__file__).resolve().parents[1] / "reference_codec"
 
@@ -259,3 +261,33 @@ def test_python_identifiers_do_not_trip_command_scanner(tmp_path):
     (tmp_path / "decompress.py").write_text("open('out','wb').write(b'x')\n")
     result = precheck_artifact_dir(tmp_path)
     assert result.ok is True
+
+
+def test_precheck_codec_downloads_with_stable_local_dir(tmp_path):
+    # issue #66: must not use the default cache-based (symlink-into-blobs/) download --
+    # local_dir materializes real files, and reusing the same stable path artifact_ref() uses
+    # means a later real fetch for execution can skip re-downloading what precheck already
+    # verified.
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "entrypoints": {
+                    "compress": ["python3", "c.py", "--input", "{input}", "--output", "{output}"],
+                    "decompress": ["python3", "d.py", "--input", "{input}", "--output", "{output}"],
+                },
+                "license": "MIT",
+            }
+        )
+    )
+    (tmp_path / "c.py").write_text("x")
+    (tmp_path / "d.py").write_text("x")
+
+    with patch("huggingface_hub.HfApi") as mock_api, patch("huggingface_hub.snapshot_download") as mock_download:
+        mock_api.return_value.repo_info.return_value = None
+        mock_download.return_value = str(tmp_path)
+        precheck_codec("org/repo", "deadbeef1234", max_artifact_bytes=1000)
+
+    mock_download.assert_called_once_with(
+        repo_id="org/repo", revision="deadbeef1234", local_dir=local_snapshot_dir("org/repo", "deadbeef1234")
+    )
