@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from eval.evaluator import paired_eval
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
+from core.artifact import local_snapshot_dir
 from core.state import CommitmentState, ScoreState, ValidatorState
 from core.weights import WinnerEntry, promote_winner, rank_key, should_promote
 
@@ -41,7 +42,14 @@ def artifact_ref(commitment: CommitmentState, runner) -> ArtifactRef:
         if not local:
             from huggingface_hub import snapshot_download
 
-            local = snapshot_download(repo_id=commitment.repo, revision=commitment.revision)
+            # local_dir materializes real files rather than the cache's default
+            # symlinks-into-blobs/ layout, which dangle once this directory is bind-mounted
+            # into a container alone, without the separate blobs/ dir they point into (#66).
+            local = snapshot_download(
+                repo_id=commitment.repo,
+                revision=commitment.revision,
+                local_dir=local_snapshot_dir(commitment.repo, commitment.revision),
+            )
         return ArtifactRef(
             repo=commitment.repo, rev=commitment.revision, sha256=commitment.artifact_hash, local_path=local
         )

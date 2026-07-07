@@ -336,3 +336,67 @@ def test_no_gpu_flag_skips_the_check_entirely(monkeypatch):
     # need a GPU present, matching, and available.
     monkeypatch.setattr("eval.runner_docker.shutil.which", _which_stub(False))
     DockerRunner(gpu=False)  # would raise if the GPU check ran despite gpu=False
+
+
+# --- issue #66: a snapshot_download of a real HF repo returns symlinks-into-blobs/ by default;
+# DockerRunner bind-mounts ONLY the snapshot dir, so those symlinks dangle inside the container.
+# local_snapshot_dir()-based downloads (the fix, wired in reign_worker.service.artifact_ref /
+# validation.precheck.precheck_codec) materialize real files instead -- these tests prove BOTH
+# the failure mode and the fix using DockerRunner directly (no mocking of DockerRunner itself).
+
+
+def _write_manifest_and_scripts(directory: Path) -> None:
+    (directory / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "symlink-regression",
+                "entrypoints": {
+                    "compress": ["python3", "compress.py", "--input", "{input}", "--output", "{output}"],
+                    "decompress": ["python3", "decompress.py", "--input", "{input}", "--output", "{output}"],
+                },
+                "license": "MIT",
+            }
+        )
+    )
+    (directory / "compress.py").write_text(
+        "import argparse\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--input'); p.add_argument('--output')\n"
+        "a = p.parse_args()\n"
+        "open(a.output, 'wb').write(open(a.input, 'rb').read())\n"
+    )
+    (directory / "decompress.py").write_text(
+        "import argparse\n"
+        "p = argparse.ArgumentParser(); p.add_argument('--input'); p.add_argument('--output')\n"
+        "a = p.parse_args()\n"
+        "open(a.output, 'wb').write(open(a.input, 'rb').read())\n"
+    )
+
+
+def test_dangling_symlink_snapshot_layout_fails_inside_container(tmp_path):
+    # Mimics huggingface_hub's default cache-based download layout: the "snapshot" dir
+    # contains only symlinks into a SEPARATE "blobs" dir that lives outside it -- exactly
+    # what DockerRunner's bind-mount (only the snapshot dir) can't see.
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    _write_manifest_and_scripts(blobs)
+    for name in ("manifest.json", "compress.py", "decompress.py"):
+        (snapshot / name).symlink_to(blobs / name)
+
+    runner = DockerRunner()
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(snapshot))
+    with pytest.raises(RunnerError, match="No such file or directory|can't open file"):
+        runner.compress(artifact, b"data" * 100, caps=ResourceCaps())
+
+
+def test_materialized_real_files_snapshot_layout_succeeds(tmp_path):
+    # Same content, but as real files (what local_snapshot_dir()-based downloads produce) --
+    # this is the fix: DockerRunner works correctly once there's nothing to dangle.
+    _write_manifest_and_scripts(tmp_path)
+    runner = DockerRunner()
+    artifact = ArtifactRef(repo="t/c", rev="local", local_path=str(tmp_path))
+    raw = b"data" * 100
+    comp = runner.compress(artifact, raw, caps=ResourceCaps())
+    assert comp.compressed_bytes == len(raw)  # store-only passthrough, but it actually ran

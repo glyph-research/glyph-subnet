@@ -18,6 +18,7 @@ from core.artifact import (
     hash_artifact,
     iter_artifact_files,
     load_manifest,
+    local_snapshot_dir,
 )
 from core.constants import DEFAULT_MAX_ARTIFACT_BYTES
 
@@ -449,5 +450,9 @@ def precheck_codec(
         result.ok = not result.errors
         return result
 
-    local = snapshot_download(repo_id=repo, revision=revision)
+    # local_dir materializes real files rather than the cache's default symlinks-into-blobs/
+    # layout (issue #66) -- and, since it's the same stable per-(repo, revision) path
+    # reign_worker.service.artifact_ref() downloads into, this also lets that later download
+    # skip re-fetching content precheck already verified here.
+    local = snapshot_download(repo_id=repo, revision=revision, local_dir=local_snapshot_dir(repo, revision))
     return precheck_artifact_dir(local, repo, revision, max_artifact_bytes=max_artifact_bytes)
