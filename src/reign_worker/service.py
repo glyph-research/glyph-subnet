@@ -116,8 +116,16 @@ def run_round(
             current_ratio = inc_outcome.score.ratio
             state.winner_history[0] = state.scores[incumbent_commitment.key].as_winner()
         else:
-            # Incumbent failed its own re-evaluation -> vacate, hot standby promotes later.
+            # Incumbent failed its own re-evaluation -> actually vacate the crown (issue #67).
+            # rolling_weights_for_hotkeys only looks at winner_history's presence, never
+            # re-checks state.scores[...].valid, so leaving this entry in place would let a
+            # codec that just broke keep earning weight indefinitely whenever no challenger
+            # happens to appear in a given round. Popping shifts the hot standby (index 1, if
+            # any) up to index 0, so it's naturally treated as the incumbent next round --
+            # "promotes later" needs no special-casing here, current_ratio already stays None
+            # so a valid challenger THIS round still vacant-crown-promotes immediately.
             print(f"incumbent {incumbent_commitment.hotkey} failed re-eval: {inc_outcome.score.reasons}")
+            state.winner_history.pop(0)
 
     ranked = sorted(
         (c for c in challengers if outcomes.get(c.hotkey) and outcomes[c.hotkey].score.valid),
