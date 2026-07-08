@@ -264,13 +264,21 @@ Other flags:
   CI or air-gapped testing.
 - `--wandb.notes "..."` — free-text note attached to the run.
 - `--wandb.restart_interval <hours>` — finish and reopen the run on this cadence so a
-  long-lived `--loop` validator doesn't accumulate one unbounded run (default 24h; 0 disables).
+  long-lived validator doesn't accumulate one unbounded run (default 24h; 0 disables).
 
 ## Notes
 
 - **Version safety**: the validator fail-closes if `core.__version_key__` ≠ the
   on-chain `weights_version`. Bump both together on breaking changes.
 - **Commit-reveal** must be enabled on the subnet for the anti-copy burn schedule to bite.
+- **Continuous by default** (issue #79): `glyph-validator` and `glyph-weight-setter` loop
+  continuously by default -- pass `--once` to run a single round and exit instead (for
+  testing/CI; a real validator should not pass this). `--loop` is a deprecated no-op kept only
+  so an existing invocation that already passes it doesn't break.
+- **set_weights rate limiting**: below the subnet's weights-rate-limit window, `set_weights`
+  logs `"set_weights: skipped, rate-limited (N blocks remaining)"` instead of attempting and
+  reporting a contentless failure (the bittensor SDK returns no error/message in that case by
+  construction).
 - **Offline check** (no chain, no Docker/GPU, no HuggingFace access needed):
   `glyph-validator --offline-demo --runner local ...` uses the bundled `samples/corpus`
   sample by default; pass `--corpus-dir` to point at a different local directory instead.

@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 from bittensor.utils.btlogging import logging as bt_logging
 
@@ -355,6 +357,10 @@ class _FakeWandb:
 
 
 class _FakeChain:
+    def __init__(self, rate_limit_remaining=None):
+        self._rate_limit_remaining = rate_limit_remaining
+        self.set_weights_called = False
+
     def commit_reveal_enabled(self):
         return True
 
@@ -365,7 +371,11 @@ class _FakeChain:
         return type("Metagraph", (), {"hotkeys": ["hk0"], "uids": [0]})()
 
     def set_weights(self, uids, weights, version_key):
+        self.set_weights_called = True
         return type("Response", (), {"success": True, "error": None, "message": None})()
+
+    def blocks_until_weights_allowed(self):
+        return self._rate_limit_remaining
 
 
 def test_run_once_prints_champion_and_concise_set_weights_on_a_quiet_round(monkeypatch, tmp_path, caplog):
@@ -418,3 +428,86 @@ def test_run_once_prints_no_champion_when_history_empty(monkeypatch, tmp_path, c
 
     out = caplog.text
     assert "champion=none" in out
+
+
+def test_run_once_skips_set_weights_when_rate_limited(monkeypatch, tmp_path, caplog):
+    # issue #79: below the subnet's weights-rate-limit, chain.set_weights would return a bare
+    # contentless failure (no error, no message) by construction in the real SDK -- detect
+    # and log this explicitly instead of attempting and reporting a silent failure.
+    bt_logging.set_info()
+    state = ValidatorState()
+    fake_chain = _FakeChain(rate_limit_remaining=42)
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+    monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": False, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())
+
+    assert fake_chain.set_weights_called is False
+    assert "set_weights: skipped, rate-limited (42 blocks remaining)" in caplog.text
+
+
+# --- --loop/--once default (issue #79) ------------------------------------------
+
+
+def test_validator_loops_by_default_and_once_opts_out():
+    from validator.service import build_parser as validator_build_parser
+
+    default_args = validator_build_parser().parse_args([])
+    assert default_args.once is False  # continuous looping is the default now
+    assert default_args.loop is False  # deprecated no-op, still accepted
+
+    once_args = validator_build_parser().parse_args(["--once"])
+    assert once_args.once is True
+
+    # An existing invocation that already passes --loop must still parse without error.
+    legacy_args = validator_build_parser().parse_args(["--loop"])
+    assert legacy_args.once is False
+
+
+def test_weight_setter_loops_by_default_and_once_opts_out():
+    from weight_setter.service import build_parser as weight_setter_build_parser
+
+    default_args = weight_setter_build_parser().parse_args([])
+    assert default_args.once is False
+    assert default_args.loop is False
+
+    once_args = weight_setter_build_parser().parse_args(["--once"])
+    assert once_args.once is True
+
+    legacy_args = weight_setter_build_parser().parse_args(["--loop"])
+    assert legacy_args.once is False
+
+
+def test_main_loops_continuously_without_once_or_loop_flag(monkeypatch):
+    # issue #79: this used to run exactly one round and exit unless --loop was passed, with no
+    # indication anywhere that this was expected -- prove main() now keeps going by default.
+    import validator.service as vs
+
+    monkeypatch.setattr(sys, "argv", ["glyph-validator", "--netuid", "117"])
+    call_count = {"n": 0}
+
+    def fake_run_once(args, wandb_logger=None):
+        call_count["n"] += 1
+        if call_count["n"] >= 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(vs, "run_once", fake_run_once)
+    monkeypatch.setattr(vs, "make_wandb_logger", lambda args: _FakeWandb())
+    monkeypatch.setattr(vs, "_make_chain", lambda args: _FakeChain())
+    monkeypatch.setattr(vs, "_sleep_with_commit_polls", lambda args, chain: None)
+    monkeypatch.setattr("core.dotenv.load_dotenv", lambda: None)
+
+    vs.main()
+
+    assert call_count["n"] >= 3

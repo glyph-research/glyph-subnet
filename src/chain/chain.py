@@ -103,3 +103,22 @@ class BittensorChain:
             version_key=version_key,
             wait_for_inclusion=True,
         )
+
+    def blocks_until_weights_allowed(self) -> int | None:
+        """Blocks remaining until this validator's next set_weights is accepted, or None if
+        that can't be determined (not registered on this subnet, or the SDK returned nothing).
+
+        Below the subnet's weights_rate_limit, the SDK's own set_weights short-circuits before
+        even attempting the extrinsic and returns a bare, contentless failure -- no error, no
+        message, by construction (issue #79). Checking this ourselves lets the caller log
+        *why* explicitly instead of a silent no-op-looking failure.
+        """
+
+        uid = self.subtensor.get_uid_for_hotkey_on_subnet(self.hotkey, self.config.netuid)
+        if uid is None:
+            return None
+        since = self.subtensor.blocks_since_last_update(self.config.netuid, uid)
+        limit = self.subtensor.weights_rate_limit(self.config.netuid)
+        if since is None or limit is None:
+            return None
+        return max(0, limit - since)

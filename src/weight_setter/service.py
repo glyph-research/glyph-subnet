@@ -54,7 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", default="./state")
     parser.add_argument("--burn-uid", type=int, default=BURN_UID)
     parser.add_argument("--window-anchor", type=int, default=WINDOW_ANCHOR_BLOCK)
-    parser.add_argument("--loop", action="store_true")
+    parser.add_argument(
+        "--loop", action="store_true",
+        help="Deprecated, no-op: continuous looping is now the default (issue #79). Kept only "
+        "so an existing invocation that already passes --loop doesn't break. Use --once to run "
+        "a single round and exit instead.",
+    )
+    parser.add_argument(
+        "--once", action="store_true",
+        help="Run a single round and exit, instead of looping continuously (the default). For "
+        "testing/CI -- a real weight setter should not pass this.",
+    )
     parser.add_argument("--sleep", type=int, default=1200)
     parser.add_argument("--dry-run", action="store_true")
     add_logging_args(parser)
@@ -101,6 +111,10 @@ def run(args: argparse.Namespace) -> None:
     if args.dry_run:
         bt_logging.info("dry-run: not submitting weights")
         return
+    remaining = chain.blocks_until_weights_allowed()
+    if remaining and remaining > 0:
+        bt_logging.info(f"set_weights: skipped, rate-limited ({remaining} blocks remaining)")
+        return
     response = chain.set_weights(uids, weights, version_key=version_key)
     if response.success:
         bt_logging.info("set_weights: success=True")
@@ -122,7 +136,7 @@ def main() -> None:
             break
         except Exception:
             bt_logging.exception("weight setter round failed")
-        if not args.loop:
+        if args.once:
             break
         time.sleep(args.sleep)
 
