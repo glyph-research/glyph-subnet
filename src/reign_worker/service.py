@@ -94,6 +94,10 @@ def run_round(
 
     # Re-score every codec on this round's fresh streams (also refreshes the incumbent's ratio).
     for hotkey, outcome in outcomes.items():
+        if outcome.score.valid:
+            bt_logging.info(f"candidate {hotkey}: ratio={outcome.score.ratio:.4f} valid")
+        else:
+            bt_logging.warning(f"candidate {hotkey}: invalid ({outcome.score.reasons})")
         commitment = next((c for c in state.commitments.values() if c.hotkey == hotkey and c.valid), None)
         if commitment is None:
             continue

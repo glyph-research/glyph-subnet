@@ -106,6 +106,32 @@ def test_apply_precheck_disqualifies_duplicate_hash(monkeypatch):
     assert "duplicate artifact" in second.disqualification_reason
 
 
+# --- precheck/round visibility logging (issue #81) ------------------------------
+
+
+def test_apply_precheck_logs_valid_and_invalid_per_hotkey(monkeypatch, caplog):
+    bt_logging.set_info()
+
+    def fake_precheck(repo, revision, *, max_artifact_bytes, download=True):
+        ok = repo == "a/codec"
+        return PrecheckResult(
+            repo=repo, revision=revision, ok=ok, artifact_hash="a" if ok else None,
+            artifact_bytes=10 if ok else None, errors=[] if ok else ["too big"],
+        )
+
+    monkeypatch.setattr("validator.service.precheck_codec", fake_precheck)
+    state = ValidatorState()
+    parsed = [
+        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev="abc123"), "raw-a"),
+        ParsedCommitment("hotkey-b", CodecCommitment(repo="b/codec", rev="def456"), "raw-b"),
+    ]
+    _apply_precheck(state, parsed, max_artifact_bytes=100, block=10)
+
+    out = caplog.text
+    assert "precheck: hotkey-a a/codec@abc123 valid" in out
+    assert "precheck: hotkey-b b/codec@def456 invalid: too big" in out
+
+
 # --- duplicate-artifact ownership: earliest commit_block wins, not hotkey order (#58) -------
 
 

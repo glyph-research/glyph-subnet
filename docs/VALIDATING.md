@@ -221,6 +221,12 @@ Using Chutes instead:
 (INFO/WARNING/ERROR) instead of a bare `print()`. INFO is the default (matching what these
 services always printed); pass `--logging.debug` or `--logging.trace` for more verbosity.
 
+A real round with challengers now logs each stage as it happens (issue #81), not just a
+post-hoc summary once everything is already done: each commitment's precheck result
+(hotkey + repo/rev + valid/invalid + reason), a "round: evaluating incumbent=..., N
+challenger(s): [...]" line before evaluation starts, and every candidate's ratio/validity
+once scored -- including challengers that lose, not only the eventual winner.
+
 ## Observability (wandb)
 
 Every validator process (`glyph-validator`, and `glyph-reign-worker` in the split-service
