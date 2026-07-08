@@ -18,7 +18,10 @@ from types import SimpleNamespace
 DEFAULT_MAX_ARTIFACT_BYTES = 10 * 2**30
 VRAM_CAP_BYTES = 24 * 2**30
 RAM_CAP_BYTES = 32 * 2**30
-COMPRESS_BUDGET_SECS = (32 * 2**20) / (10 * 1024)
+# Kept in sync by hand with core.constants.COMPRESS_BUDGET_SECS (issue #73) -- this module
+# deliberately does not import core.constants (see the module docstring: keeping this entry
+# small enough that the chutes-TEE aegis code-verification doesn't trip).
+COMPRESS_BUDGET_SECS = 450.0
 MANIFEST_NAME = "manifest.json"
 PLACEHOLDER_INPUT = "{input}"
 PLACEHOLDER_OUTPUT = "{output}"

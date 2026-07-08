@@ -50,10 +50,6 @@ RAM_CAP_BYTES = 32 * 2**30  # 32 GiB
 # rationale as VRAM_CAP_BYTES/RAM_CAP_BYTES.
 SCRATCH_CAP_BYTES = 117 * 2**30  # 117 GiB
 
-# --- Evaluation streams: 8 x 32 MiB = 256 MiB paired sample ---------------------
-STREAM_BYTES = 32 * 2**20
-STREAMS_PER_ROUND = 8
-SAMPLE_BYTES = STREAM_BYTES * STREAMS_PER_ROUND
 MAX_CHALLENGERS_PER_ROUND = 32
 
 # --- Per-source evaluation (issue #10) ----------------------------------------
@@ -70,8 +66,13 @@ EVAL_STREAM_BYTES = 4 * 2**20  # 4 MiB per stream
 
 # --- Gates -----------------------------------------------------------------------
 THROUGHPUT_FLOOR_BPS = 10 * 1024  # >= 10 KiB/s decompress throughput, per GPU
-# Compress wall-clock budget per stream, symmetric with the decompress floor.
-COMPRESS_BUDGET_SECS = STREAM_BYTES / THROUGHPUT_FLOOR_BPS
+# Compress/decompress wall-clock budget, per stream (issue #73). Previously derived from the
+# dead whole-corpus 32 MiB STREAM_BYTES constant (~3277s) rather than the 4 MiB streams
+# actually scored (EVAL_STREAM_BYTES / THROUGHPUT_FLOOR_BPS ~= 410s) -- a flat, slightly
+# rounder value above that. There is a second, independently-defined copy of this exact value
+# in eval/glyph_eval_runner.py (deliberately not importing this module -- see its docstring);
+# keep both in sync by hand.
+COMPRESS_BUDGET_SECS = 450.0
 BASELINE_LEVEL = 19  # zstd -19: the vacant-crown floor a codec must beat
 
 # --- Temporal burn schedule ------------------------------------------------------

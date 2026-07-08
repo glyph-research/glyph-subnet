@@ -36,8 +36,6 @@ from core.constants import (
     EVAL_STREAM_BYTES,
     EVAL_STREAMS,
     REFERENCE_SKU,
-    STREAM_BYTES,
-    STREAMS_PER_ROUND,
     THROUGHPUT_FLOOR_BPS,
     WINDOW_ANCHOR_BLOCK,
 )
@@ -51,7 +49,7 @@ from eval.live_corpus import resolve_live_corpus
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
 from eval.runner_docker import DEFAULT_DOCKER_IMAGE
 from eval.scoring import source_ratio_breakdown, stream_ratio, zstd_baseline_ratio
-from eval.streams import derive_seed, sample_source_streams, sample_streams
+from eval.streams import derive_seed, sample_source_streams
 from validation.precheck import precheck_artifact_dir, precheck_codec
 from reign_worker.service import run_round
 from weight_setter.service import decide_weights
@@ -164,12 +162,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Finish and reopen the wandb run after this many hours, so long-lived validator "
         "processes don't accumulate one unbounded run. 0 disables the restart.",
     )
-    parser.add_argument("--streams", type=int, default=STREAMS_PER_ROUND)
-    parser.add_argument("--stream-bytes", type=int, default=STREAM_BYTES)
-    # Per-source eval (issue #10): score on EVAL_STREAMS windows per source. Empty
-    # --eval-source disables it and reverts to whole-corpus sampling (--streams/--stream-bytes).
+    # Per-source eval (issue #10): score on EVAL_STREAMS windows per source.
     parser.add_argument("--eval-source", default=EVAL_SOURCE,
-                        help="comma-separated provenance sources to score ('' = whole corpus)")
+                        help="comma-separated provenance sources to score (must name at least one)")
     parser.add_argument("--eval-streams", type=int, default=EVAL_STREAMS)
     parser.add_argument("--eval-stream-bytes", type=int, default=EVAL_STREAM_BYTES)
     parser.add_argument("--eval-benchmark-source", default=EVAL_BENCHMARK_SOURCE,
@@ -443,10 +438,9 @@ def _source_specs(args, provider, seed: int, source: str, *, scored: bool, strea
 def _select_specs(args, provider, seed):
     """Select scored FineWeb/Pile streams plus benchmark-only enwik9 streams."""
 
-    source = getattr(args, "eval_source", "") or ""
-    sources = _parse_sources(source)
+    sources = _parse_sources(getattr(args, "eval_source", "") or "")
     if not sources:
-        return sample_streams(seed, provider.total_bytes, stream_bytes=args.stream_bytes, streams=args.streams)
+        raise SystemExit("--eval-source must name at least one provenance source (e.g. 'fineweb,pile')")
 
     specs = []
     for scored_source in sources:

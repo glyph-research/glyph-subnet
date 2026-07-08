@@ -5,7 +5,7 @@ from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
 from core.state import ScoreState, ValidatorState, load_state, save_state
-from eval.streams import sample_streams
+from eval.streams import sample_source_streams
 from core.weights import WinnerEntry
 
 REPO = Path(__file__).resolve().parents[1]
@@ -41,7 +41,7 @@ def _broken_codec(directory: Path):
 def test_paired_eval_reference_valid_broken_invalid(tmp_path):
     _broken_codec(tmp_path)
     provider = StaticLocalProvider(CORPUS)
-    specs = sample_streams(42, provider.total_bytes, stream_bytes=4096, streams=3)
+    specs = sample_source_streams(42, 0, provider.total_bytes, stream_bytes=4096, streams=3)
     artifacts = [
         ("hk_ref", ArtifactRef("glyph/ref", "local", local_path=str(REFERENCE_CODEC))),
         ("hk_broken", ArtifactRef("t/broken", "local", local_path=str(tmp_path))),

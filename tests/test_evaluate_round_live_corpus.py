@@ -3,6 +3,8 @@ live via eval.live_corpus.resolve_live_corpus, keyed by this round's chain beaco
 shared owner-published file.
 """
 
+import json
+
 import pytest
 
 from core.commitments import CodecCommitment, serialize_commitment
@@ -34,9 +36,11 @@ def _args(**overrides):
         "window_anchor": None,
         "max_artifact_bytes": 10_000,
         "corpus_dir": None,
-        "eval_source": "",
-        "stream_bytes": 64,
-        "streams": 2,
+        "eval_source": "fineweb",
+        "eval_streams": 1,
+        "eval_stream_bytes": 1024,
+        "eval_benchmark_source": "",
+        "eval_benchmark_streams": 0,
         "baseline_level": 3,
         "compress_budget_secs": 60.0,
         "floor_bps": 1.0,
@@ -80,7 +84,10 @@ def test_evaluate_round_builds_corpus_via_resolve_live_corpus(monkeypatch, tmp_p
     captured_resolve_call = {}
     real_corpus_dir = tmp_path / "live"
     real_corpus_dir.mkdir()
-    (real_corpus_dir / "chunk_00.txt").write_bytes(b"x" * 4096)
+    (real_corpus_dir / "chunk_00_fineweb.txt").write_bytes(b"x" * 4096)
+    (real_corpus_dir / "provenance.json").write_text(
+        json.dumps([{"source": "fineweb", "chunk_ids": ["chunk_00_fineweb.txt"]}])
+    )
 
     def fake_resolve_live_corpus(seed):
         captured_resolve_call["seed"] = seed

@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from eval.corpus import StaticLocalProvider
-from eval.streams import derive_seed, sample_source_streams, sample_streams
+from eval.streams import derive_seed, sample_source_streams
 
 CORPUS = Path(__file__).resolve().parents[1] / "samples" / "corpus"
 
@@ -16,35 +16,14 @@ def test_derive_seed_is_stable():
     assert a != derive_seed("0xblockhash", "saltsalt", 8)
 
 
-def test_sample_streams_deterministic_and_bounded():
-    total = 40000
-    seed = derive_seed("0xabc", "mysalt", 1)
-    specs_a = sample_streams(seed, total, stream_bytes=4096, streams=8)
-    specs_b = sample_streams(seed, total, stream_bytes=4096, streams=8)
-    assert specs_a == specs_b
-    assert len(specs_a) == 8
-    for spec in specs_a:
-        assert spec.length == 4096
-        assert 0 <= spec.offset <= total - spec.length
-
-
-def test_different_seed_changes_selection():
-    total = 40000
-    s1 = sample_streams(derive_seed("h", "salt", 1), total, stream_bytes=4096, streams=8)
-    s2 = sample_streams(derive_seed("h", "salt", 2), total, stream_bytes=4096, streams=8)
-    assert [x.offset for x in s1] != [x.offset for x in s2]
-
-
-def test_stream_larger_than_corpus_clamps():
-    specs = sample_streams(123, 1000, stream_bytes=8192, streams=4)
-    assert all(s.length == 1000 and s.offset == 0 for s in specs)
-
-
 # --- static local provider -------------------------------------------------------
 
 def test_provider_total_and_manifest_stable():
     provider = StaticLocalProvider(CORPUS)
-    assert provider.total_bytes == sum(p.stat().st_size for p in CORPUS.iterdir())
+    expected = sum(
+        p.stat().st_size for p in CORPUS.iterdir() if p.name not in StaticLocalProvider.RESERVED
+    )
+    assert provider.total_bytes == expected
     assert provider.manifest().manifest_hash() == StaticLocalProvider(CORPUS).manifest().manifest_hash()
 
 
@@ -60,7 +39,8 @@ def test_read_range_matches_concatenation():
 def test_materialize_equals_read_range():
     provider = StaticLocalProvider(CORPUS)
     seed = derive_seed("blk", "salt", 3)
-    for spec in sample_streams(seed, provider.total_bytes, stream_bytes=2048, streams=8):
+    specs = sample_source_streams(seed, 0, provider.total_bytes, stream_bytes=2048, streams=8)
+    for spec in specs:
         assert provider.materialize(spec) == provider.read_range(spec.offset, spec.length)
         assert len(provider.materialize(spec)) == spec.length
 

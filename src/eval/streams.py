@@ -1,8 +1,8 @@
 """Beacon-seeded stream sampling.
 
 ``derive_seed`` mixes a post-corpus block hash with a per-validator **private salt** and the
-round index; ``sample_streams`` turns the seed into a deterministic set of long contiguous
-byte windows over the corpus.
+round index; ``sample_source_streams`` turns the seed into a deterministic set of long
+contiguous byte windows confined to one corpus source.
 
 NOTE: because the salt is per-validator-private, validators currently sample *different*
 windows -- the selection is identical run-to-run for a given validator, but NOT identical
@@ -15,9 +15,6 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-
-from core.constants import STREAM_BYTES, STREAMS_PER_ROUND
-
 
 @dataclass(frozen=True)
 class StreamSpec:
@@ -49,52 +46,20 @@ def derive_seed(block_hash: str, salt: str, round_index: int) -> int:
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
 
 
-def sample_streams(
-    seed: int,
-    total_bytes: int,
-    *,
-    stream_bytes: int = STREAM_BYTES,
-    streams: int = STREAMS_PER_ROUND,
-) -> list[StreamSpec]:
-    """Deterministically pick ``streams`` contiguous windows of ``stream_bytes``.
-
-    Each window's start offset is derived from ``seed`` and the stream index, so the
-    selection is identical across validators and stable across runs. Windows are long and
-    contiguous so online-learning codecs warm up within a stream.
-    """
-
-    if total_bytes <= 0 or streams <= 0:
-        return []
-
-    length = min(stream_bytes, total_bytes)
-    max_offset = total_bytes - length
-    seed_bytes = int(seed).to_bytes(8, "big")
-
-    specs: list[StreamSpec] = []
-    for index in range(streams):
-        if max_offset == 0:
-            offset = 0
-        else:
-            digest = hashlib.sha256(seed_bytes + index.to_bytes(4, "big")).digest()
-            offset = int.from_bytes(digest, "big") % (max_offset + 1)
-        specs.append(StreamSpec(stream_id=f"s{index}", offset=offset, length=length))
-    return specs
-
-
 def sample_source_streams(
     seed: int,
     source_start: int,
     source_bytes: int,
     *,
-    stream_bytes: int = STREAM_BYTES,
-    streams: int = STREAMS_PER_ROUND,
+    stream_bytes: int,
+    streams: int,
     source: str | None = None,
     scored: bool = True,
 ) -> list[StreamSpec]:
     """Pick ``streams`` windows of ``stream_bytes`` confined to a single source's byte range.
 
-    Same seed-derived offset logic as ``sample_streams`` (so selection is fresh per round and
-    per validator via ``derive_seed``), but every window stays inside the source span
+    Each window's start offset is derived from ``seed`` and the stream index (so selection is
+    fresh per round and per validator via ``derive_seed``), confined to the source span
     ``[source_start, source_start + source_bytes)``. Returned offsets are global corpus
     coordinates. Used by the per-source eval (issue #10): two random 4 MiB FineWeb windows.
     """
