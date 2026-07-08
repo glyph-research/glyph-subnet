@@ -25,6 +25,7 @@ GIT_BRANCH="${GIT_BRANCH:-}"
 PYTHON_BIN="${PYTHON_BIN:-$REPO_DIR/venv/bin/python}"
 VALIDATOR_PROC_NAME="$DEFAULT_VALIDATOR_PROC_NAME"
 MONITOR_PROC_NAME="$DEFAULT_MONITOR_PROC_NAME"
+WANDB_NON_INTERACTIVE="${WANDB_NON_INTERACTIVE:-false}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
     PYTHON_BIN="$(command -v python3 || true)"
@@ -62,7 +63,16 @@ Auto-update options:
   --python PATH                 Python interpreter. Default: ./venv/bin/python
   --validator-proc-name NAME    PM2 validator process name.
   --monitor-proc-name NAME      PM2 monitor process name.
+  --wandb-non-interactive       Don't prompt for WANDB_API_KEY if unset; let wandb attempt
+                                an anonymous run instead (for scripted/CI use). No effect if
+                                WANDB_API_KEY is already set, or VALIDATOR_ARGS include
+                                --wandb.off / --wandb.offline.
   --help, -h                    Show this help message.
+
+Wandb logging defaults ON (see docs/reign-and-burn.md / core/wandb_logger.py). If
+WANDB_API_KEY isn't already set in the environment and neither --wandb.off nor
+--wandb.offline is passed, this script prompts for it here in the foreground -- before the
+validator starts under PM2, where there is no terminal to answer such a prompt.
 
 Example:
   $0 --check-interval 1200 --network finney --netuid 117 \\
@@ -259,9 +269,56 @@ else:
 PY
 }
 
+resolve_wandb_auth() {
+    # Wandb logging defaults ON (see core/wandb_logger.py). No WANDB_API_KEY configured is
+    # *supposed* to fall back to a clean anonymous run, but depending on the installed wandb
+    # version that same gap can instead surface as an interactive `wandb login` prompt --
+    # which would hang forever under pm2 (no TTY/stdin to answer it) rather than fail closed.
+    # Resolve auth here, still running interactively in the foreground, so the pm2-managed
+    # validator process is never the first thing to discover wandb isn't configured.
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--wandb.off" || "$arg" == "--wandb.offline" ]]; then
+            return 0
+        fi
+    done
+
+    if [[ -n "${WANDB_API_KEY:-}" ]]; then
+        return 0
+    fi
+
+    if [[ "$WANDB_NON_INTERACTIVE" == "true" ]]; then
+        log_warn "WANDB_API_KEY not set (--wandb-non-interactive passed); wandb will attempt an anonymous run"
+        return 0
+    fi
+
+    if [[ ! -t 0 ]]; then
+        log_warn "WANDB_API_KEY not set and no interactive terminal to prompt -- pass --wandb-non-interactive" \
+            "to silence this, export WANDB_API_KEY, or pass --wandb.off/--wandb.offline"
+        return 0
+    fi
+
+    echo "Weights & Biases logging is ON by default (pass --wandb.off to disable, --wandb.offline for local-only)."
+    read -r -s -p "Enter WANDB_API_KEY (leave blank to run anonymous): " entered_key
+    echo
+    if [[ -n "$entered_key" ]]; then
+        export WANDB_API_KEY="$entered_key"
+        log_info "WANDB_API_KEY set for this session"
+    else
+        log_warn "No WANDB_API_KEY entered; wandb will attempt an anonymous run"
+    fi
+}
+
 create_pm2_config() {
     local args_json="$1"
     local config_path="$REPO_DIR/app.config.js"
+    # WANDB_API_KEY (resolved interactively by resolve_wandb_auth before this ran, if it was
+    # going to be needed) is threaded through explicitly rather than relying on pm2's process-env
+    # inheritance, so the validator process is guaranteed to see it regardless of pm2 daemon state.
+    local wandb_env=""
+    if [[ -n "${WANDB_API_KEY:-}" ]]; then
+        wandb_env=", WANDB_API_KEY: \"$WANDB_API_KEY\""
+    fi
     cat > "$config_path" << EOF
 module.exports = {
   apps: [{
@@ -270,7 +327,7 @@ module.exports = {
     script: "$PYTHON_BIN",
     args: ["-m", "validator"$args_json],
     cwd: "$REPO_DIR",
-    env: { PYTHONPATH: "src" },
+    env: { PYTHONPATH: "src"$wandb_env },
     min_uptime: "5m",
     max_restarts: 5
   }]
@@ -321,6 +378,10 @@ main() {
                 internal_monitor=true
                 shift
                 ;;
+            --wandb-non-interactive)
+                WANDB_NON_INTERACTIVE=true
+                shift
+                ;;
             --help|-h)
                 show_help
                 exit 0
@@ -351,6 +412,8 @@ main() {
     if pm2 status | grep -q "$MONITOR_PROC_NAME"; then
         pm2 delete "$MONITOR_PROC_NAME"
     fi
+
+    resolve_wandb_auth "${validator_args[@]}"
 
     local config_path
     config_path="$(create_pm2_config "$(json_args "${validator_args[@]}")")"
