@@ -230,6 +230,12 @@ shareable wandb run created without requiring a login to view. The run URL is pr
 stdout on start (`[wandb] run started: https://wandb.ai/...`) — share that link to let
 others watch your validator's rounds live.
 
+`scripts/run_auto_validator.sh` resolves this *before* starting the pm2-managed validator: if
+`WANDB_API_KEY` isn't already set and neither `--wandb.off` nor `--wandb.offline` was passed,
+it prompts for the key in the foreground (there's no terminal to answer a prompt once the
+process is backgrounded under pm2). Pass `--wandb-non-interactive` to skip the prompt for
+scripted/CI use and let wandb attempt the anonymous fallback instead.
+
 To log to your own wandb project/entity instead, set `WANDB_API_KEY` in the environment (or
 `.env`) and pass:
 
