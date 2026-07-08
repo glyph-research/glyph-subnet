@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import argparse
 import time
-import traceback
 from pathlib import Path
+
+from bittensor.utils.btlogging import logging as bt_logging
 
 from core.burn_schedule import derive_burn_seed, is_burn_tempo
 from core.constants import BURN_ENABLED, BURN_UID, DEFAULT_NETUID, WINDOW_ANCHOR_BLOCK
+from core.log_config import add_logging_args
 from core.state import load_state
 from core.version import assert_weights_version_matches, local_version_key
 from core.weights import WinnerEntry, compute_weights
@@ -55,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--sleep", type=int, default=1200)
     parser.add_argument("--dry-run", action="store_true")
+    add_logging_args(parser)
     return parser
 
 
@@ -72,7 +75,7 @@ def run(args: argparse.Namespace) -> None:
         )
     )
     version_key = local_version_key()
-    print(f"version key ok: {assert_weights_version_matches(chain)}")
+    bt_logging.info(f"version key ok: {assert_weights_version_matches(chain)}")
     block = chain.current_block()
     tempo = chain.tempo()
     anchor = (
@@ -94,29 +97,31 @@ def run(args: argparse.Namespace) -> None:
         burn_uid=args.burn_uid,
     )
     nonzero = [(uids[i], round(w, 4)) for i, w in enumerate(weights) if w > 0]
-    print(f"block={block} tempo={tempo} burn_tempo={burn} weights={nonzero}")
+    bt_logging.info(f"block={block} tempo={tempo} burn_tempo={burn} weights={nonzero}")
     if args.dry_run:
-        print("dry-run: not submitting weights")
+        bt_logging.info("dry-run: not submitting weights")
         return
     response = chain.set_weights(uids, weights, version_key=version_key)
     if response.success:
-        print("set_weights: success=True")
+        bt_logging.info("set_weights: success=True")
     else:
-        print(f"set_weights: success=False error={response.error} message={response.message}")
+        bt_logging.warning(f"set_weights: success=False error={response.error} message={response.message}")
 
 
 def main() -> None:
     from core.dotenv import load_dotenv
+    from core.log_config import configure_logging
 
     load_dotenv()
     args = build_parser().parse_args()
+    configure_logging(args)
     while True:
         try:
             run(args)
         except KeyboardInterrupt:
             break
         except Exception:
-            traceback.print_exc()
+            bt_logging.exception("weight setter round failed")
         if not args.loop:
             break
         time.sleep(args.sleep)

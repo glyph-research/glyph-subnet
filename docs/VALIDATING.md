@@ -214,6 +214,13 @@ Using Chutes instead:
   --wallet-name validator --hotkey-name default --runner chutes --state-dir ./state
 ```
 
+## Console logging
+
+`glyph-validator`, `glyph-weight-setter`, and `glyph-reign-worker` log through
+`bittensor.utils.btlogging` (issue #80), so every line gets a timestamp and level
+(INFO/WARNING/ERROR) instead of a bare `print()`. INFO is the default (matching what these
+services always printed); pass `--logging.debug` or `--logging.trace` for more verbosity.
+
 ## Observability (wandb)
 
 Every validator process (`glyph-validator`, and `glyph-reign-worker` in the split-service
