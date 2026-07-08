@@ -1,51 +1,51 @@
-"""Glyph data oracle: build the evaluation corpus from large, mixed sources.
+"""Deterministic, beacon-seeded corpus streamed live from HuggingFace (issue #71).
 
-The owner runs this to (re)build the corpus. Earlier versions scraped the live Wikipedia
-recent-changes stream for *freshness* (data that provably postdates miner commitments).
-That source is editable, so a miner could plant text it holds a pre-built dictionary for,
-wait for the oracle to scrape it, then specialise its codec -- corpus poisoning at the
-source (exploit vector #10).
+Previously the owner ran a separate process (``glyph-oracle``) to build a mixed corpus
+file once, publish it, and commit its hash on-chain; every validator then pointed
+``--corpus-dir``/``--corpus-url`` at that same shared file. That is an extra always-on
+operational dependency and a single point of failure -- if the oracle process stalls, the
+corpus goes stale for the whole network.
 
-The corpus is now drawn from large, hard-to-influence public datasets, mixed across
-independent sources:
+Instead, each validator builds its own copy of the corpus directly, independently, from the
+same beacon-seeded skip offset -- no shared file, no owner process. Determinism across
+independent validators comes from ``_skip_for_seed`` and ``fetch_source_chunks`` being pure
+functions of ``(seed, dataset)``: given the same seed and the same pinned dataset revision,
+two validators land on byte-identical chunks without coordinating.
 
-    3 chunks  FineWeb   (HuggingFaceFW/fineweb, config sample-10BT)
-    3 chunks  The Pile  (monology/pile-uncopyrighted)
-    2 chunks  enwik9    (haukur/enwik9)
+The anti-memorisation guarantee does not rest on freshness (a mixed-source corpus rebuilt
+from a fixed dataset revision is no less resistant to memorisation than one rebuilt daily --
+see ``MIXED_SOURCES``' history). It rests on:
 
-The anti-memorisation guarantee no longer rests on freshness. It rests on:
-
-1. **Scale + an unpredictable slice.** FineWeb / The Pile are tens of TB -- far beyond
-   what a codec can embed under the artifact size cap. Crucially we do NOT take the fixed
-   prefix of each dataset (a miner could just memorise the first few MiB); we skip a
-   seed-derived number of records first, so *which* slice lands in the corpus is not
-   knowable in advance. The seed is the post-commitment chain beacon (``--seed``), so the
-   slice is fixed for a given build yet unpredictable at commit time.
-2. **Beacon-seeded stream sampling** (eval/streams.py) over the published corpus, so which
+1. **Scale + an unpredictable slice.** FineWeb / The Pile are tens of TB -- far beyond what a
+   codec can embed under the artifact size cap. We do NOT take the fixed prefix of each
+   dataset (a miner could just memorise the first few MiB); we skip a seed-derived number of
+   records first, so *which* slice lands in the corpus is not knowable in advance. The seed is
+   the post-commitment chain beacon, so the slice is fixed for a given round yet unpredictable
+   at commit time.
+2. **Beacon-seeded stream sampling** (eval/streams.py) over the resolved corpus, so which
    windows are actually scored is unpredictable too.
 3. **Source mixing**, which bounds the influence of any single poisoned source to a
    negligible fraction of the corpus.
-
-It writes corpus chunk files plus a manifest, and prints the manifest hash to commit
-on-chain. Validators resolve the corpus and verify it against that hash via
-``OracleProvider``.
 """
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
+import tempfile
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from eval.corpus import StaticLocalProvider
 
-USER_AGENT = "glyph-oracle/0.2 (+https://github.com/glyph-research/glyph-subnet)"
-
 # Minimum bytes for a record to be worth keeping (drops boilerplate/stubs).
 _MIN_DOC_BYTES = 200
+
+# Default per-round corpus shape: 8 x 2 MiB (3x FineWeb / 3x Pile / 2x enwik9), matching the
+# launch mix (issue #10).
+DEFAULT_CHUNK_BYTES = 2 * 2**20
+DEFAULT_SKIP_CAP = 100_000
 
 
 @dataclass(frozen=True)
@@ -60,8 +60,8 @@ class Source:
     chunks: int
 
 
-# The launch mix: 3x FineWeb / 3x Pile / 2x enwik9 (issue #10). Order here is the order
-# the chunk files are concatenated into the corpus.
+# The launch mix: 3x FineWeb / 3x Pile / 2x enwik9 (issue #10). Order here is the order the
+# chunk files are concatenated into the corpus.
 MIXED_SOURCES: list[Source] = [
     Source("fineweb", "HuggingFaceFW/fineweb", "sample-10BT", "train", "text", 3),
     Source("pile", "monology/pile-uncopyrighted", None, "train", "text", 3),
@@ -72,8 +72,8 @@ MIXED_SOURCES: list[Source] = [
 def _extract_text(record: dict, text_field: str) -> str:
     """Pull the text out of a dataset record, tolerating schema differences.
 
-    Prefer the configured field; otherwise fall back to the first string-valued field.
-    The exact field name varies across datasets, so we stay defensive rather than assume.
+    Prefer the configured field; otherwise fall back to the first string-valued field. The
+    exact field name varies across datasets, so we stay defensive rather than assume.
     """
 
     value = record.get(text_field)
@@ -89,8 +89,8 @@ def _skip_for_seed(source_name: str, seed: str, dataset_records_skip_cap: int) -
     """Deterministic, seed-derived number of records to skip before sampling a source.
 
     Taking the fixed prefix of a public dataset would let a miner memorise exactly that
-    slice, so the start offset is derived from the post-commitment beacon ``seed``. It is
-    bounded by ``dataset_records_skip_cap`` so the oracle does not have to stream forever.
+    slice, so the start offset is derived from the beacon ``seed``. It is bounded by
+    ``dataset_records_skip_cap`` so no validator has to stream forever.
     """
 
     digest = hashlib.sha256(f"{seed}:{source_name}".encode()).digest()
@@ -118,15 +118,15 @@ def fetch_source_chunks(
     *,
     seed: str,
     token: str | None = None,
-    skip_cap: int = 100_000,
+    skip_cap: int = DEFAULT_SKIP_CAP,
     records: Iterable[dict] | None = None,
 ) -> tuple[list[bytes], dict]:
     """Stream ``source`` into ``source.chunks`` chunks of ``chunk_bytes`` bytes each.
 
-    Skips a seed-derived number of records first (so the slice is not the fixed prefix),
-    then concatenates documents until the chunks are filled. ``records`` is injectable for
-    tests; in production it comes from a streaming ``datasets`` iterator. Returns the chunk
-    byte blobs plus a provenance entry recording exactly what was drawn.
+    Skips a seed-derived number of records first (so the slice is not the fixed prefix), then
+    concatenates documents until the chunks are filled. ``records`` is injectable for tests;
+    in production it comes from a streaming ``datasets`` iterator. Returns the chunk byte blobs
+    plus a provenance entry recording exactly what was drawn.
     """
 
     target = chunk_bytes * source.chunks
@@ -175,7 +175,7 @@ def write_mixed_corpus(
     *,
     seed: str,
     token: str | None = None,
-    skip_cap: int = 100_000,
+    skip_cap: int = DEFAULT_SKIP_CAP,
     records_by_source: dict[str, Iterable[dict]] | None = None,
 ) -> list[dict]:
     """Build the mixed corpus on disk and return the provenance records.
@@ -208,61 +208,39 @@ def write_mixed_corpus(
     return provenance
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Build a Glyph corpus from large mixed sources")
-    parser.add_argument("--out-dir", default="./corpus")
-    parser.add_argument(
-        "--seed",
-        required=True,
-        help="Post-commitment chain beacon (e.g. a recent block hash). Seeds the per-source "
-        "skip offset so the drawn slice is unpredictable at commit time.",
-    )
-    parser.add_argument(
-        "--chunk-bytes", type=int, default=2 * 2**20, help="Bytes per chunk file (default 2 MiB)"
-    )
-    parser.add_argument(
-        "--skip-cap",
-        type=int,
-        default=100_000,
-        help="Upper bound on seed-derived records skipped before sampling each source",
-    )
-    parser.add_argument("--hf-token", default=None, help="HuggingFace token for gated datasets")
-    return parser
+def local_corpus_cache_dir(seed: str, *, cache_root: Path | None = None) -> Path:
+    """Stable, per-seed directory for one round's materialized live corpus.
+
+    Keyed off a hash of the seed alone (not a naive sanitized string): the seed is a
+    beacon-derived value with no path-traversal risk, but hashing keeps the directory name
+    bounded regardless of seed length/formatting.
+    """
+
+    digest = hashlib.sha256(str(seed).encode("utf-8")).hexdigest()
+    root = cache_root or Path(tempfile.gettempdir()) / "glyph-live-corpus"
+    return root / digest
 
 
-def main() -> None:
-    args = build_parser().parse_args()
-    out_dir = Path(args.out_dir)
+def resolve_live_corpus(
+    seed: str,
+    *,
+    sources: list[Source] | None = None,
+    chunk_bytes: int = DEFAULT_CHUNK_BYTES,
+    skip_cap: int = DEFAULT_SKIP_CAP,
+    token: str | None = None,
+    cache_root: Path | None = None,
+) -> StaticLocalProvider:
+    """Deterministically stream this round's corpus slice straight from HuggingFace.
 
-    write_mixed_corpus(
-        out_dir,
-        MIXED_SOURCES,
-        args.chunk_bytes,
-        seed=args.seed,
-        token=args.hf_token,
-        skip_cap=args.skip_cap,
-    )
+    Two independent calls with the same ``seed`` land on byte-identical chunks -- there is no
+    shared file and no owner-run process to keep alive (issue #71). Reuses the on-disk cache
+    when this exact seed was already built (e.g. this round already ran once), rather than
+    re-streaming from HuggingFace on every call.
+    """
 
-    provider = StaticLocalProvider(out_dir)
-    manifest = provider.manifest()
-    manifest_path = out_dir / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "version": manifest.version,
-                "total_bytes": manifest.total_bytes,
-                "manifest_hash": manifest.manifest_hash(),
-                "seed": args.seed,
-                "chunks": [{"id": c.id, "size": c.size, "hash": c.hash} for c in manifest.chunks],
-            },
-            indent=2,
+    out_dir = local_corpus_cache_dir(seed, cache_root=cache_root)
+    if not (out_dir / "provenance.json").is_file():
+        write_mixed_corpus(
+            out_dir, sources or MIXED_SOURCES, chunk_bytes, seed=str(seed), token=token, skip_cap=skip_cap
         )
-    )
-    total_chunks = sum(s.chunks for s in MIXED_SOURCES)
-    print(f"sources={len(MIXED_SOURCES)} chunks={total_chunks} total_bytes={manifest.total_bytes:,}")
-    print(f"corpus written to {out_dir}")
-    print(f"manifest_hash={manifest.manifest_hash()}  (commit this on-chain)")
-
-
-if __name__ == "__main__":
-    main()
+    return StaticLocalProvider(out_dir)

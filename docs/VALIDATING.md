@@ -38,7 +38,7 @@ hardware you control instead of Chutes.
 docker build -f docker/glyph-runner-default.Dockerfile -t glyph-runner-default:latest .   # zstandard-enabled base image
 glyph-validator --docker-image glyph-runner-default:latest \
   --netuid 117 --wallet-name validator --hotkey-name default \
-  --corpus-dir ./corpus --state-dir ./state
+  --state-dir ./state
 ```
 
 - Requires Docker **and `nvidia-container-toolkit`** on the validator host (the GPU gate is on
@@ -56,11 +56,11 @@ glyph-validator --docker-image glyph-runner-default:latest \
   `no-new-privileges`, and use Docker's default seccomp profile. To test a reviewed stricter
   profile, pass `--docker-seccomp-profile /path/to/seccomp-codec.json`. See
   [`CODEC_SANDBOX_HARDENING.md`](CODEC_SANDBOX_HARDENING.md).
-- Like `--runner local`, this fetches each codec artifact to local disk first (no
-  `--corpus-url` range-fetch path), so `needs_local_artifact`-style runners always get inlined
-  streams -- fine for validator-run hardware, unlike the untrusted-worker Chutes path.
+- Like `--runner local`, this fetches each codec artifact to local disk first, so
+  `needs_local_artifact`-style runners always get inlined streams -- fine for
+  validator-run hardware, unlike the untrusted-worker Chutes path.
 - Live-verified against real LLM-driven compression (RWKV-4 + arithmetic coding, ts_zip-style)
-  on an actual RTX 4090: bit-exact round trips against the real oracle-produced mixed corpus,
+  on an actual RTX 4090: bit-exact round trips against the real live-streamed mixed corpus,
   GPU genuinely used inside the isolated container, and the GPU-model gate both accepts the
   real RTX 4090 and rejects a simulated mismatched card.
 
@@ -155,24 +155,29 @@ commitments involved):
 glyph-validator --offline-demo --runner local --local-codec mine=./my-codec ...
 ```
 
-## Provide a corpus
+## Corpus
 
-By default, the validator reads the mixed launch corpus from `/tmp/glyph_mixed_8x2mb`
-or the directory named by `GLYPH_MIXED_CORPUS_DIR`. The launch mix is 8 x 2 MiB:
-3x FineWeb, 3x Pile-derived, and 2x enwiki9.
+There is no owner-run corpus process and nothing to configure: every validator builds its
+own copy of the evaluation corpus directly from HuggingFace at the start of each round
+(`eval.live_corpus.resolve_live_corpus`, issue #71) -- the launch mix is the same 8 x 2 MiB
+(3x FineWeb, 3x Pile-derived, 2x enwik9) it always was.
 
-To override it, run the data oracle or point at any corpus directory:
+The corpus is keyed off the same beacon (derived from the round's chain block hash) already
+used to pick which stream windows get scored, via a seed-derived skip offset
+(`_skip_for_seed`) into each dataset -- never the fixed dataset prefix, so a miner cannot
+memorise it in advance. Because that skip offset is a pure function of `(seed, dataset)`,
+independent validators land on byte-identical bytes with no shared file and no coordination
+between them; `tests/test_live_corpus.py` proves this directly (same seed -> identical
+corpus, different seed -> different corpus, slice is never the dataset prefix). Results are
+cached locally per seed (`eval.live_corpus.local_corpus_cache_dir`) so re-evaluating the same
+round doesn't re-stream from HuggingFace.
 
-```bash
-glyph-oracle --out-dir ./corpus --target-bytes 268435456   # 256 MiB of fresh text
-glyph-validator --corpus-dir ./corpus ...
-```
+`--corpus-dir` still exists but is **offline-demo only** (see below) -- passing it to a real
+round is refused outright with a `SystemExit`, since it would otherwise be silently ignored.
 
 With the default `--runner docker` (or `--runner local`), the validator's own host executes
-compress/decompress, so streams are always inlined from `--corpus-dir` -- no publishing step
-needed. `--runner chutes` is the one exception: also publish the same corpus as one contiguous
-blob (chunk order == sorted manifest order) and pass its URL via `--corpus-url`, so the deployed
-runner range-fetches each stream itself instead of the validator inlining the 256 MiB sample.
+compress/decompress, so streams are always inlined -- no publishing step needed. `--runner
+chutes` inlines too now that there is no shared corpus file to range-fetch from a public URL.
 
 ## Run
 
@@ -183,15 +188,14 @@ All-in-one — `glyph-validator` is a console entry point; wrap it in PM2 (edit 
 ```bash
 pm2 start glyph-validator --name glyph-validator -- \
   --netuid 117 --wallet-name validator --hotkey-name default \
-  --docker-image glyph-runner-default:latest --corpus-dir ./corpus --state-dir ./state
+  --docker-image glyph-runner-default:latest --state-dir ./state
 ```
 
 Or split into services (each is a console entry point — same `pm2 start <script> -- <args>` form):
 
 ```bash
-pm2 start glyph-reign-worker  --name glyph-reign-worker  -- --netuid 117 --wallet-name validator --hotkey-name default --docker-image glyph-runner-default:latest --corpus-dir ./corpus   # evaluate + update crown
+pm2 start glyph-reign-worker  --name glyph-reign-worker  -- --netuid 117 --wallet-name validator --hotkey-name default --docker-image glyph-runner-default:latest   # evaluate + update crown
 pm2 start glyph-weight-setter --name glyph-weight-setter -- --netuid 117 --wallet-name validator --hotkey-name default                                          # temporal-burn weights every tempo
-pm2 start glyph-oracle        --name glyph-oracle        -- --out-dir ./corpus --target-bytes 268435456                                                         # daily fresh corpus
 ```
 
 Auto-updating validator (tracks `glyph-research/glyph-subnet`):
@@ -200,15 +204,14 @@ Auto-updating validator (tracks `glyph-research/glyph-subnet`):
 ./scripts/setup_hooks.sh
 ./scripts/run_auto_validator.sh --network finney --netuid 117 \
   --wallet-name validator --hotkey-name default \
-  --docker-image glyph-runner-default:latest --corpus-dir ./corpus --state-dir ./state
+  --docker-image glyph-runner-default:latest --state-dir ./state
 ```
 
 Using Chutes instead:
 
 ```bash
 ./scripts/run_auto_validator.sh --network finney --netuid 117 \
-  --wallet-name validator --hotkey-name default --runner chutes \
-  --corpus-url https://<host>/corpus.bin --state-dir ./state
+  --wallet-name validator --hotkey-name default --runner chutes --state-dir ./state
 ```
 
 ## Observability (wandb)
@@ -249,6 +252,6 @@ Other flags:
 - **Version safety**: the validator fail-closes if `core.__version_key__` ≠ the
   on-chain `weights_version`. Bump both together on breaking changes.
 - **Commit-reveal** must be enabled on the subnet for the anti-copy burn schedule to bite.
-- **Offline check** (no chain, no Docker/GPU needed): `glyph-validator --offline-demo --runner local ...`
-  uses the mixed corpus by default; pass `--corpus-dir samples/corpus` for the tiny
-  bundled sample.
+- **Offline check** (no chain, no Docker/GPU, no HuggingFace access needed):
+  `glyph-validator --offline-demo --runner local ...` uses the bundled `samples/corpus`
+  sample by default; pass `--corpus-dir` to point at a different local directory instead.

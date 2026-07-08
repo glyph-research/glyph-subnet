@@ -2,10 +2,11 @@ import json
 
 import pytest
 
-from eval.corpus import OracleProvider, StaticLocalProvider
-from oracle.oracle import (
+from eval.corpus import StaticLocalProvider
+from eval.live_corpus import (
     Source,
     fetch_source_chunks,
+    resolve_live_corpus,
     write_mixed_corpus,
     _extract_text,
     _skip_for_seed,
@@ -93,25 +94,6 @@ def test_write_mixed_corpus_orders_and_records_provenance(tmp_path):
     assert provider.total_bytes == chunk_bytes * 3
 
 
-def test_oracle_provider_hash_verification(tmp_path):
-    chunk_bytes = 4096
-    skip_cap = 8
-    write_mixed_corpus(
-        tmp_path,
-        _SOURCES,
-        chunk_bytes,
-        seed="seed1",
-        skip_cap=skip_cap,
-        records_by_source=_records_by_source(skip_cap),
-    )
-    good_hash = StaticLocalProvider(tmp_path).manifest().manifest_hash()
-
-    provider = OracleProvider(tmp_path, expected_manifest_hash=good_hash)
-    assert provider.total_bytes > 0
-    with pytest.raises(ValueError):
-        OracleProvider(tmp_path, expected_manifest_hash="deadbeef")
-
-
 def test_metadata_files_excluded_from_corpus(tmp_path):
     chunk_bytes = 4096
     skip_cap = 8
@@ -131,3 +113,87 @@ def test_metadata_files_excluded_from_corpus(tmp_path):
     assert reloaded.total_bytes == provider.total_bytes
     assert reloaded.manifest().manifest_hash() == manifest.manifest_hash()
     assert all(c.id.startswith("chunk_") for c in reloaded.manifest().chunks)
+
+
+# --- resolve_live_corpus: issue #71's core acceptance criteria ---------------------------
+#
+# Two independent validators calling resolve_live_corpus with the same beacon-derived seed
+# must land on byte-identical corpora with no shared file and no coordination between them.
+# Each call here uses its own cache_root (simulating two separate validator hosts) and its
+# own copy of the injected records (simulating two separate, independent HF stream reads).
+
+
+def _patch_iter_dataset(monkeypatch, skip_cap):
+    """Make _iter_dataset return a fresh copy of fake records every call (never network).
+
+    Each call gets its OWN fresh iterator -- exactly like two independent validators each
+    opening their own streaming connection to the real HF dataset -- so a same-seed test
+    isn't just replaying one shared iterator.
+    """
+
+    import eval.live_corpus as live_corpus
+
+    records = _records_by_source(skip_cap)
+
+    def fake_iter_dataset(source, token):
+        return iter(records[source.name])
+
+    monkeypatch.setattr(live_corpus, "_iter_dataset", fake_iter_dataset)
+
+
+def test_resolve_live_corpus_same_seed_is_byte_identical_across_independent_instances(tmp_path, monkeypatch):
+    _patch_iter_dataset(monkeypatch, skip_cap=8)
+
+    validator_a = resolve_live_corpus(
+        "beacon-round-42", sources=_SOURCES, chunk_bytes=4096, skip_cap=8, cache_root=tmp_path / "validator-a"
+    )
+    validator_b = resolve_live_corpus(
+        "beacon-round-42", sources=_SOURCES, chunk_bytes=4096, skip_cap=8, cache_root=tmp_path / "validator-b"
+    )
+
+    assert validator_a.manifest().manifest_hash() == validator_b.manifest().manifest_hash()
+    assert validator_a.read_range(0, validator_a.total_bytes) == validator_b.read_range(0, validator_b.total_bytes)
+
+
+def test_resolve_live_corpus_different_seed_differs(tmp_path, monkeypatch):
+    _patch_iter_dataset(monkeypatch, skip_cap=8)
+
+    a = resolve_live_corpus(
+        "beacon-round-1", sources=_SOURCES, chunk_bytes=4096, skip_cap=8, cache_root=tmp_path / "a"
+    )
+    b = resolve_live_corpus(
+        "beacon-round-2", sources=_SOURCES, chunk_bytes=4096, skip_cap=8, cache_root=tmp_path / "b"
+    )
+
+    assert a.manifest().manifest_hash() != b.manifest().manifest_hash()
+
+
+def test_slice_is_not_the_dataset_prefix():
+    # A nonzero seed must skip a nonzero number of records for at least one source -- the
+    # corpus must not be the fixed, memorisable prefix of the dataset.
+    skip_cap = 1000
+    skip_alpha = _skip_for_seed("alpha", "beacon-xyz", skip_cap)
+    skip_beta = _skip_for_seed("beta", "beacon-xyz", skip_cap)
+    assert skip_alpha > 0 or skip_beta > 0
+
+
+def test_resolve_live_corpus_reuses_cache_without_rebuilding(tmp_path, monkeypatch):
+    _patch_iter_dataset(monkeypatch, skip_cap=8)
+    cache_root = tmp_path / "cache"
+    seed = "beacon-round-7"
+
+    provider_1 = resolve_live_corpus(
+        seed, sources=_SOURCES, chunk_bytes=4096, skip_cap=8, cache_root=cache_root
+    )
+
+    import eval.live_corpus as live_corpus
+
+    def failing_iter_dataset(source, token):
+        raise AssertionError("must not re-stream from HF for an already-cached seed")
+
+    monkeypatch.setattr(live_corpus, "_iter_dataset", failing_iter_dataset)
+    provider_2 = resolve_live_corpus(
+        seed, sources=_SOURCES, chunk_bytes=4096, skip_cap=8, cache_root=cache_root
+    )
+
+    assert provider_1.manifest().manifest_hash() == provider_2.manifest().manifest_hash()

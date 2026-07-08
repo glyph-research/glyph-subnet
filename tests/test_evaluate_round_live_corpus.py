@@ -1,0 +1,98 @@
+"""issue #71: a real round must (a) refuse --corpus-dir outright and (b) build its corpus
+live via eval.live_corpus.resolve_live_corpus, keyed by this round's chain beacon -- never a
+shared owner-published file.
+"""
+
+import pytest
+
+from core.commitments import CodecCommitment, serialize_commitment
+from core.state import ValidatorState
+from validation.precheck import PrecheckResult
+from validator.service import _evaluate_round
+from eval.corpus import StaticLocalProvider
+from eval.streams import derive_seed
+
+
+class FakeChain:
+    def __init__(self, block: int, block_hash: str, raw_commitments: dict):
+        self._block = block
+        self._block_hash = block_hash
+        self._raw_commitments = raw_commitments
+
+    def current_block(self) -> int:
+        return self._block
+
+    def block_hash(self, block: int) -> str:
+        return self._block_hash
+
+    def get_all_commitments(self) -> dict:
+        return self._raw_commitments
+
+
+def _args(**overrides):
+    defaults = {
+        "window_anchor": None,
+        "max_artifact_bytes": 10_000,
+        "corpus_dir": None,
+        "eval_source": "",
+        "stream_bytes": 64,
+        "streams": 2,
+        "baseline_level": 3,
+        "compress_budget_secs": 60.0,
+        "floor_bps": 1.0,
+        "win_margin": 0.05,
+        "runner": "local",
+    }
+    return type("Args", (), {**defaults, **overrides})()
+
+
+def test_evaluate_round_rejects_corpus_dir_on_a_real_round():
+    # The guard must fire before ever touching the chain -- a fake chain with no methods
+    # implemented proves this isn't reached only after some other real work.
+    state = ValidatorState()
+    with pytest.raises(SystemExit) as exc:
+        _evaluate_round(_args(corpus_dir="./some/dir"), state, chain=object(), salt="salt")
+    assert "--offline-demo" in str(exc.value)
+
+
+def test_evaluate_round_builds_corpus_via_resolve_live_corpus(monkeypatch, tmp_path):
+    block = 12345
+    block_hash = "0xbeacon"
+    salt = "saltval"
+    raw_commitments = {"hk-a": serialize_commitment(CodecCommitment(repo="a/codec", rev="rev00001"))}
+    chain = FakeChain(block, block_hash, raw_commitments)
+
+    def fake_precheck(repo, revision, *, max_artifact_bytes, download=True):
+        return PrecheckResult(repo=repo, revision=revision, ok=True, artifact_hash="hash-a", artifact_bytes=10)
+
+    monkeypatch.setattr("validator.service.precheck_codec", fake_precheck)
+    monkeypatch.setattr("validator.service._make_runner", lambda args: object())
+
+    captured_outcomes_call = {}
+
+    def fake_run_round(state, runner, challengers, provider, specs, **kwargs):
+        captured_outcomes_call["provider"] = provider
+        captured_outcomes_call["challengers"] = challengers
+        return {}
+
+    monkeypatch.setattr("validator.service.run_round", fake_run_round)
+
+    captured_resolve_call = {}
+    real_corpus_dir = tmp_path / "live"
+    real_corpus_dir.mkdir()
+    (real_corpus_dir / "chunk_00.txt").write_bytes(b"x" * 4096)
+
+    def fake_resolve_live_corpus(seed):
+        captured_resolve_call["seed"] = seed
+        return StaticLocalProvider(real_corpus_dir)
+
+    monkeypatch.setattr("validator.service.resolve_live_corpus", fake_resolve_live_corpus)
+
+    state = ValidatorState()
+    _evaluate_round(_args(), state, chain, salt)
+
+    expected_seed = derive_seed(block_hash, salt, block)
+    assert captured_resolve_call["seed"] == str(expected_seed)
+    assert len(captured_outcomes_call["challengers"]) == 1
+    assert captured_outcomes_call["challengers"][0].hotkey == "hk-a"
+    assert captured_outcomes_call["provider"].directory == real_corpus_dir
