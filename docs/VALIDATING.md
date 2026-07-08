@@ -225,7 +225,11 @@ A real round with challengers now logs each stage as it happens (issue #81), not
 post-hoc summary once everything is already done: each commitment's precheck result
 (hotkey + repo/rev + valid/invalid + reason), a "round: evaluating incumbent=..., N
 challenger(s): [...]" line before evaluation starts, and every candidate's ratio/validity
-once scored -- including challengers that lose, not only the eventual winner.
+once scored -- including challengers that lose, not only the eventual winner. Within a single
+candidate's evaluation, every stream also logs before it starts and again once it finishes
+(ratio/roundtrip/timing) or fails (issue #86) -- each stream can legitimately take up to the
+full compress/decompress wall-clock budget, so this is the difference between the log going
+silent for many minutes and showing exactly which stream is running and how long each took.
 
 ## Observability (wandb)
 

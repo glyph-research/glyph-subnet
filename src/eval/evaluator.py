@@ -11,6 +11,8 @@ import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 
+from bittensor.utils.btlogging import logging as bt_logging
+
 from eval.corpus import CorpusProvider
 from eval.runner import ArtifactRef, CodecRunner, ResourceCaps, RunnerError, StreamInput
 from eval.scoring import CodecScore, StreamResult, score_codec
@@ -61,12 +63,21 @@ def evaluate_artifact(
     budget_secs: float,
 ) -> EvalOutcome:
     results: list[StreamResult] = []
-    for spec in stream_specs:
+    total = len(stream_specs)
+    for index, spec in enumerate(stream_specs, start=1):
+        bt_logging.info(f"evaluating {hotkey}: stream {spec.stream_id} ({index}/{total})...")
         stream_input = _prepare_stream(runner, provider, spec)
         try:
-            result = runner.run_stream(artifact, stream_input, caps=caps)
-            results.append(replace(result, source=spec.source, scored=spec.scored))
+            result = replace(runner.run_stream(artifact, stream_input, caps=caps), source=spec.source, scored=spec.scored)
+            results.append(result)
+            ratio = result.compressed_bytes / result.raw_bytes if result.raw_bytes else 0.0
+            bt_logging.info(
+                f"evaluating {hotkey}: stream {spec.stream_id} done -- ratio={ratio:.4f} "
+                f"roundtrip_ok={result.roundtrip_ok} compress_secs={result.compress_secs:.1f} "
+                f"decompress_secs={result.decompress_secs:.1f}"
+            )
         except RunnerError as exc:
+            bt_logging.warning(f"evaluating {hotkey}: stream {spec.stream_id} failed: {exc}")
             # A crashing entrypoint is a failed (non-bit-exact) stream; the codec is invalid.
             results.append(
                 StreamResult(

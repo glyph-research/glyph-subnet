@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from bittensor.utils.btlogging import logging as bt_logging
+
 from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
@@ -55,6 +57,37 @@ def test_paired_eval_reference_valid_broken_invalid(tmp_path):
     assert outcomes["hk_broken"].score.valid is False
     # burn-seed material is available from the valid codec's per-stream outputs
     assert len(outcomes["hk_ref"].burn_outputs()) == 3
+
+
+def test_evaluate_artifact_logs_per_stream_progress_and_result(tmp_path, caplog):
+    # issue #86: the log went completely silent for the full compress+decompress duration of
+    # every stream -- up to ~450s each -- with nothing to distinguish "still working" from
+    # "hung". Each stream must log before it starts and again (with ratio/roundtrip/timing)
+    # once it finishes, or (with the failure reason) if the entrypoint crashes.
+    bt_logging.set_info()
+    _broken_codec(tmp_path)
+    provider = StaticLocalProvider(CORPUS)
+    specs = sample_source_streams(42, 0, provider.total_bytes, stream_bytes=4096, streams=3)
+    artifacts = [
+        ("hk_ref", ArtifactRef("glyph/ref", "local", local_path=str(REFERENCE_CODEC))),
+        ("hk_broken", ArtifactRef("t/broken", "local", local_path=str(tmp_path))),
+    ]
+    paired_eval(
+        LocalSubprocessRunner(), artifacts, provider, specs,
+        caps=ResourceCaps(), floor_bps=FLOOR, budget_secs=BUDGET,
+    )
+
+    out = caplog.text
+    assert "evaluating hk_ref: stream source-0 (1/3)..." in out
+    assert "evaluating hk_ref: stream source-2 (3/3)..." in out
+    assert "evaluating hk_ref: stream source-0 done -- ratio=" in out
+    assert "roundtrip_ok=True" in out
+    assert "compress_secs=" in out and "decompress_secs=" in out
+    # the broken codec fails bit-exactness on its first stream, not a crash -- run_stream
+    # returns a result rather than raising, so it logs the normal "done" line with
+    # roundtrip_ok=False, not the RunnerError "failed:" branch.
+    assert "evaluating hk_broken: stream source-0 (1/3)..." in out
+    assert "roundtrip_ok=False" in out
 
 
 def test_state_round_trip(tmp_path):
