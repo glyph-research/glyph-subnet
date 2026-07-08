@@ -97,7 +97,9 @@ Offline M0 demo (no chain, no Chutes) — exercises eval → king-of-the-hill �
 
 ```bash
 glyph-validator --offline-demo --corpus-dir samples/corpus \
-  --stream-bytes 8000 --streams 4 --floor-bps 1 --baseline-level 3 \
+  --eval-source demo --eval-streams 4 --eval-stream-bytes 2000 \
+  --eval-benchmark-source "" --eval-benchmark-streams 0 \
+  --floor-bps 1 --baseline-level 3 \
   --local-codec weak=./samples/demo_codec_l6 --local-codec strong=./reference_codec
 ```
 
