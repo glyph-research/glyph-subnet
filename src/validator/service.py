@@ -312,6 +312,11 @@ def _apply_precheck(
         else:
             commit_block = block
         artifact_hash = result.artifact_hash or (existing.artifact_hash if existing else None)
+        codec_desc = f"{parsed.hotkey} {parsed.commitment.repo}@{parsed.commitment.rev}"
+        if result.ok:
+            bt_logging.info(f"precheck: {codec_desc} valid")
+        else:
+            bt_logging.warning(f"precheck: {codec_desc} invalid: {'; '.join(result.errors)}")
         entries[key] = CommitmentState(
             hotkey=parsed.hotkey,
             repo=parsed.commitment.repo,
@@ -537,8 +542,12 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
         )
         runner = _make_runner(args)
         caps = ResourceCaps(wall_clock_secs=args.compress_budget_secs, artifact_bytes=args.max_artifact_bytes)
-        bt_logging.info(f"round: {len(challengers)} challenger(s), baseline zstd ratio={baseline:.4f}")
         champion_before = state.winner_history[0].hotkey if state.winner_history else None
+        challenger_hotkeys = [c.hotkey for c in challengers]
+        bt_logging.info(
+            f"round: evaluating incumbent={champion_before or 'none'}, "
+            f"{len(challengers)} challenger(s): {challenger_hotkeys} (baseline zstd ratio={baseline:.4f})"
+        )
         outcomes = run_round(
             state, runner, challengers, provider, specs,
             caps=caps, floor_bps=args.floor_bps, budget_secs=args.compress_budget_secs,
