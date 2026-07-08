@@ -6,9 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_DIR"
 
-echo "[glyph] installing system packages (zstd)..."
+echo "[glyph] installing system packages (zstd, Node.js/npm)..."
 if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update -y && sudo apt-get install -y zstd python3-venv
+    sudo apt-get update -y && sudo apt-get install -y zstd python3-venv nodejs npm
 fi
 
 echo "[glyph] creating venv and installing package..."
@@ -22,7 +22,7 @@ echo "[glyph] installing pm2 (for auto-update + service management)..."
 if command -v npm >/dev/null 2>&1; then
     npm install -g pm2 || echo "[glyph] pm2 install failed; install Node.js/npm first"
 else
-    echo "[glyph] npm not found; install Node.js then: npm install -g pm2"
+    echo "[glyph] npm not found (no apt-get on this host?); install Node.js then: npm install -g pm2"
 fi
 
 echo "[glyph] done. Next:"
