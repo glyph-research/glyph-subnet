@@ -11,6 +11,7 @@ from validator.service import (
     _make_demo_provider,
     _make_runner,
     decide_weights,
+    run_once,
 )
 from core.weights import WinnerEntry
 
@@ -313,3 +314,77 @@ def test_two_winner_split_on_normal_tempo():
             assert weights[1] == pytest.approx(0.70)
             assert weights[2] == pytest.approx(0.30)
             break
+
+
+# --- run_once console logging (issue #77) ---------------------------------------
+
+
+class _FakeWandb:
+    def log(self, *args, **kwargs):
+        pass
+
+    def finish(self):
+        pass
+
+
+class _FakeChain:
+    def commit_reveal_enabled(self):
+        return True
+
+    def tempo(self):
+        return 360
+
+    def metagraph(self):
+        return type("Metagraph", (), {"hotkeys": ["hk0"], "uids": [0]})()
+
+    def set_weights(self, uids, weights, version_key):
+        return type("Response", (), {"success": True, "error": None, "message": None})()
+
+
+def test_run_once_prints_champion_and_concise_set_weights_on_a_quiet_round(monkeypatch, tmp_path, capsys):
+    # A quiet round (no new challengers) must still report champion/ratio state, and
+    # set_weights must print a short success/failure summary, not the full response dump.
+    state = ValidatorState()
+    state.winner_history = [WinnerEntry("champ", "r/c", "rev123456", 0.42, 1)]
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: _FakeChain())
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+    monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": False, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())
+
+    out = capsys.readouterr().out
+    assert "round: block=999 champion=champ ratio=0.4200 0 challengers" in out
+    assert "set_weights: success=True" in out
+    assert "set_weights response:" not in out
+
+
+def test_run_once_prints_no_champion_when_history_empty(monkeypatch, tmp_path, capsys):
+    state = ValidatorState()
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: _FakeChain())
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+    monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": False, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())
+
+    out = capsys.readouterr().out
+    assert "champion=none" in out

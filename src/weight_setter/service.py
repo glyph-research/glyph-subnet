@@ -99,7 +99,10 @@ def run(args: argparse.Namespace) -> None:
         print("dry-run: not submitting weights")
         return
     response = chain.set_weights(uids, weights, version_key=version_key)
-    print(f"set_weights response: {response}")
+    if response.success:
+        print("set_weights: success=True")
+    else:
+        print(f"set_weights: success=False error={response.error} message={response.message}")
 
 
 def main() -> None:
