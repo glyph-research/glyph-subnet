@@ -45,7 +45,7 @@ docs/  tests/
 ```bash
 ./scripts/install_deps.sh           # venv + package + pm2
 # or: pip install -e ".[dev]"
-cp .env.example .env                # validators: set CHUTES_API_KEY=cpk_...
+cp .env.example .env                # miners: set HF_TOKEN; validators: only if using --runner chutes
 pytest -q
 ```
 
