@@ -1,4 +1,5 @@
 import pytest
+from bittensor.utils.btlogging import logging as bt_logging
 
 import core
 from core.commitments import CodecCommitment, ParsedCommitment
@@ -103,6 +104,32 @@ def test_apply_precheck_disqualifies_duplicate_hash(monkeypatch):
     assert first.valid is True
     assert second.valid is False
     assert "duplicate artifact" in second.disqualification_reason
+
+
+# --- precheck/round visibility logging (issue #81) ------------------------------
+
+
+def test_apply_precheck_logs_valid_and_invalid_per_hotkey(monkeypatch, caplog):
+    bt_logging.set_info()
+
+    def fake_precheck(repo, revision, *, max_artifact_bytes, download=True):
+        ok = repo == "a/codec"
+        return PrecheckResult(
+            repo=repo, revision=revision, ok=ok, artifact_hash="a" if ok else None,
+            artifact_bytes=10 if ok else None, errors=[] if ok else ["too big"],
+        )
+
+    monkeypatch.setattr("validator.service.precheck_codec", fake_precheck)
+    state = ValidatorState()
+    parsed = [
+        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev="abc123"), "raw-a"),
+        ParsedCommitment("hotkey-b", CodecCommitment(repo="b/codec", rev="def456"), "raw-b"),
+    ]
+    _apply_precheck(state, parsed, max_artifact_bytes=100, block=10)
+
+    out = caplog.text
+    assert "precheck: hotkey-a a/codec@abc123 valid" in out
+    assert "precheck: hotkey-b b/codec@def456 invalid: too big" in out
 
 
 # --- duplicate-artifact ownership: earliest commit_block wins, not hotkey order (#58) -------
@@ -341,9 +368,11 @@ class _FakeChain:
         return type("Response", (), {"success": True, "error": None, "message": None})()
 
 
-def test_run_once_prints_champion_and_concise_set_weights_on_a_quiet_round(monkeypatch, tmp_path, capsys):
+def test_run_once_prints_champion_and_concise_set_weights_on_a_quiet_round(monkeypatch, tmp_path, caplog):
     # A quiet round (no new challengers) must still report champion/ratio state, and
     # set_weights must print a short success/failure summary, not the full response dump.
+    # Console output goes through bt.logging (issue #80), not print/capsys -- caplog captures it.
+    bt_logging.set_info()
     state = ValidatorState()
     state.winner_history = [WinnerEntry("champ", "r/c", "rev123456", 0.42, 1)]
 
@@ -362,13 +391,14 @@ def test_run_once_prints_champion_and_concise_set_weights_on_a_quiet_round(monke
 
     run_once(args, wandb_logger=_FakeWandb())
 
-    out = capsys.readouterr().out
+    out = caplog.text
     assert "round: block=999 champion=champ ratio=0.4200 0 challengers" in out
     assert "set_weights: success=True" in out
     assert "set_weights response:" not in out
 
 
-def test_run_once_prints_no_champion_when_history_empty(monkeypatch, tmp_path, capsys):
+def test_run_once_prints_no_champion_when_history_empty(monkeypatch, tmp_path, caplog):
+    bt_logging.set_info()
     state = ValidatorState()
 
     monkeypatch.setattr("validator.service.load_state", lambda path: state)
@@ -386,5 +416,5 @@ def test_run_once_prints_no_champion_when_history_empty(monkeypatch, tmp_path, c
 
     run_once(args, wandb_logger=_FakeWandb())
 
-    out = capsys.readouterr().out
+    out = caplog.text
     assert "champion=none" in out

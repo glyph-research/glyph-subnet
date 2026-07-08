@@ -11,9 +11,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import time
-import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from bittensor.utils.btlogging import logging as bt_logging
 
 from chain.chain import BittensorChain, ChainConfig
 from core.commitments import (
@@ -39,6 +40,7 @@ from core.constants import (
     THROUGHPUT_FLOOR_BPS,
     WINDOW_ANCHOR_BLOCK,
 )
+from core.log_config import add_logging_args
 from core.state import CommitmentState, ValidatorState, load_state, save_state
 from core.version import assert_weights_version_matches, local_version_key
 from core.wandb_logger import WandbLogger, build_round_metrics, build_weights_metrics, make_wandb_logger
@@ -221,6 +223,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="HOTKEY",
         help="Restrict evaluation to these hotkeys (ignore all other on-chain commitments). Repeatable.",
     )
+    add_logging_args(parser)
     return parser
 
 
@@ -309,6 +312,11 @@ def _apply_precheck(
         else:
             commit_block = block
         artifact_hash = result.artifact_hash or (existing.artifact_hash if existing else None)
+        codec_desc = f"{parsed.hotkey} {parsed.commitment.repo}@{parsed.commitment.rev}"
+        if result.ok:
+            bt_logging.info(f"precheck: {codec_desc} valid")
+        else:
+            bt_logging.warning(f"precheck: {codec_desc} invalid: {'; '.join(result.errors)}")
         entries[key] = CommitmentState(
             hotkey=parsed.hotkey,
             repo=parsed.commitment.repo,
@@ -534,8 +542,12 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
         )
         runner = _make_runner(args)
         caps = ResourceCaps(wall_clock_secs=args.compress_budget_secs, artifact_bytes=args.max_artifact_bytes)
-        print(f"round: {len(challengers)} challenger(s), baseline zstd ratio={baseline:.4f}")
         champion_before = state.winner_history[0].hotkey if state.winner_history else None
+        challenger_hotkeys = [c.hotkey for c in challengers]
+        bt_logging.info(
+            f"round: evaluating incumbent={champion_before or 'none'}, "
+            f"{len(challengers)} challenger(s): {challenger_hotkeys} (baseline zstd ratio={baseline:.4f})"
+        )
         outcomes = run_round(
             state, runner, challengers, provider, specs,
             caps=caps, floor_bps=args.floor_bps, budget_secs=args.compress_budget_secs,
@@ -570,9 +582,9 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
 
         chain = _make_chain(args)
         version_key = _local_version_key()
-        print(f"version key ok: {_assert_version_key_matches(chain)}")
+        bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
         if not chain.commit_reveal_enabled():
-            print("WARNING: commit-reveal is not enabled on this subnet; anti-copy weights are weaker")
+            bt_logging.warning("commit-reveal is not enabled on this subnet; anti-copy weights are weaker")
 
         block, round_metrics = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
@@ -582,7 +594,7 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         challengers_desc = (
             f"{round_metrics['round/num_challengers']} challenger(s)" if round_metrics else "0 challengers"
         )
-        print(f"round: block={block} champion={champion_desc} {challengers_desc}")
+        bt_logging.info(f"round: block={block} champion={champion_desc} {challengers_desc}")
         tempo = chain.tempo()
         anchor = state.window_anchor_block
 
@@ -598,15 +610,15 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         save_state(state_path, state)
 
         nonzero = [(uids[i], round(w, 4)) for i, w in enumerate(weights) if w > 0]
-        print(f"block={block} tempo={tempo} burn_tempo={burn} weights={nonzero}")
+        bt_logging.info(f"block={block} tempo={tempo} burn_tempo={burn} weights={nonzero}")
         if args.dry_run:
-            print("dry-run: not submitting weights")
+            bt_logging.info("dry-run: not submitting weights")
             return
         response = chain.set_weights(uids, weights, version_key=version_key)
         if response.success:
-            print("set_weights: success=True")
+            bt_logging.info("set_weights: success=True")
         else:
-            print(f"set_weights: success=False error={response.error} message={response.message}")
+            bt_logging.warning(f"set_weights: success=False error={response.error} message={response.message}")
     finally:
         if owns_logger:
             wandb_logger.finish()
@@ -624,12 +636,12 @@ def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = 
         salt = _load_salt(state_dir, args.salt_file)
 
         chain = _make_chain(args)
-        print(f"version key ok: {_assert_version_key_matches(chain)}")
+        bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
         _block, round_metrics = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
             wandb_logger.log(round_metrics)
         save_state(state_path, state)
-        print(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in state.winner_history]}")
+        bt_logging.info(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in state.winner_history]}")
     finally:
         if owns_logger:
             wandb_logger.finish()
@@ -674,7 +686,7 @@ def run_offline_demo(args: argparse.Namespace) -> None:
         counts = scored_counts if spec.scored else benchmark_counts
         counts[spec.source or "whole-corpus"] = counts.get(spec.source or "whole-corpus", 0) + 1
     sampled_bytes = specs[0].length if specs else 0
-    print(
+    bt_logging.info(
         f"streams={len(specs)} stream_bytes={sampled_bytes}"
         f" scored={scored_counts}"
         f" benchmark_only={benchmark_counts} "
@@ -691,7 +703,7 @@ def run_offline_demo(args: argparse.Namespace) -> None:
             for result in outcome.results
             if not result.scored
         }
-        print(
+        bt_logging.info(
             f"  {hotkey}: ratio={outcome.score.ratio:.4f} "
             f"scored_sources={{{', '.join(f'{k}: {v:.4f}' for k, v in scored_breakdown.items())}}} "
             f"benchmark_only={{{', '.join(f'{k}: {v:.4f}' for k, v in benchmark.items())}}} "
@@ -703,15 +715,15 @@ def run_offline_demo(args: argparse.Namespace) -> None:
             history = promote_winner(history, winner)
 
     last_round_outputs = outcomes[history[0].hotkey].burn_outputs() if history else []
-    print(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in history]}")
-    print("temporal burn schedule (two 4-tempo windows):")
+    bt_logging.info(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in history]}")
+    bt_logging.info("temporal burn schedule (two 4-tempo windows):")
     for tempo_idx in range(8):
         block = tempo_idx * 360
         weights, burn = decide_weights(
             hotkeys, history, block=block, tempo=360, last_round_outputs=last_round_outputs, anchor=0
         )
         nonzero = [(hotkeys[i], round(w, 3)) for i, w in enumerate(weights) if w > 0]
-        print(f"  tempo {tempo_idx} (block {block}): burn={burn} weights={nonzero}")
+        bt_logging.info(f"  tempo {tempo_idx} (block {block}): burn={burn} weights={nonzero}")
 
 
 def poll_commit_phase(args: argparse.Namespace, chain: BittensorChain) -> int:
@@ -745,14 +757,16 @@ def _sleep_with_commit_polls(args: argparse.Namespace, chain: BittensorChain) ->
         try:
             poll_commit_phase(args, chain)
         except Exception:
-            traceback.print_exc()
+            bt_logging.exception("commit-phase poll failed")
 
 
 def main() -> None:
     from core.dotenv import load_dotenv
+    from core.log_config import configure_logging
 
     load_dotenv()  # CHUTES_API_KEY etc. from .env (see .env.example)
     args = build_parser().parse_args()
+    configure_logging(args)
     if args.offline_demo:
         run_offline_demo(args)
         return
@@ -768,7 +782,7 @@ def main() -> None:
             except KeyboardInterrupt:
                 break
             except Exception:
-                traceback.print_exc()
+                bt_logging.exception("round failed")
             if not args.loop:
                 break
             # Poll at block cadence between rounds so a reveal's commit-phase block is captured

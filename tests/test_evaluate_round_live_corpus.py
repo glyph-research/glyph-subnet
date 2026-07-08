@@ -6,9 +6,11 @@ shared owner-published file.
 import json
 
 import pytest
+from bittensor.utils.btlogging import logging as bt_logging
 
 from core.commitments import CodecCommitment, serialize_commitment
-from core.state import ValidatorState
+from core.state import CommitmentState, ValidatorState
+from core.weights import WinnerEntry
 from validation.precheck import PrecheckResult
 from validator.service import _evaluate_round
 from eval.corpus import StaticLocalProvider
@@ -57,6 +59,50 @@ def test_evaluate_round_rejects_corpus_dir_on_a_real_round():
     with pytest.raises(SystemExit) as exc:
         _evaluate_round(_args(corpus_dir="./some/dir"), state, chain=object(), salt="salt")
     assert "--offline-demo" in str(exc.value)
+
+
+def test_evaluate_round_logs_round_start_before_run_round(monkeypatch, tmp_path, caplog):
+    # issue #81: an operator watching the log must see which incumbent/challengers are being
+    # evaluated *before* the (potentially many-minute) evaluation runs, not only a post-hoc
+    # summary once it's already done.
+    bt_logging.set_info()
+    block = 12345
+    block_hash = "0xbeacon"
+    salt = "saltval"
+    raw_commitments = {"hk-a": serialize_commitment(CodecCommitment(repo="a/codec", rev="rev00001"))}
+    chain = FakeChain(block, block_hash, raw_commitments)
+
+    def fake_precheck(repo, revision, *, max_artifact_bytes, download=True):
+        return PrecheckResult(repo=repo, revision=revision, ok=True, artifact_hash="hash-a", artifact_bytes=10)
+
+    monkeypatch.setattr("validator.service.precheck_codec", fake_precheck)
+    monkeypatch.setattr("validator.service._make_runner", lambda args: object())
+
+    logged_before_run_round = {}
+
+    def fake_run_round(state, runner, challengers, provider, specs, **kwargs):
+        logged_before_run_round["text"] = caplog.text
+        return {}
+
+    monkeypatch.setattr("validator.service.run_round", fake_run_round)
+
+    real_corpus_dir = tmp_path / "live"
+    real_corpus_dir.mkdir()
+    (real_corpus_dir / "chunk_00_fineweb.txt").write_bytes(b"x" * 4096)
+    (real_corpus_dir / "provenance.json").write_text(
+        json.dumps([{"source": "fineweb", "chunk_ids": ["chunk_00_fineweb.txt"]}])
+    )
+    monkeypatch.setattr("validator.service.resolve_live_corpus", lambda seed: StaticLocalProvider(real_corpus_dir))
+
+    state = ValidatorState()
+    state.commitments["incumbent-hk:inc/codec@rev0"] = CommitmentState(
+        hotkey="incumbent-hk", repo="inc/codec", revision="rev0", block=1, artifact_hash="inc-hash", valid=True
+    )
+    state.winner_history = [WinnerEntry("incumbent-hk", "inc/codec", "rev0", 0.5, 1)]
+    _evaluate_round(_args(), state, chain, salt)
+
+    assert "round: evaluating incumbent=incumbent-hk" in logged_before_run_round["text"]
+    assert "hk-a" in logged_before_run_round["text"]
 
 
 def test_evaluate_round_builds_corpus_via_resolve_live_corpus(monkeypatch, tmp_path):

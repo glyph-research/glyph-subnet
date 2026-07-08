@@ -9,6 +9,8 @@ runnable as its own PM2 process.
 
 from __future__ import annotations
 
+from bittensor.utils.btlogging import logging as bt_logging
+
 from eval.evaluator import paired_eval
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
 from core.artifact import local_snapshot_dir
@@ -92,6 +94,10 @@ def run_round(
 
     # Re-score every codec on this round's fresh streams (also refreshes the incumbent's ratio).
     for hotkey, outcome in outcomes.items():
+        if outcome.score.valid:
+            bt_logging.info(f"candidate {hotkey}: ratio={outcome.score.ratio:.4f} valid")
+        else:
+            bt_logging.warning(f"candidate {hotkey}: invalid ({outcome.score.reasons})")
         commitment = next((c for c in state.commitments.values() if c.hotkey == hotkey and c.valid), None)
         if commitment is None:
             continue
@@ -124,7 +130,7 @@ def run_round(
             # any) up to index 0, so it's naturally treated as the incumbent next round --
             # "promotes later" needs no special-casing here, current_ratio already stays None
             # so a valid challenger THIS round still vacant-crown-promotes immediately.
-            print(f"incumbent {incumbent_commitment.hotkey} failed re-eval: {inc_outcome.score.reasons}")
+            bt_logging.warning(f"incumbent {incumbent_commitment.hotkey} failed re-eval: {inc_outcome.score.reasons}")
             state.winner_history.pop(0)
 
     ranked = sorted(
@@ -150,7 +156,7 @@ def run_round(
             )
             current_ratio = challenger_ratio
             winner_outputs = outcomes[challenger.hotkey].burn_outputs()
-            print(f"new winner: {challenger.hotkey} ratio={challenger_ratio:.4f}")
+            bt_logging.info(f"new winner: {challenger.hotkey} ratio={challenger_ratio:.4f}")
         else:
             # Challenged and lost -> one shot, excluded from future rounds.
             state.excluded_hotkeys.add(challenger.hotkey)
@@ -170,10 +176,12 @@ def main() -> None:
     """Standalone reign worker: run a single challenge round against chain + corpus."""
 
     from core.dotenv import load_dotenv
+    from core.log_config import configure_logging
     from validator.service import run_reign_only, build_parser
 
     load_dotenv()
     args = build_parser().parse_args()
+    configure_logging(args)
     run_reign_only(args)
 
 
