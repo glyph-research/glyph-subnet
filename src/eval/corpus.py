@@ -4,10 +4,9 @@ The corpus is a single logical byte sequence that streams are sampled from. A
 ``CorpusProvider`` exposes its manifest (so the sample is reproducible and the data is
 freshness-auditable) and materializes byte ranges.
 
-- ``StaticLocalProvider``: concatenates files in a directory; used for tests and M0
-  dry-runs.
-- ``OracleProvider``: resolves the owner-published fresh-data corpus by its on-chain
-  manifest hash (implemented with the data oracle, glyph-oracle).
+- ``StaticLocalProvider``: concatenates files in a directory; used for tests, the offline
+  M0 demo, and as the base every live-streamed round corpus resolves to
+  (``eval.live_corpus.resolve_live_corpus``, issue #71).
 """
 
 from __future__ import annotations
@@ -59,7 +58,8 @@ class StaticLocalProvider:
     """Treat the files under ``directory`` (sorted) as one concatenated corpus.
 
     Reserved metadata files (the corpus manifest and provenance) are never part of the
-    sampled content, so the oracle can write them alongside the chunk files.
+    sampled content, so a corpus builder (e.g. ``eval.live_corpus.write_mixed_corpus``) can
+    write them alongside the chunk files.
     """
 
     RESERVED = {"manifest.json", "provenance.json"}
@@ -160,28 +160,3 @@ class StaticLocalProvider:
                 total += size
             return start, total
         return None
-
-
-class OracleProvider(StaticLocalProvider):
-    """A corpus produced by the data oracle, verified against its published manifest hash.
-
-    In production the owner-run oracle scrapes fresh, attested-timestamp text daily,
-    publishes the corpus, and commits the manifest hash on-chain. Validators resolve the
-    corpus locally and assert it matches the committed hash.
-    """
-
-    def __init__(
-        self,
-        directory: str | Path,
-        expected_manifest_hash: str | None = None,
-        *,
-        base_url: str | None = None,
-    ):
-        super().__init__(directory, base_url=base_url)
-        if expected_manifest_hash:
-            actual = self.manifest().manifest_hash()
-            if actual != expected_manifest_hash:
-                raise ValueError(
-                    f"corpus manifest hash {actual} does not match on-chain commitment "
-                    f"{expected_manifest_hash}"
-                )

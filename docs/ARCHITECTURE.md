@@ -10,8 +10,7 @@ package, and PM2 ecosystems that run the services as independent processes.
 | `core` | Shared primitives: constants, commitments, artifact contract + hashing, validator state, rolling-winner weights, temporal burn schedule, `.env` loader. Also holds `__version__` / `__version_key__`. |
 | `chain` | Bittensor chain adapter (`chain.py`) and a commitment reader (`reader.py` → `glyph-chain-reader`). |
 | `validation` | Codec artifact precheck (manifest/entrypoints/size, hashing, duplicate-hash disqualification). |
-| `eval` | Evaluation service: codec runners (`LocalSubprocessRunner`, `ChutesRunner`), the separate deployed compressor/decompressor chutes (`chute_app.py`), paired evaluator, scoring + gates, beacon stream sampling, corpus providers, chute deploy CLI. |
-| `oracle` | Fresh-data oracle: scrapes attested-timestamp text into a corpus + manifest (`glyph-oracle`). |
+| `eval` | Evaluation service: codec runners (`LocalSubprocessRunner`, `ChutesRunner`), the separate deployed compressor/decompressor chutes (`chute_app.py`), paired evaluator, scoring + gates, beacon stream sampling, corpus providers, the per-round beacon-seeded live HuggingFace corpus (`live_corpus.py`, issue #71), chute deploy CLI. |
 | `weight_setter` | Temporal-burn weight decision (`decide_weights`) + standalone setter service (`glyph-weight-setter`). |
 | `reign_worker` | King-of-the-hill round: paired evaluation + crown update + one-shot exclusion (`glyph-reign-worker`). |
 | `validator` | All-in-one orchestrator composing reign + weights, plus the offline M0 demo (`glyph-validator`). |
@@ -21,7 +20,7 @@ package, and PM2 ecosystems that run the services as independent processes.
 
 ```
 chain commitments ──▶ validation.precheck ──▶ state.commitments
-fresh corpus (oracle) ──▶ beacon-seeded streams ─┐
+live corpus (eval.live_corpus, per-round beacon) ──▶ beacon-seeded streams ─┐
                                                         ▼
 reign_worker.run_round: paired eval on eval runner (Chutes) ──▶ scores ──▶ crown
                                                         │
@@ -34,6 +33,7 @@ weight_setter.decide_weights (70/30 ± temporal burn) ──▶ chain.set_weight
 
 Run the all-in-one validator (`./scripts/run_auto_validator.sh`, or
 `pm2 start glyph-validator -- ...`) or split it into `glyph-reign-worker` +
-`glyph-weight-setter` + `glyph-oracle` for separation of concerns. The separate compressor and
-decompressor chutes are deployed once to Chutes (SN64) and shared by all validators. See
-[VALIDATING.md](VALIDATING.md).
+`glyph-weight-setter` for separation of concerns -- there is no separate corpus process to
+run; every validator builds its own copy of the corpus live each round (issue #71). The
+separate compressor and decompressor chutes are deployed once to Chutes (SN64) and shared by
+all validators. See [VALIDATING.md](VALIDATING.md).

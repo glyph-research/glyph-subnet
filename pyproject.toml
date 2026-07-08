@@ -16,13 +16,14 @@ dependencies = [
   "zstandard>=0.22.0",
   "requests>=2.31.0",
   "wandb>=0.17.0",
+  # Every validator streams its own round corpus straight from HuggingFace (issue #71) --
+  # no longer an owner-only optional extra.
+  "datasets>=2.19.0",
 ]
 
 [project.optional-dependencies]
 # The Chutes SDK is only needed to deploy/run the serverless evaluation chute.
 chutes = ["chutes>=0.2.0"]
-# `datasets` is only needed by the owner-run oracle to build the mixed corpus.
-oracle = ["datasets>=2.19.0"]
 dev = ["pytest>=8.0.0", "ruff>=0.5.0", "pre-commit>=3.7.0"]
 
 [project.scripts]
@@ -30,7 +31,6 @@ glyph-validator = "validator.service:main"
 glyph-weight-setter = "weight_setter.service:main"
 glyph-reign-worker = "reign_worker.service:main"
 glyph-chain-reader = "chain.reader:main"
-glyph-oracle = "oracle.oracle:main"
 glyph-deploy-chute = "eval.deploy:main"
 glyph-miner = "miner.cli:main"
 glyph-check-model = "miner.check:main"
@@ -42,7 +42,6 @@ include = [
   "chain*",
   "validation*",
   "eval*",
-  "oracle*",
   "weight_setter*",
   "reign_worker*",
   "validator*",

@@ -28,8 +28,8 @@ src/
   core/        shared: constants, commitments, artifact, state, weights, burn_schedule, dotenv
   chain/       chain adapter + commitment reader        (glyph-chain-reader)
   validation/  codec artifact precheck + checks
-  eval/        runners (local + Chutes), chute_app, evaluator, scoring, streams, corpus, deploy
-  oracle/      fresh-data oracle                        (glyph-oracle)
+  eval/        runners (local + Chutes), chute_app, evaluator, scoring, streams, corpus,
+               live_corpus (per-round beacon-seeded HF corpus, issue #71), deploy
   weight_setter/     temporal-burn weights                    (glyph-weight-setter)
   reign_worker/      king-of-the-hill round                   (glyph-reign-worker)
   validator/   all-in-one orchestrator + offline demo   (glyph-validator)
@@ -69,14 +69,18 @@ validator without Docker + `nvidia-container-toolkit` + a matching GPU **fails c
 design** (`DockerRunner` checks the GPU model via `nvidia-smi` and refuses to run on anything
 else). See [docs/VALIDATING.md](docs/VALIDATING.md) for the full requirement and CPU-only opt-out.
 
+Every validator builds its own copy of the evaluation corpus live from HuggingFace
+(FineWeb + Pile + enwik9), keyed by the round's on-chain beacon — no owner-run oracle
+process, no shared corpus file to host or keep in sync (issue #71); see
+[docs/VALIDATING.md](docs/VALIDATING.md#corpus) for the determinism guarantee.
+
 ```bash
 docker build -f docker/glyph-runner-default.Dockerfile -t glyph-runner-default:latest .   # zstandard-enabled base image
-export GLYPH_MIXED_CORPUS_DIR=/tmp/glyph_mixed_8x2mb       # default mixed launch corpus
 # auto-updating validator under PM2 (edit wallet/netuid) -- --runner docker + --docker-gpu are
 # both the default, so they don't need to be passed explicitly
 ./scripts/run_auto_validator.sh --netuid 117 \
   --wallet-name w --hotkey-name h --docker-image glyph-runner-default:latest \
-  --corpus-dir ./corpus --state-dir ./state
+  --state-dir ./state
 ```
 
 Or dispatch to the deployed Chutes (SN64) eval chutes instead (subject to Chutes' own SKU/
@@ -86,8 +90,7 @@ availability):
 cp .env.example .env                                       # CHUTES_API_KEY
 ./scripts/deploy_runner_chute.sh                           # deploy the compress + decompress chutes (once)
 ./scripts/run_auto_validator.sh --netuid 117 \
-  --wallet-name w --hotkey-name h --runner chutes \
-  --corpus-url https://<host>/corpus.bin --state-dir ./state
+  --wallet-name w --hotkey-name h --runner chutes --state-dir ./state
 ```
 
 Offline M0 demo (no chain, no Chutes) — exercises eval → king-of-the-hill → weights:

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 import time
 import traceback
 from pathlib import Path
@@ -48,6 +47,7 @@ from core.wandb_logger import WandbLogger, build_round_metrics, build_weights_me
 from core.weights import WinnerEntry, compact_history, promote_winner, should_promote
 from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
+from eval.live_corpus import resolve_live_corpus
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
 from eval.runner_docker import DEFAULT_DOCKER_IMAGE
 from eval.scoring import source_ratio_breakdown, stream_ratio, zstd_baseline_ratio
@@ -62,8 +62,9 @@ if TYPE_CHECKING:
 
 __all__ = ["build_parser", "run_once", "run_reign_only", "run_offline_demo", "decide_weights", "main"]
 
-DEFAULT_MIXED_CORPUS_DIR = "/tmp/glyph_mixed_8x2mb"
-MIXED_CORPUS_ENV = "GLYPH_MIXED_CORPUS_DIR"
+# Bundled tiny sample corpus used by --offline-demo when --corpus-dir isn't passed (issue #71
+# retired the shared, owner-published mixed corpus a real round used to read from here).
+DEFAULT_DEMO_CORPUS_DIR = Path(__file__).resolve().parents[2] / "samples" / "corpus"
 
 
 # Argument parsing
@@ -101,16 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--corpus-dir",
         default=None,
         help=(
-            "StaticLocalProvider corpus directory; defaults to the mixed launch corpus "
-            f"at ${MIXED_CORPUS_ENV} or {DEFAULT_MIXED_CORPUS_DIR}"
+            "StaticLocalProvider corpus directory for --offline-demo ONLY (default: the "
+            f"bundled {DEFAULT_DEMO_CORPUS_DIR.name!r} sample). A real round (no "
+            "--offline-demo) always builds its corpus live from HuggingFace, keyed by the "
+            "round's chain beacon -- see eval.live_corpus.resolve_live_corpus (issue #71) -- "
+            "and refuses this flag outright."
         ),
-    )
-    parser.add_argument(
-        "--corpus-url",
-        default=None,
-        help="Public URL of the corpus served as one contiguous blob (chunk order == sorted "
-        "manifest order). Enables the production Chutes path: the runner range-fetches each "
-        "stream itself instead of the validator inlining the 256 MiB sample.",
     )
     parser.add_argument("--reference-sku", default=REFERENCE_SKU)
     parser.add_argument("--chutes-key-file", default=None)
@@ -392,26 +389,25 @@ def _make_runner(args) -> "LocalSubprocessRunner | ChutesRunner | DockerRunner":
     )
 
 
-def _default_corpus_dir() -> Path:
-    return Path(os.environ.get(MIXED_CORPUS_ENV, DEFAULT_MIXED_CORPUS_DIR))
-
-
-def _resolve_corpus_dir(corpus_dir: str | None) -> Path:
-    path = Path(corpus_dir) if corpus_dir else _default_corpus_dir()
+def _resolve_demo_corpus_dir(corpus_dir: str | None) -> Path:
+    path = Path(corpus_dir) if corpus_dir else DEFAULT_DEMO_CORPUS_DIR
     if not path.is_dir():
         if corpus_dir:
             raise SystemExit(f"corpus directory not found: {path}")
         raise SystemExit(
-            "default mixed corpus directory not found: "
-            f"{path}. Create/populate the mixed launch corpus, set {MIXED_CORPUS_ENV}, "
-            "or pass --corpus-dir explicitly."
+            f"default demo corpus directory not found: {path}. Pass --corpus-dir explicitly."
         )
     return path
 
 
-def _make_provider(args) -> StaticLocalProvider:
-    path = _resolve_corpus_dir(args.corpus_dir)
-    provider = StaticLocalProvider(path, base_url=getattr(args, "corpus_url", None))
+def _make_demo_provider(args) -> StaticLocalProvider:
+    """--offline-demo's corpus provider: a local sample directory, never the chain/HF.
+
+    Real rounds never call this -- see ``_evaluate_round``'s live-corpus wiring (issue #71).
+    """
+
+    path = _resolve_demo_corpus_dir(getattr(args, "corpus_dir", None))
+    provider = StaticLocalProvider(path)
     if provider.total_bytes <= 0:
         raise SystemExit(f"corpus directory has no benchmark data files: {path}")
     return provider
@@ -489,6 +485,15 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
     reporting it changes nothing about scoring/promotion (issue #41).
     """
 
+    if getattr(args, "corpus_dir", None):
+        # --corpus-dir is offline-demo-only (see run_offline_demo / issue #71): a real round
+        # always builds its corpus live from HuggingFace, keyed by this round's chain beacon,
+        # so a leftover --corpus-dir would be silently ignored rather than doing anything --
+        # refuse outright instead of letting an operator believe it took effect.
+        raise SystemExit(
+            "--corpus-dir is only valid with --offline-demo; a real round always builds its "
+            "corpus live from HuggingFace (eval.live_corpus.resolve_live_corpus, issue #71)."
+        )
     block = chain.current_block()
     if state.window_anchor_block is None:
         state.window_anchor_block = args.window_anchor or block
@@ -520,8 +525,12 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
     ]
     round_metrics = None
     if challengers:
-        provider = _make_provider(args)
         seed = derive_seed(chain.block_hash(block), salt, block)
+        # Each validator independently builds this round's corpus straight from HuggingFace,
+        # keyed by the same beacon-derived seed used for stream-window sampling below -- no
+        # shared file, no owner-run oracle process, and every validator lands on byte-identical
+        # chunks by construction (issue #71).
+        provider = resolve_live_corpus(str(seed))
         specs = _select_specs(args, provider, seed)
         scored_specs = _scored_specs(specs)
         baseline = zstd_baseline_ratio(
@@ -627,7 +636,7 @@ def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = 
 
 def run_offline_demo(args: argparse.Namespace) -> None:
     codec_specs = args.local_codec or ["winner=./reference_codec"]
-    provider = _make_provider(args)
+    provider = _make_demo_provider(args)
     seed = derive_seed("offline-demo-block", "offline-demo-salt", 0)
     specs = _select_specs(args, provider, seed)
     scored_specs = _scored_specs(specs)
