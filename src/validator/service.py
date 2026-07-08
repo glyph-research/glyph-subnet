@@ -577,6 +577,12 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         block, round_metrics = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
             wandb_logger.log(round_metrics)
+        champion = state.winner_history[0] if state.winner_history else None
+        champion_desc = f"{champion.hotkey} ratio={champion.ratio:.4f}" if champion else "none"
+        challengers_desc = (
+            f"{round_metrics['round/num_challengers']} challenger(s)" if round_metrics else "0 challengers"
+        )
+        print(f"round: block={block} champion={champion_desc} {challengers_desc}")
         tempo = chain.tempo()
         anchor = state.window_anchor_block
 
@@ -596,7 +602,11 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         if args.dry_run:
             print("dry-run: not submitting weights")
             return
-        print(f"set_weights response: {chain.set_weights(uids, weights, version_key=version_key)}")
+        response = chain.set_weights(uids, weights, version_key=version_key)
+        if response.success:
+            print("set_weights: success=True")
+        else:
+            print(f"set_weights: success=False error={response.error} message={response.message}")
     finally:
         if owns_logger:
             wandb_logger.finish()
