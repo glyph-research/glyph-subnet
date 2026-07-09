@@ -83,20 +83,16 @@ EOF
 read_version_from_file() {
     local file_path="$1"
     "$PYTHON_BIN" - "$file_path" "$VERSION_VAR" <<'PY'
-import ast
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 name = sys.argv[2]
-tree = ast.parse(path.read_text())
-for node in tree.body:
-    if isinstance(node, ast.Assign):
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == name:
-                print(ast.literal_eval(node.value))
-                raise SystemExit(0)
-raise SystemExit(f"{name} not found in {path}")
+namespace = {}
+exec(compile(path.read_text(), str(path), "exec"), namespace)
+if name not in namespace:
+    raise SystemExit(f"{name} not found in {path}")
+print(namespace[name])
 PY
 }
 
@@ -108,21 +104,17 @@ read_remote_version() {
     local branch="$1"
     git fetch --quiet origin "$branch"
     git show "origin/$branch:$VERSION_FILE" | "$PYTHON_BIN" -c '
-import ast
 import sys
 
 name = sys.argv[1]
 branch = sys.argv[2]
 version_file = sys.argv[3]
 content = sys.stdin.read()
-tree = ast.parse(content)
-for node in tree.body:
-    if isinstance(node, ast.Assign):
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == name:
-                print(ast.literal_eval(node.value))
-                raise SystemExit(0)
-raise SystemExit(f"{name} not found in remote origin/{branch}:{version_file}")
+namespace = {}
+exec(compile(content, f"origin/{branch}:{version_file}", "exec"), namespace)
+if name not in namespace:
+    raise SystemExit(f"{name} not found in remote origin/{branch}:{version_file}")
+print(namespace[name])
 ' "$VERSION_VAR" "$branch" "$VERSION_FILE"
 }
 
