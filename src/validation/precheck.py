@@ -386,8 +386,11 @@ def precheck_artifact_dir(
     result.license = manifest.license
     result.errors.extend(manifest.placeholder_issues())
     result.errors.extend(manifest.image_issues())
-    result.warnings.extend(_entrypoint_script_warnings(path, manifest))
-    result.errors.extend(artifact_security_errors(path, manifest))
+    try:
+        result.warnings.extend(_entrypoint_script_warnings(path, manifest))
+        result.errors.extend(artifact_security_errors(path, manifest))
+    except Exception as exc:
+        result.errors.append(f"cannot review artifact: {exc}")
 
     try:
         digest, total = hash_artifact(path)

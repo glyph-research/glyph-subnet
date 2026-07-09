@@ -156,13 +156,33 @@ def resolve_argv(template: list[str], input_path: str | Path, output_path: str |
     return resolved
 
 
+class ArtifactSymlinkError(ValueError):
+    """A codec artifact contains a symlink (issue #95).
+
+    ``Path.is_file()``/``read_bytes()`` follow symlinks with no check that the resolved
+    target stays inside the artifact root -- a miner-supplied symlink could point anywhere
+    readable on the host doing the hashing (e.g. ``/proc/self/environ``), and since the
+    target depends on the local filesystem of whichever validator hashes it, different
+    validators could compute different hashes for the identical on-chain commitment.
+    Codec artifacts have no legitimate need for symlinks, so any is rejected outright rather
+    than silently followed or skipped.
+    """
+
+
 def iter_artifact_files(root: str | Path) -> Iterator[Path]:
     root = Path(root)
     for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
         # Exclude reserved dirs by their position *within the artifact*, not the absolute
         # path (e.g. a HuggingFace snapshot lives under ~/.cache/huggingface/...).
         rel_parts = path.relative_to(root).parts
-        if path.is_file() and not _EXCLUDED_PARTS.intersection(rel_parts):
+        if _EXCLUDED_PARTS.intersection(rel_parts):
+            continue
+        if path.is_symlink():
+            raise ArtifactSymlinkError(
+                f"artifact contains a symlink at {path.relative_to(root).as_posix()!r}; "
+                "symlinks are not allowed in codec artifacts"
+            )
+        if path.is_file():
             yield path
 
 
