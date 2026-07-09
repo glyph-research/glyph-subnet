@@ -10,7 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from eval.glyph_eval_runner import ResourceCaps, RunnerError, _run_codec, _safe_join, _setpriv_prefix
+from eval.glyph_eval_runner import (
+    ResourceCaps,
+    RunnerError,
+    _hash_artifact,
+    _iter_artifact_files,
+    _run_codec,
+    _safe_join,
+    _setpriv_prefix,
+)
 
 
 def _setpriv_usable() -> bool:
@@ -158,3 +166,29 @@ def test_safe_join_accepts_normal_relative_paths(tmp_path):
 def test_safe_join_rejects_escaping_paths(tmp_path, rel):
     with pytest.raises(ValueError, match="escapes destination"):
         _safe_join(tmp_path, rel)
+
+
+# --- symlink escape in artifact hashing (issue #95): this module's own copy of
+# core.artifact.iter_artifact_files/hash_artifact, kept in sync by hand -------------------
+
+
+def test_iter_artifact_files_rejects_a_symlink(tmp_path):
+    target = tmp_path / "outside.txt"
+    target.write_text("host secret")
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "evil.py").symlink_to(target)
+
+    with pytest.raises(ValueError, match="symlink"):
+        list(_iter_artifact_files(artifact))
+
+
+def test_hash_artifact_does_not_read_through_a_symlink(tmp_path):
+    target = tmp_path / "outside.bin"
+    target.write_bytes(b"host secret bytes")
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "link.bin").symlink_to(target)
+
+    with pytest.raises(ValueError, match="symlink"):
+        _hash_artifact(artifact)
