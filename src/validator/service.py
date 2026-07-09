@@ -36,6 +36,7 @@ from core.constants import (
     EVAL_SOURCE,
     EVAL_STREAM_BYTES,
     EVAL_STREAMS,
+    PRECHECK_FULL_RECHECK_INTERVAL_BLOCKS,
     REFERENCE_SKU,
     THROUGHPUT_FLOOR_BPS,
     WINDOW_ANCHOR_BLOCK,
@@ -300,7 +301,17 @@ def _apply_precheck(
             continue
         key = f"{parsed.hotkey}:{parsed.commitment.key}"
         existing = state.commitments.get(key)
-        full_check = existing is None or not existing.artifact_hash
+        last_full_check = existing.last_full_check_block if existing else None
+        # issue #96: don't let the full security scan + hash stay skipped forever just
+        # because a commitment already has a recorded hash -- periodically force a fresh one
+        # (also covers state persisted before this field existed, where last_full_check is
+        # always None) as a second, independent safety net alongside revision immutability.
+        full_check = (
+            existing is None
+            or not existing.artifact_hash
+            or last_full_check is None
+            or (block is not None and block - last_full_check >= PRECHECK_FULL_RECHECK_INTERVAL_BLOCKS)
+        )
         local_dir = local_artifacts.get(parsed.hotkey)
         if local_dir:
             result = precheck_artifact_dir(
@@ -345,6 +356,7 @@ def _apply_precheck(
             valid=result.ok,
             disqualification_reason=None if result.ok else "; ".join(result.errors),
             local_path=local_dir,
+            last_full_check_block=block if full_check else last_full_check,
         )
 
     # Duplicate-artifact ownership: earliest commit_block wins, hotkey only as the final

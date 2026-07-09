@@ -31,6 +31,15 @@ COMMIT_POLL_INTERVAL_SECS = 12
 # After this many blocks with no matching reveal the commit is treated as abandoned and
 # pruned, so persisted ``commit_phase_seen`` stays bounded. ~300 blocks ≈ 1h of slack.
 COMMIT_PHASE_MAX_AGE_BLOCKS = 300
+# Precheck re-verification cadence (issue #96, defense-in-depth). A commitment's full
+# security scan + artifact hash previously only ran once, ever, on first sight -- every
+# later round only re-fetched manifest.json and trusted the originally-recorded hash
+# forever. Even with ``rev`` now enforced to be a pinned, immutable git SHA (see
+# ``CodecCommitment.validate_revision``), periodically forcing a full re-check is a second,
+# independent safety net against anything a single first-pass check might have missed. Purely
+# a local caching/performance tradeoff -- not consensus-critical, so it does not need to be
+# identical across validators. ~7200 blocks =~ 24h at ~12s/block.
+PRECHECK_FULL_RECHECK_INTERVAL_BLOCKS = 7200
 
 # --- Rolling-winner policy -----------------------------------------------------
 # current winner / previous winner. Effective split after the temporal burn is

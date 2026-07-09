@@ -69,7 +69,7 @@ def test_evaluate_round_logs_round_start_before_run_round(monkeypatch, tmp_path,
     block = 12345
     block_hash = "0xbeacon"
     salt = "saltval"
-    raw_commitments = {"hk-a": serialize_commitment(CodecCommitment(repo="a/codec", rev="rev00001"))}
+    raw_commitments = {"hk-a": serialize_commitment(CodecCommitment(repo="a/codec", rev="a" * 40))}
     chain = FakeChain(block, block_hash, raw_commitments)
 
     def fake_precheck(repo, revision, *, max_artifact_bytes, download=True):
@@ -109,7 +109,7 @@ def test_evaluate_round_builds_corpus_via_resolve_live_corpus(monkeypatch, tmp_p
     block = 12345
     block_hash = "0xbeacon"
     salt = "saltval"
-    raw_commitments = {"hk-a": serialize_commitment(CodecCommitment(repo="a/codec", rev="rev00001"))}
+    raw_commitments = {"hk-a": serialize_commitment(CodecCommitment(repo="a/codec", rev="a" * 40))}
     chain = FakeChain(block, block_hash, raw_commitments)
 
     def fake_precheck(repo, revision, *, max_artifact_bytes, download=True):
