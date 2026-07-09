@@ -18,6 +18,11 @@ from validator.service import (
 )
 from core.weights import WinnerEntry
 
+# issue #96: CodecCommitment.rev must be a pinned 40-char git commit SHA now, not any
+# non-empty string -- stand-ins for what HfApi().repo_info(...).sha actually returns.
+_REV_A = "a" * 40
+_REV_B = "b" * 40
+
 TEMPO = 360
 ANCHOR = 0
 HOTKEYS = ["uid0_burn", "hkA", "hkB"]
@@ -96,13 +101,13 @@ def test_apply_precheck_disqualifies_duplicate_hash(monkeypatch):
     monkeypatch.setattr("validator.service.precheck_codec", fake_precheck)
     state = ValidatorState()
     parsed = [
-        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev="abc123"), "raw-a"),
-        ParsedCommitment("hotkey-b", CodecCommitment(repo="b/codec", rev="def456"), "raw-b"),
+        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev=_REV_A), "raw-a"),
+        ParsedCommitment("hotkey-b", CodecCommitment(repo="b/codec", rev=_REV_B), "raw-b"),
     ]
     _apply_precheck(state, parsed, max_artifact_bytes=100, block=10)
 
-    first = state.commitments["hotkey-a:a/codec@abc123"]
-    second = state.commitments["hotkey-b:b/codec@def456"]
+    first = state.commitments[f"hotkey-a:a/codec@{_REV_A}"]
+    second = state.commitments[f"hotkey-b:b/codec@{_REV_B}"]
     assert first.valid is True
     assert second.valid is False
     assert "duplicate artifact" in second.disqualification_reason
@@ -124,14 +129,86 @@ def test_apply_precheck_logs_valid_and_invalid_per_hotkey(monkeypatch, caplog):
     monkeypatch.setattr("validator.service.precheck_codec", fake_precheck)
     state = ValidatorState()
     parsed = [
-        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev="abc123"), "raw-a"),
-        ParsedCommitment("hotkey-b", CodecCommitment(repo="b/codec", rev="def456"), "raw-b"),
+        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev=_REV_A), "raw-a"),
+        ParsedCommitment("hotkey-b", CodecCommitment(repo="b/codec", rev=_REV_B), "raw-b"),
     ]
     _apply_precheck(state, parsed, max_artifact_bytes=100, block=10)
 
     out = caplog.text
-    assert "precheck: hotkey-a a/codec@abc123 valid" in out
-    assert "precheck: hotkey-b b/codec@def456 invalid: too big" in out
+    assert f"precheck: hotkey-a a/codec@{_REV_A} valid" in out
+    assert f"precheck: hotkey-b b/codec@{_REV_B} invalid: too big" in out
+
+
+# --- precheck full re-check cadence: not skipped forever (issue #96) ------------
+
+
+def _recording_precheck(calls):
+    def fake_precheck(repo, revision, *, max_artifact_bytes, download=True):
+        calls.append(download)
+        return PrecheckResult(repo=repo, revision=revision, ok=True, artifact_hash="same-hash", artifact_bytes=10)
+
+    return fake_precheck
+
+
+def test_first_sight_always_does_a_full_check(monkeypatch):
+    calls = []
+    monkeypatch.setattr("validator.service.precheck_codec", _recording_precheck(calls))
+    state = ValidatorState()
+    parsed = [ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev=_REV_A), "raw-a")]
+
+    _apply_precheck(state, parsed, max_artifact_bytes=100, block=1000)
+
+    assert calls == [True]
+    assert state.commitments[f"hotkey-a:a/codec@{_REV_A}"].last_full_check_block == 1000
+
+
+def test_soon_after_a_full_check_skips_the_next_one(monkeypatch):
+    calls = []
+    monkeypatch.setattr("validator.service.precheck_codec", _recording_precheck(calls))
+    state = ValidatorState()
+    parsed = [ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev=_REV_A), "raw-a")]
+
+    _apply_precheck(state, parsed, max_artifact_bytes=100, block=1000)
+    _apply_precheck(state, parsed, max_artifact_bytes=100, block=1001)
+
+    assert calls == [True, False]
+    # last_full_check_block doesn't move on the skipped (manifest-only) round.
+    assert state.commitments[f"hotkey-a:a/codec@{_REV_A}"].last_full_check_block == 1000
+
+
+def test_full_check_is_forced_again_once_the_interval_elapses(monkeypatch):
+    from core.constants import PRECHECK_FULL_RECHECK_INTERVAL_BLOCKS
+
+    calls = []
+    monkeypatch.setattr("validator.service.precheck_codec", _recording_precheck(calls))
+    state = ValidatorState()
+    parsed = [ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev=_REV_A), "raw-a")]
+
+    _apply_precheck(state, parsed, max_artifact_bytes=100, block=1000)
+    later_block = 1000 + PRECHECK_FULL_RECHECK_INTERVAL_BLOCKS
+    _apply_precheck(state, parsed, max_artifact_bytes=100, block=later_block)
+
+    assert calls == [True, True]
+    assert state.commitments[f"hotkey-a:a/codec@{_REV_A}"].last_full_check_block == later_block
+
+
+def test_persisted_state_without_last_full_check_block_forces_a_full_check(monkeypatch):
+    # Migration case: state persisted before this field existed has last_full_check_block=None
+    # even though artifact_hash is already set -- must not be trusted as "already fully
+    # checked" forever.
+    calls = []
+    monkeypatch.setattr("validator.service.precheck_codec", _recording_precheck(calls))
+    state = ValidatorState()
+    state.commitments[f"hotkey-a:a/codec@{_REV_A}"] = CommitmentState(
+        hotkey="hotkey-a", repo="a/codec", revision=_REV_A, block=1, artifact_hash="same-hash",
+        valid=True, last_full_check_block=None,
+    )
+    parsed = [ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev=_REV_A), "raw-a")]
+
+    _apply_precheck(state, parsed, max_artifact_bytes=100, block=1000)
+
+    assert calls == [True]
+    assert state.commitments[f"hotkey-a:a/codec@{_REV_A}"].last_full_check_block == 1000
 
 
 # --- duplicate-artifact ownership: earliest commit_block wins, not hotkey order (#58) -------
@@ -153,15 +230,15 @@ def test_duplicate_owner_prefers_earlier_block_when_earlier_hotkey_sorts_first(m
     # alone wouldn't distinguish the fix from the old (buggy) hotkey-sort behavior.
     monkeypatch.setattr("validator.service.precheck_codec", _same_hash_precheck)
     state = ValidatorState()
-    _seed_existing_commitment(state, "hotkey-a", "a/codec", "rev00001", block=5)
-    _seed_existing_commitment(state, "hotkey-z", "z/codec", "rev00002", block=20)
+    _seed_existing_commitment(state, "hotkey-a", "a/codec", _REV_A, block=5)
+    _seed_existing_commitment(state, "hotkey-z", "z/codec", _REV_B, block=20)
     parsed = [
-        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev="rev00001"), "raw-a"),
-        ParsedCommitment("hotkey-z", CodecCommitment(repo="z/codec", rev="rev00002"), "raw-z"),
+        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev=_REV_A), "raw-a"),
+        ParsedCommitment("hotkey-z", CodecCommitment(repo="z/codec", rev=_REV_B), "raw-z"),
     ]
     _apply_precheck(state, parsed, max_artifact_bytes=100, block=999)
-    a = state.commitments["hotkey-a:a/codec@rev00001"]
-    z = state.commitments["hotkey-z:z/codec@rev00002"]
+    a = state.commitments[f"hotkey-a:a/codec@{_REV_A}"]
+    z = state.commitments[f"hotkey-z:z/codec@{_REV_B}"]
     assert a.valid is True
     assert z.valid is False
     assert "hotkey-a" in z.disqualification_reason
@@ -173,15 +250,15 @@ def test_duplicate_owner_prefers_earlier_block_when_later_hotkey_sorts_first(mon
     # hotkey-a the owner here -- this is the exact copy-cat exploit scenario from the issue.
     monkeypatch.setattr("validator.service.precheck_codec", _same_hash_precheck)
     state = ValidatorState()
-    _seed_existing_commitment(state, "hotkey-a", "a/codec", "rev00001", block=20)
-    _seed_existing_commitment(state, "hotkey-z", "z/codec", "rev00002", block=5)
+    _seed_existing_commitment(state, "hotkey-a", "a/codec", _REV_A, block=20)
+    _seed_existing_commitment(state, "hotkey-z", "z/codec", _REV_B, block=5)
     parsed = [
-        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev="rev00001"), "raw-a"),
-        ParsedCommitment("hotkey-z", CodecCommitment(repo="z/codec", rev="rev00002"), "raw-z"),
+        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev=_REV_A), "raw-a"),
+        ParsedCommitment("hotkey-z", CodecCommitment(repo="z/codec", rev=_REV_B), "raw-z"),
     ]
     _apply_precheck(state, parsed, max_artifact_bytes=100, block=999)
-    a = state.commitments["hotkey-a:a/codec@rev00001"]
-    z = state.commitments["hotkey-z:z/codec@rev00002"]
+    a = state.commitments[f"hotkey-a:a/codec@{_REV_A}"]
+    z = state.commitments[f"hotkey-z:z/codec@{_REV_B}"]
     assert z.valid is True
     assert a.valid is False
     assert "hotkey-z" in a.disqualification_reason
@@ -190,15 +267,15 @@ def test_duplicate_owner_prefers_earlier_block_when_later_hotkey_sorts_first(mon
 def test_duplicate_owner_equal_commit_block_ties_break_by_hotkey(monkeypatch):
     monkeypatch.setattr("validator.service.precheck_codec", _same_hash_precheck)
     state = ValidatorState()
-    _seed_existing_commitment(state, "hotkey-a", "a/codec", "rev00001", block=10)
-    _seed_existing_commitment(state, "hotkey-z", "z/codec", "rev00002", block=10)
+    _seed_existing_commitment(state, "hotkey-a", "a/codec", _REV_A, block=10)
+    _seed_existing_commitment(state, "hotkey-z", "z/codec", _REV_B, block=10)
     parsed = [
-        ParsedCommitment("hotkey-z", CodecCommitment(repo="z/codec", rev="rev00002"), "raw-z"),
-        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev="rev00001"), "raw-a"),
+        ParsedCommitment("hotkey-z", CodecCommitment(repo="z/codec", rev=_REV_B), "raw-z"),
+        ParsedCommitment("hotkey-a", CodecCommitment(repo="a/codec", rev=_REV_A), "raw-a"),
     ]
     _apply_precheck(state, parsed, max_artifact_bytes=100, block=999)
-    a = state.commitments["hotkey-a:a/codec@rev00001"]
-    z = state.commitments["hotkey-z:z/codec@rev00002"]
+    a = state.commitments[f"hotkey-a:a/codec@{_REV_A}"]
+    z = state.commitments[f"hotkey-z:z/codec@{_REV_B}"]
     assert a.valid is True
     assert z.valid is False
 
@@ -209,10 +286,10 @@ def test_duplicate_owner_stays_sticky_across_rounds(monkeypatch):
     monkeypatch.setattr("validator.service.precheck_codec", _same_hash_precheck)
     state = ValidatorState()
     state.duplicate_hash_owner = {"same-hash": "hotkey-a"}
-    _seed_existing_commitment(state, "hotkey-z", "z/codec", "rev00002", block=0)  # earlier than any real block
-    parsed = [ParsedCommitment("hotkey-z", CodecCommitment(repo="z/codec", rev="rev00002"), "raw-z")]
+    _seed_existing_commitment(state, "hotkey-z", "z/codec", _REV_B, block=0)  # earlier than any real block
+    parsed = [ParsedCommitment("hotkey-z", CodecCommitment(repo="z/codec", rev=_REV_B), "raw-z")]
     _apply_precheck(state, parsed, max_artifact_bytes=100, block=999)
-    z = state.commitments["hotkey-z:z/codec@rev00002"]
+    z = state.commitments[f"hotkey-z:z/codec@{_REV_B}"]
     assert z.valid is False
     assert "hotkey-a" in z.disqualification_reason
 
@@ -250,17 +327,17 @@ def test_reveal_tie_breaks_off_observed_commit_phase_block(monkeypatch):
 
     monkeypatch.setattr("validator.service.precheck_codec", _ok_precheck)
     salt = "00112233"
-    digest = commitment_digest("a/codec", "abc123", salt)
+    digest = commitment_digest("a/codec", _REV_A, salt)
     state = ValidatorState()
     # Validator observed this hotkey's commit-phase digest at block 5.
     state.commit_phase_seen = {"hotkey-a": {digest: 5}}
     reveal = ParsedCommitment(
-        "hotkey-a", CodecCommitment(repo="a/codec", rev="abc123"), "raw", salt=salt, digest=digest
+        "hotkey-a", CodecCommitment(repo="a/codec", rev=_REV_A), "raw", salt=salt, digest=digest
     )
     # Reveal is processed much later, at block 50.
     _apply_precheck(state, [reveal], max_artifact_bytes=100, block=50)
     # commit_block keys off the commit-phase block, not the reveal-observation block.
-    assert state.commitments["hotkey-a:a/codec@abc123"].block == 5
+    assert state.commitments[f"hotkey-a:a/codec@{_REV_A}"].block == 5
     # Reveal resolved -> the commit-phase digest is dropped so the map stays bounded (#21).
     assert "hotkey-a" not in state.commit_phase_seen
 
@@ -270,13 +347,13 @@ def test_reveal_without_observed_commit_phase_falls_back_to_current_block(monkey
 
     monkeypatch.setattr("validator.service.precheck_codec", _ok_precheck)
     salt = "00112233"
-    digest = commitment_digest("a/codec", "abc123", salt)
+    digest = commitment_digest("a/codec", _REV_A, salt)
     state = ValidatorState()  # commit phase never observed
     reveal = ParsedCommitment(
-        "hotkey-a", CodecCommitment(repo="a/codec", rev="abc123"), "raw", salt=salt, digest=digest
+        "hotkey-a", CodecCommitment(repo="a/codec", rev=_REV_A), "raw", salt=salt, digest=digest
     )
     _apply_precheck(state, [reveal], max_artifact_bytes=100, block=50)
-    assert state.commitments["hotkey-a:a/codec@abc123"].block == 50
+    assert state.commitments[f"hotkey-a:a/codec@{_REV_A}"].block == 50
 
 
 # --- temporal burn weights ------------------------------------------------------

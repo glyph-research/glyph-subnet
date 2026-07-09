@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field, field_validator
@@ -37,12 +38,20 @@ from core.constants import (
 )
 
 
+# A full git commit SHA1: exactly what HfApi().repo_info(...).sha returns for any resolved
+# ref (branch, tag, or commit). Requiring this shape (not just "any non-empty string")
+# rejects mutable refs like "main"/"master" outright (issue #96) -- local_snapshot_dir's
+# indefinite-reuse-across-rounds guarantee, and precheck's own "only fully re-scan once"
+# caching, both assume the committed revision is a pinned, permanently fixed identifier.
+_REVISION_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
 class CodecCommitment(BaseModel):
     """Compact on-chain commitment payload."""
 
     v: int = Field(default=COMMITMENT_VERSION)
     repo: str = Field(min_length=3, max_length=160)
-    rev: str = Field(min_length=6, max_length=80)
+    rev: str = Field(min_length=40, max_length=40)
 
     @field_validator("repo")
     @classmethod
@@ -61,10 +70,12 @@ class CodecCommitment(BaseModel):
     @classmethod
     def validate_revision(cls, value: str) -> str:
         value = value.strip()
-        if not value:
-            raise ValueError("revision is required")
-        if "|" in value:
-            raise ValueError("revision must not contain '|'")
+        if not _REVISION_SHA_RE.fullmatch(value):
+            raise ValueError(
+                "revision must be a pinned 40-character git commit SHA (e.g. as returned by "
+                "HfApi().repo_info(repo_id=..., revision=...).sha), not a mutable ref like a "
+                "branch name or tag -- see miner/commit.py's _resolve_revision"
+            )
         return value
 
     @property

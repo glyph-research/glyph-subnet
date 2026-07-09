@@ -122,3 +122,8 @@ glyph-miner commit  --netuid 117 --wallet-name w --hotkey-name h \
 **Commitments are permanent per hotkey.** A challenger that does not win is excluded
 forever — so benchmark against the public incumbent before paying to commit. To submit an
 improved codec, register a new hotkey.
+
+`glyph-miner commit` always resolves `--revision` to its pinned HuggingFace commit SHA for
+you before committing (or resolves the repo's default branch if `--revision` is omitted) —
+validators reject any commitment whose revision isn't a full 40-character commit SHA (issue
+#96), since a mutable branch name would let the underlying content change after precheck.
