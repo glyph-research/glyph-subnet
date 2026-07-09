@@ -80,13 +80,18 @@ BASELINE_LEVEL = 19  # zstd -19: the vacant-crown floor a codec must beat
 # sets weights 100% to BURN_UID.
 BURN_WINDOW_TEMPOS = 4
 BURN_UID = 0
-# Network-wide on/off switch for the temporal burn feature (issue #43), currently disabled:
-# with this False, no tempo is ever a burn tempo and weights are the pure rolling-winner
-# distribution. Burn-tempo alignment feeds consensus, so -- same rationale as
+# Network-wide on/off switch for the temporal burn feature. Disabled at launch (issue #43),
+# re-enabled (issue #88) after a live weight-copier (mirroring the validator's exact weight
+# vector without running the real evaluation) was observed on netuid 117 -- the burn-tempo
+# schedule is exactly the anti-copy signal that punishes this. With this True, the burn
+# position each window (H(S || window) mod 4, see burn_schedule.py) sets weights 100% to
+# BURN_UID; a copier that never evaluates cannot compute S and diverges maximally on the
+# tempos it gets wrong. Burn-tempo alignment feeds consensus, so -- same rationale as
 # WINDOW_ANCHOR_BLOCK -- this MUST be identical on every validator and is a committed
-# constant, never a per-operator override. Flip it and ship the change to all validators
-# together to re-enable; the burn_schedule module itself is left intact either way.
-BURN_ENABLED = False
+# constant, never a per-operator override. Flip and ship the change to all validators
+# together to change it either direction; the burn_schedule module itself is left intact
+# either way.
+BURN_ENABLED = True
 # Network-wide origin so every validator's window index aligns. This MUST be identical on
 # every validator: a per-operator override would desync the burn windows and split consensus,
 # so it is a committed constant (not an env var). 0 anchors the windows at genesis, which is a
