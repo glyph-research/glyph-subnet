@@ -34,11 +34,11 @@ decompress each run in a fresh, ephemeral `docker run --rm` container with `--ne
 a codec can't stash the raw input during compress and read it back during decompress), but on
 hardware you control instead of Chutes.
 
+`./scripts/install_deps.sh` already builds `glyph-runner-default:latest` and it's the
+`--docker-image` default, so a plain invocation just works:
+
 ```bash
-docker build -f docker/glyph-runner-default.Dockerfile -t glyph-runner-default:latest .   # zstandard-enabled base image
-glyph-validator --docker-image glyph-runner-default:latest \
-  --netuid 117 --wallet-name validator --hotkey-name default \
-  --state-dir ./state
+glyph-validator --netuid 117 --wallet-name validator --hotkey-name default
 ```
 
 - Requires Docker **and `nvidia-container-toolkit`** on the validator host (the GPU gate is on
@@ -46,12 +46,12 @@ glyph-validator --docker-image glyph-runner-default:latest \
   more than one.
 - No GPU available, or intentionally testing a CPU-only codec? Pass `--no-docker-gpu` --
   `DockerRunner` then runs with no GPU requirement at all.
-- Pre-pull/build whatever image you pass via `--docker-image`; a cold pull happens inside the
-  timed wall-clock budget. `docker/glyph-runner-default.Dockerfile` covers the reference codec
-  (needs only `zstandard`) -- a codec with heavier deps (e.g. torch for a neural codec) needs
-  its own image with those baked in. Throughput timing includes container startup and there is
-  no `--cpus` cap, so also use comparable host CPUs across validators for tightest
-  same-system determinism, even with the GPU pinned.
+- Pass `--docker-image` to override the default with your own image; pre-pull/build it first --
+  a cold pull happens inside the timed wall-clock budget. `docker/glyph-runner-default.Dockerfile`
+  covers the reference codec (needs only `zstandard`) -- a codec with heavier deps (e.g. torch
+  for a neural codec) needs its own image with those baked in. Throughput timing includes
+  container startup and there is no `--cpus` cap, so also use comparable host CPUs across
+  validators for tightest same-system determinism, even with the GPU pinned.
 - Codec containers run as non-root UID/GID `65534:65534`, drop all Linux capabilities, set
   `no-new-privileges`, and use Docker's default seccomp profile. To test a reviewed stricter
   profile, pass `--docker-seccomp-profile /path/to/seccomp-codec.json`. See
@@ -187,31 +187,28 @@ All-in-one — `glyph-validator` is a console entry point; wrap it in PM2 (edit 
 
 ```bash
 pm2 start glyph-validator --name glyph-validator -- \
-  --netuid 117 --wallet-name validator --hotkey-name default \
-  --docker-image glyph-runner-default:latest --state-dir ./state
+  --netuid 117 --wallet-name validator --hotkey-name default
 ```
 
 Or split into services (each is a console entry point — same `pm2 start <script> -- <args>` form):
 
 ```bash
-pm2 start glyph-reign-worker  --name glyph-reign-worker  -- --netuid 117 --wallet-name validator --hotkey-name default --docker-image glyph-runner-default:latest   # evaluate + update crown
-pm2 start glyph-weight-setter --name glyph-weight-setter -- --netuid 117 --wallet-name validator --hotkey-name default                                          # temporal-burn weights every tempo
+pm2 start glyph-reign-worker  --name glyph-reign-worker  -- --netuid 117 --wallet-name validator --hotkey-name default   # evaluate + update crown
+pm2 start glyph-weight-setter --name glyph-weight-setter -- --netuid 117 --wallet-name validator --hotkey-name default   # temporal-burn weights every tempo
 ```
 
 Auto-updating validator (tracks `glyph-research/glyph-subnet`):
 
 ```bash
 ./scripts/setup_hooks.sh
-./scripts/run_auto_validator.sh --network finney --netuid 117 \
-  --wallet-name validator --hotkey-name default \
-  --docker-image glyph-runner-default:latest --state-dir ./state
+./scripts/run_auto_validator.sh --network finney --netuid 117 --wallet-name validator --hotkey-name default
 ```
 
 Using Chutes instead:
 
 ```bash
 ./scripts/run_auto_validator.sh --network finney --netuid 117 \
-  --wallet-name validator --hotkey-name default --runner chutes --state-dir ./state
+  --wallet-name validator --hotkey-name default --runner chutes
 ```
 
 ## Console logging

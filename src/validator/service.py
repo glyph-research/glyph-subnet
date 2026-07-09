@@ -49,7 +49,6 @@ from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
 from eval.live_corpus import resolve_live_corpus
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
-from eval.runner_docker import DEFAULT_DOCKER_IMAGE
 from eval.scoring import source_ratio_breakdown, stream_ratio, zstd_baseline_ratio
 from eval.streams import derive_seed, sample_source_streams
 from validation.precheck import precheck_artifact_dir, precheck_codec
@@ -65,6 +64,12 @@ __all__ = ["build_parser", "run_once", "run_reign_only", "run_offline_demo", "de
 # Bundled tiny sample corpus used by --offline-demo when --corpus-dir isn't passed (issue #71
 # retired the shared, owner-published mixed corpus a real round used to read from here).
 DEFAULT_DEMO_CORPUS_DIR = Path(__file__).resolve().parents[2] / "samples" / "corpus"
+
+# The CLI's own default --docker-image, built by scripts/install_deps.sh. Deliberately not
+# eval.runner_docker.DEFAULT_DOCKER_IMAGE, which stays a generic pullable image for
+# DockerRunner's own unit tests -- an operator who omits --docker-image should get the real
+# zstandard-enabled runner, not a bare python image that lacks it.
+DEFAULT_VALIDATOR_DOCKER_IMAGE = "glyph-runner-default:latest"
 
 
 # Argument parsing
@@ -115,9 +120,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--decompress-chute-url", default=None, help="Deployed glyph-decompressor chute base URL")
     parser.add_argument(
         "--docker-image",
-        default=None,
+        default=DEFAULT_VALIDATOR_DOCKER_IMAGE,
         help="Image used for --runner docker compress/decompress containers "
-        f"(default: {DEFAULT_DOCKER_IMAGE!r}). Pre-pull it -- a cold pull runs inside the timed budget.",
+        f"(default: {DEFAULT_VALIDATOR_DOCKER_IMAGE!r}, built by scripts/install_deps.sh). "
+        "Pre-pull/build it -- a cold pull runs inside the timed budget.",
     )
     parser.add_argument(
         "--docker-gpu",
@@ -387,7 +393,7 @@ def _make_runner(args) -> "LocalSubprocessRunner | ChutesRunner | DockerRunner":
         from eval.runner_docker import DockerRunner
 
         return DockerRunner(
-            image=args.docker_image or DEFAULT_DOCKER_IMAGE,
+            image=args.docker_image,
             gpu=args.docker_gpu,
             gpu_device=args.docker_gpu_device,
             seccomp_profile=args.docker_seccomp_profile,

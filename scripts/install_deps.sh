@@ -25,6 +25,14 @@ else
     echo "[glyph] npm not found (no apt-get on this host?); install Node.js then: npm install -g pm2"
 fi
 
+echo "[glyph] building glyph-runner-default:latest (zstandard-enabled validator runner image)..."
+if command -v docker >/dev/null 2>&1; then
+    docker build -f docker/glyph-runner-default.Dockerfile -t glyph-runner-default:latest . \
+        || echo "[glyph] docker build failed; validators need this image (see docs/VALIDATING.md)"
+else
+    echo "[glyph] docker not found; miners can skip this. Validators need Docker + this image."
+fi
+
 echo "[glyph] done. Next:"
 echo "  cp .env.example .env   # set CHUTES_API_KEY"
 echo "  pytest -q"

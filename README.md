@@ -74,13 +74,13 @@ Every validator builds its own copy of the evaluation corpus live from HuggingFa
 process, no shared corpus file to host or keep in sync (issue #71); see
 [docs/VALIDATING.md](docs/VALIDATING.md#corpus) for the determinism guarantee.
 
+`./scripts/install_deps.sh` already builds the `glyph-runner-default:latest` image (zstandard-enabled),
+so no separate `docker build` step is needed here:
+
 ```bash
-docker build -f docker/glyph-runner-default.Dockerfile -t glyph-runner-default:latest .   # zstandard-enabled base image
-# auto-updating validator under PM2 (edit wallet/netuid) -- --runner docker + --docker-gpu are
-# both the default, so they don't need to be passed explicitly
-./scripts/run_auto_validator.sh --netuid 117 \
-  --wallet-name w --hotkey-name h --docker-image glyph-runner-default:latest \
-  --state-dir ./state
+# auto-updating validator under PM2 (edit wallet/netuid) -- --runner docker, --docker-gpu,
+# --docker-image, and --state-dir are all defaults, so none of them need to be passed explicitly
+./scripts/run_auto_validator.sh --netuid 117 --wallet-name w --hotkey-name h
 ```
 
 Or dispatch to the deployed Chutes (SN64) eval chutes instead (subject to Chutes' own SKU/
@@ -89,8 +89,7 @@ availability):
 ```bash
 cp .env.example .env                                       # CHUTES_API_KEY
 ./scripts/deploy_runner_chute.sh                           # deploy the compress + decompress chutes (once)
-./scripts/run_auto_validator.sh --netuid 117 \
-  --wallet-name w --hotkey-name h --runner chutes --state-dir ./state
+./scripts/run_auto_validator.sh --netuid 117 --wallet-name w --hotkey-name h --runner chutes
 ```
 
 Offline M0 demo (no chain, no Chutes) — exercises eval → king-of-the-hill → weights:
