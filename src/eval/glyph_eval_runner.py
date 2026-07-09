@@ -50,7 +50,16 @@ def sha256_file(path: Path) -> str:
 def _iter_artifact_files(root: Path):
     for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
         rel_parts = path.relative_to(root).parts
-        if path.is_file() and not _EXCLUDED_PARTS.intersection(rel_parts):
+        if _EXCLUDED_PARTS.intersection(rel_parts):
+            continue
+        if path.is_symlink():
+            # Kept in sync by hand with core.artifact.iter_artifact_files (issue #95) --
+            # a symlink could resolve to anywhere readable on the host doing the hashing.
+            raise ValueError(
+                f"artifact contains a symlink at {path.relative_to(root).as_posix()!r}; "
+                "symlinks are not allowed in codec artifacts"
+            )
+        if path.is_file():
             yield path
 
 

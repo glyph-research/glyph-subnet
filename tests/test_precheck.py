@@ -291,3 +291,21 @@ def test_precheck_codec_downloads_with_stable_local_dir(tmp_path):
     mock_download.assert_called_once_with(
         repo_id="org/repo", revision="deadbeef1234", local_dir=local_snapshot_dir("org/repo", "deadbeef1234")
     )
+
+
+# --- symlink escape in artifact hashing (issue #95) ------------------------------------
+
+
+def test_precheck_fails_closed_on_a_symlinked_file_not_uncaught_exception(tmp_path):
+    _write_basic_manifest(tmp_path)
+    (tmp_path / "compress.py").write_text(
+        "open(__import__('sys').argv[-1], 'wb').write(b'x')\n"
+    )
+    (tmp_path / "decompress.py").write_text("open(__import__('sys').argv[-1], 'wb').write(b'x')\n")
+    (tmp_path / "leak.txt").symlink_to("/etc/hostname")
+
+    result = precheck_artifact_dir(tmp_path)
+
+    assert result.ok is False
+    assert any("symlink" in e for e in result.errors)
+    assert result.artifact_hash is None

@@ -21,39 +21,45 @@ def test_commitment_digest_is_deterministic_and_input_sensitive():
     assert d != commitment_digest("ns/repo", "xyz999", "deadbeef")  # rev matters
 
 
+# issue #96: rev must be a pinned 40-char git commit SHA, not any non-empty string -- these
+# stand in for what HfApi().repo_info(...).sha actually returns.
+_SHA_A = "a" * 40
+_SHA_B = "b" * 40
+
+
 def test_commit_phase_hides_repo_until_reveal():
     salt = "0011223344556677"
-    digest = commitment_digest("secret/repo", "rev12345", salt)
+    digest = commitment_digest("secret/repo", _SHA_A, salt)
     commit_value = serialize_commit_phase(digest)
     # The commit-phase value leaks nothing about the repo/rev.
     assert "secret/repo" not in commit_value
-    assert "rev12345" not in commit_value
+    assert _SHA_A not in commit_value
     assert parse_commit_phase_digest(commit_value) == digest
     # The reveal opens to exactly the committed digest.
-    reveal_value = serialize_reveal_phase("secret/repo", "rev12345", salt)
+    reveal_value = serialize_reveal_phase("secret/repo", _SHA_A, salt)
     commitment, parsed_salt = parse_commitment(reveal_value)
-    assert (commitment.repo, commitment.rev, parsed_salt) == ("secret/repo", "rev12345", salt)
+    assert (commitment.repo, commitment.rev, parsed_salt) == ("secret/repo", _SHA_A, salt)
     assert commitment_digest(commitment.repo, commitment.rev, parsed_salt) == digest
 
 
 def test_parse_commitment_handles_legacy_and_rejects_commit_phase():
-    legacy, salt = parse_commitment(serialize_commitment(CodecCommitment(repo="a/b", rev="abc123")))
-    assert (legacy.repo, legacy.rev, salt) == ("a/b", "abc123", None)
+    legacy, salt = parse_commitment(serialize_commitment(CodecCommitment(repo="a/b", rev=_SHA_A)))
+    assert (legacy.repo, legacy.rev, salt) == ("a/b", _SHA_A, None)
     with pytest.raises(ValueError):
         parse_commitment(serialize_commit_phase("deadbeef"))
 
 
 def test_parse_commit_phase_digest_returns_none_for_revealed():
-    assert parse_commit_phase_digest(serialize_reveal_phase("a/b", "abc123", "s")) is None
-    assert parse_commit_phase_digest("g1|a/b|abc123") is None
+    assert parse_commit_phase_digest(serialize_reveal_phase("a/b", _SHA_A, "s")) is None
+    assert parse_commit_phase_digest(f"g1|a/b|{_SHA_A}") is None
 
 
 def test_parse_by_hotkey_splits_phases_and_populates_digest():
     salt = "abcdef0123456789"
     raw = {
-        "hk_reveal": serialize_reveal_phase("ns/codec", "rev123456", salt),
-        "hk_commit": serialize_commit_phase(commitment_digest("ns/codec", "rev123456", salt)),
-        "hk_legacy": "g1|other/codec|def456",
+        "hk_reveal": serialize_reveal_phase("ns/codec", _SHA_A, salt),
+        "hk_commit": serialize_commit_phase(commitment_digest("ns/codec", _SHA_A, salt)),
+        "hk_legacy": f"g1|other/codec|{_SHA_B}",
         "hk_empty": "",
     }
     # Commit-phase entries are not returned as revealed commitments...
@@ -63,7 +69,7 @@ def test_parse_by_hotkey_splits_phases_and_populates_digest():
     assert set(parse_commit_phase_by_hotkey(raw)) == {"hk_commit"}
 
     # A revealed commitment carries the digest binding it to its commit phase.
-    assert revealed["hk_reveal"].digest == commitment_digest("ns/codec", "rev123456", salt)
+    assert revealed["hk_reveal"].digest == commitment_digest("ns/codec", _SHA_A, salt)
     assert revealed["hk_reveal"].digest == parse_commit_phase_by_hotkey(raw)["hk_commit"]
     # Legacy commitments have no commit-phase binding.
     assert revealed["hk_legacy"].digest is None
@@ -71,9 +77,40 @@ def test_parse_by_hotkey_splits_phases_and_populates_digest():
 
 def test_repo_and_rev_reject_pipe_to_keep_wire_format_unambiguous():
     with pytest.raises(ValueError):
-        CodecCommitment(repo="a|b/c", rev="abc123")
+        CodecCommitment(repo="a|b/c", rev=_SHA_A)
     with pytest.raises(ValueError):
-        CodecCommitment(repo="a/b", rev="ab|c123")
+        CodecCommitment(repo="a/b", rev="a" * 33 + "|" + "a" * 6)
+
+
+# --- revision must be a pinned 40-char SHA, not a mutable ref (issue #96) ------------------
+
+
+def test_revision_rejects_mutable_branch_names():
+    # Short names are already caught by the Field(min_length=40) constraint (a different,
+    # earlier validation layer than the custom message) -- either way, all must be rejected.
+    for bad_rev in ("main", "master", "HEAD", "latest", "v1.0"):
+        with pytest.raises(ValueError):
+            CodecCommitment(repo="a/b", rev=bad_rev)
+    # A 40-character string that still isn't a real SHA (wrong alphabet) hits the custom
+    # validator's own message specifically.
+    with pytest.raises(ValueError, match="pinned 40-character git commit SHA"):
+        CodecCommitment(repo="a/b", rev="not-a-real-sha-just-forty-characters-!!!")
+
+
+def test_revision_rejects_uppercase_hex():
+    with pytest.raises(ValueError):
+        CodecCommitment(repo="a/b", rev="A" * 40)
+
+
+def test_revision_rejects_wrong_length_hex():
+    with pytest.raises(ValueError):
+        CodecCommitment(repo="a/b", rev="a" * 39)
+    with pytest.raises(ValueError):
+        CodecCommitment(repo="a/b", rev="a" * 41)
+
+
+def test_revision_accepts_a_real_looking_sha():
+    assert CodecCommitment(repo="a/b", rev=_SHA_A).rev == _SHA_A
 
 
 def test_prune_returns_removed_count_and_drops_empty_hotkeys():

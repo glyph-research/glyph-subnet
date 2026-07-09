@@ -21,6 +21,9 @@ class CommitmentState(BaseModel):
     disqualification_reason: str | None = None
     # Local codec dir used for evaluation when HF download is bypassed (testnet/CI).
     local_path: str | None = None
+    # Block at which the full security scan + artifact hash last actually ran (as opposed to
+    # a cheap manifest-only re-check) -- issue #96's periodic re-verification cadence.
+    last_full_check_block: int | None = None
 
     @property
     def key(self) -> str:

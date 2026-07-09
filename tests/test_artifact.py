@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from core.artifact import Manifest, is_image_digest_pinned, local_snapshot_dir
+from core.artifact import (
+    ArtifactSymlinkError,
+    Manifest,
+    hash_artifact,
+    is_image_digest_pinned,
+    iter_artifact_files,
+    local_snapshot_dir,
+)
 
 _DIGEST = "a" * 64
 _VALID = f"ghcr.io/user/mycodec@sha256:{_DIGEST}"
@@ -137,3 +144,68 @@ def test_snapshot_download_with_local_snapshot_dir_produces_no_symlinks(tmp_path
         import shutil
 
         shutil.rmtree(dest, ignore_errors=True)
+
+
+# --- symlink escape in artifact hashing (issue #95) ------------------------------------
+
+
+def test_iter_artifact_files_rejects_a_symlinked_file(tmp_path):
+    target = tmp_path / "outside.txt"
+    target.write_text("host secret")
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "manifest.json").write_text("{}")
+    (artifact / "evil.py").symlink_to(target)
+
+    with pytest.raises(ArtifactSymlinkError, match="evil.py"):
+        list(iter_artifact_files(artifact))
+
+
+def test_iter_artifact_files_rejects_a_symlinked_directory(tmp_path):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    (real_dir / "secret.txt").write_text("host secret")
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "manifest.json").write_text("{}")
+    (artifact / "evil_dir").symlink_to(real_dir, target_is_directory=True)
+
+    with pytest.raises(ArtifactSymlinkError, match="evil_dir"):
+        list(iter_artifact_files(artifact))
+
+
+def test_hash_artifact_does_not_read_through_a_symlink(tmp_path):
+    # Confirms the fix actually blocks the read, not merely that iter_artifact_files raises
+    # in isolation: hash_artifact must never call read_bytes() on the symlink target.
+    target = tmp_path / "outside.bin"
+    target.write_bytes(b"host secret bytes")
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "manifest.json").write_text("{}")
+    (artifact / "link.bin").symlink_to(target)
+
+    with pytest.raises(ArtifactSymlinkError):
+        hash_artifact(artifact)
+
+
+def test_iter_artifact_files_ignores_symlinks_inside_excluded_dirs(tmp_path):
+    # __pycache__/.git/.cache contents are already invisible to the artifact walk regardless
+    # of content -- a symlink placed there must not trip the new rejection either.
+    artifact = tmp_path / "artifact"
+    (artifact / "__pycache__").mkdir(parents=True)
+    (artifact / "__pycache__" / "evil.pyc").symlink_to(tmp_path / "nonexistent-target")
+    (artifact / "real.py").write_text("x = 1\n")
+
+    files = list(iter_artifact_files(artifact))
+    assert [p.name for p in files] == ["real.py"]
+
+
+def test_iter_artifact_files_allows_a_normal_artifact_tree(tmp_path):
+    # Regression guard: a plain, symlink-free artifact must still hash normally.
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "manifest.json").write_text("{}")
+    (artifact / "compress.py").write_text("x = 1\n")
+
+    files = list(iter_artifact_files(artifact))
+    assert {p.name for p in files} == {"manifest.json", "compress.py"}
