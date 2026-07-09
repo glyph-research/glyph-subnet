@@ -76,7 +76,7 @@ validator starts under PM2, where there is no terminal to answer such a prompt.
 
 Example:
   $0 --check-interval 1200 --network finney --netuid 117 \\
-    --wallet-name validator_wallet --hotkey-name default --state-dir ./state
+    --wallet-name validator_wallet --hotkey-name default
 EOF
 }
 
