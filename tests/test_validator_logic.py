@@ -285,25 +285,9 @@ def _window_blocks():
     return [i * TEMPO for i in range(4)]
 
 
-def test_burn_disabled_never_burns_in_decide_weights():
-    """issue #43: BURN_ENABLED = False is the shipped default -- no tempo ever burns."""
+def test_burn_enabled_by_default_gives_exactly_one_burn_tempo_per_window():
+    """issue #88: BURN_ENABLED = True is the shipped default -- the schedule applies."""
 
-    history = [WinnerEntry("hkA", "a/c", "rev123456", 0.5, 1)]
-    outputs = [("s0", 100, "hash0")]
-    for block in _window_blocks():
-        weights, burn = decide_weights(
-            HOTKEYS, history, block=block, tempo=TEMPO, last_round_outputs=outputs, anchor=ANCHOR
-        )
-        assert burn is False
-        assert weights[1] == 1.0  # sole winner takes everything, every tempo
-
-
-def test_burn_reenabled_gives_exactly_one_burn_tempo_per_window(monkeypatch):
-    """Flipping BURN_ENABLED back to True must restore the original schedule exactly."""
-
-    import weight_setter.service as weight_setter_service
-
-    monkeypatch.setattr(weight_setter_service, "BURN_ENABLED", True)
     history = [WinnerEntry("hkA", "a/c", "rev123456", 0.5, 1)]
     outputs = [("s0", 100, "hash0")]
     flags = []
@@ -318,6 +302,23 @@ def test_burn_reenabled_gives_exactly_one_burn_tempo_per_window(monkeypatch):
         else:
             assert weights[1] == 1.0  # sole winner takes everything
     assert sum(flags) == 1
+
+
+def test_burn_disabled_via_monkeypatch_never_burns_in_decide_weights(monkeypatch):
+    """The kill-switch direction: flipping BURN_ENABLED to False must restore the pure
+    rolling-winner distribution with no tempo ever burning."""
+
+    import weight_setter.service as weight_setter_service
+
+    monkeypatch.setattr(weight_setter_service, "BURN_ENABLED", False)
+    history = [WinnerEntry("hkA", "a/c", "rev123456", 0.5, 1)]
+    outputs = [("s0", 100, "hash0")]
+    for block in _window_blocks():
+        weights, burn = decide_weights(
+            HOTKEYS, history, block=block, tempo=TEMPO, last_round_outputs=outputs, anchor=ANCHOR
+        )
+        assert burn is False
+        assert weights[1] == 1.0  # sole winner takes everything, every tempo
 
 
 def test_idle_empty_history_burns_on_normal_tempo():

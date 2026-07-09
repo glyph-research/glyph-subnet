@@ -11,9 +11,9 @@ king-of-the-hill policy:
 
 - current winner: `70%` · previous winner: `30%`
 - plus a `25%` **temporal burn** (one unpredictable tempo per 4-tempo window → UID 0) that
-  makes copy-cat validation strictly losing. **Currently disabled** network-wide
-  (`core.constants.BURN_ENABLED = False`, issue #43) — see
-  [docs/reign-and-burn.md](docs/reign-and-burn.md) for the current state and re-enable procedure.
+  makes copy-cat validation strictly losing. **Currently enabled** network-wide
+  (`core.constants.BURN_ENABLED = True`, issue #88) — see
+  [docs/reign-and-burn.md](docs/reign-and-burn.md) for the current state and how to disable.
 
 Score = compression ratio (compressed ÷ raw, lower is better) with a hard **bit-exact
 round-trip** gate. A challenger takes the crown only by beating the incumbent by `ε`
