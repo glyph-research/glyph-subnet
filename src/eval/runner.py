@@ -38,6 +38,17 @@ class RunnerError(Exception):
     """Raised when a codec entrypoint fails, times out, or produces no output."""
 
 
+class HostUnavailableError(RunnerError):
+    """Raised when the *validator host* (not the codec) cannot run a scored phase -- e.g.
+    the GPU is already occupied by another process so any codec would OOM at model load.
+
+    Distinct from RunnerError so the evaluator can tell "the codec is broken" (-> invalid,
+    one-shot exclusion) apart from "our machine is broken" (-> abort the round, penalize
+    nobody, retry when healthy). Mis-attributing the latter as the former permanently
+    excludes innocent codecs, which is exactly what happened when a leaked process held the
+    validator GPU during a round."""
+
+
 @dataclass
 class ArtifactRef:
     repo: str

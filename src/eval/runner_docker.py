@@ -57,6 +57,7 @@ from eval.runner import (
     ArtifactRef,
     CompressOutcome,
     DecompressOutcome,
+    HostUnavailableError,
     ResourceCaps,
     RunnerError,
     StreamInput,
@@ -173,6 +174,32 @@ def _verify_gpu_model(gpu_device: str | None, reference_gpu: str) -> None:
         )
 
 
+# A validator host whose GPU has less than this much free VRAM is treated as unavailable
+# for a scored phase: a codec sized to the 24 GiB cap would OOM at load, and blaming that
+# on the codec (one-shot exclusion) rather than the host is a false negative. Set below the
+# cap so a codec that legitimately uses most of the GPU still runs, but far above the near-
+# zero free memory a squatting process leaves behind.
+_MIN_FREE_VRAM_BYTES = 14 * 2**30
+
+
+def _free_vram_bytes(gpu_device: str | None) -> int:
+    """Minimum free VRAM (bytes) across the GPU(s) this runner would use, via nvidia-smi.
+    Returns -1 if it cannot be determined (caller then skips the guard rather than
+    false-failing)."""
+
+    cmd = ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]
+    if gpu_device:
+        cmd += ["-i", gpu_device]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if proc.returncode != 0:
+            return -1
+        vals = [int(x.strip()) for x in proc.stdout.splitlines() if x.strip()]
+        return min(vals) * 2**20 if vals else -1  # nvidia-smi reports MiB
+    except Exception:  # noqa: BLE001
+        return -1
+
+
 class DockerRunner:
     """Run a codec's entrypoints as ephemeral Docker containers (local production path)."""
 
@@ -277,6 +304,19 @@ class DockerRunner:
         image (issue #48's networked warmup/seal/benchmark lifecycle) or not (the original
         single-shot ``--network none``-from-start path, unchanged)."""
 
+        if self.gpu:
+            # Host-health preflight: if this GPU is already occupied (a leaked process, a
+            # co-scheduled job), any codec sized near the VRAM cap OOMs at model load. That
+            # is a host fault, not a codec fault -- raise HostUnavailableError so the
+            # evaluator aborts the round instead of marking the codec invalid (one-shot
+            # exclusion). Measured before our own container allocates anything.
+            free = _free_vram_bytes(self.gpu_device)
+            if 0 <= free < _MIN_FREE_VRAM_BYTES:
+                raise HostUnavailableError(
+                    f"validator GPU has only {free / 2**30:.1f} GiB free (< "
+                    f"{_MIN_FREE_VRAM_BYTES / 2**30:.0f} GiB); host is occupied, not the codec -- "
+                    "aborting round rather than penalizing the codec"
+                )
         if manifest.image is not None:
             return self._run_networked_lifecycle(argv, artifact_dir, tmp_dir, caps, manifest, input_data)
         (tmp_dir / "in.bin").write_bytes(input_data)
