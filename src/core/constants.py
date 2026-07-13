@@ -61,6 +61,16 @@ SCRATCH_CAP_BYTES = 117 * 2**30  # 117 GiB
 
 MAX_CHALLENGERS_PER_ROUND = 32
 
+# Version stamp for the scoring surfaces that determine a codec's measured ratio (issue
+# #104): eval/scoring.py's aggregation formula, BASELINE_LEVEL, the corpus source list/
+# sampling, and the validity gates (roundtrip check, throughput floor). Bump this whenever a
+# change to any of those would change a codec's measured ratio -- ScoreState entries stamped
+# with an older value are dropped on state load (core.state.load_state) rather than trusted
+# forever, so every hotkey (including a reigning champion, including one-shot-excluded
+# losers) gets fairly re-benchmarked under the new rules instead of being silently compared
+# against numbers computed under the old ones.
+SCORING_VERSION = 1
+
 # --- Per-source evaluation (issue #10) ----------------------------------------
 # Score each miner on two random 4 MiB FineWeb windows and two random 4 MiB Pile windows.
 # The score is the mean of the FineWeb average and the Pile average, so each dataset carries

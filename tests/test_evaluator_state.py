@@ -6,6 +6,7 @@ from bittensor.utils.btlogging import logging as bt_logging
 from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
+from core.constants import SCORING_VERSION
 from core.state import ScoreState, ValidatorState, load_state, save_state
 from eval.streams import sample_source_streams
 from core.weights import WinnerEntry
@@ -96,6 +97,7 @@ def test_state_round_trip(tmp_path):
     state.scores["hkA:a/c@rev123456"] = ScoreState(
         hotkey="hkA", repo="a/c", revision="rev123456", ratio=0.42,
         roundtrip_ok=True, throughput_bps=50000.0, valid=True, commit_block=100,
+        scoring_version=SCORING_VERSION,
     )
     state.last_round_outputs = [("s0", 123, "abc"), ("s1", 456, "def")]
     state.excluded_hotkeys = {"hk_loser"}
