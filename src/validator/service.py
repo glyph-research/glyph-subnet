@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -560,7 +561,10 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
         # keyed by the same beacon-derived seed used for stream-window sampling below -- no
         # shared file, no owner-run oracle process, and every validator lands on byte-identical
         # chunks by construction (issue #71).
-        provider = resolve_live_corpus(str(seed))
+        # HF_TOKEN is optional (anonymous streaming still works) but avoids intermittent
+        # 403/AccessDenied from HF's Xet-backed CDN throttling fully anonymous traffic
+        # (issue #108) -- a free-tier read token is enough, no special dataset permissions.
+        provider = resolve_live_corpus(str(seed), token=os.environ.get("HF_TOKEN"))
         specs = _select_specs(args, provider, seed)
         scored_specs = _scored_specs(specs)
         baseline = zstd_baseline_ratio(
