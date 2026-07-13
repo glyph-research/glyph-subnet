@@ -25,8 +25,8 @@ class WandbLogger:
         self,
         *,
         enabled: bool = True,
-        project: str = "glyph-subnet",
-        entity: str | None = None,
+        project: str = "text-compression",
+        entity: str | None = "glyph-research-org",
         offline: bool = False,
         notes: str | None = None,
         restart_interval_hours: float = 24.0,
@@ -120,8 +120,8 @@ def make_wandb_logger(args) -> WandbLogger:
         return _NullWandbLogger()
     return WandbLogger(
         enabled=True,
-        project=getattr(args, "wandb_project", "glyph-subnet") or "glyph-subnet",
-        entity=getattr(args, "wandb_entity", None),
+        project=getattr(args, "wandb_project", "text-compression") or "text-compression",
+        entity=getattr(args, "wandb_entity", "glyph-research-org"),
         offline=getattr(args, "wandb_offline", False),
         notes=getattr(args, "wandb_notes", None),
         restart_interval_hours=getattr(args, "wandb_restart_interval", 24.0),

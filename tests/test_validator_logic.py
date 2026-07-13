@@ -567,6 +567,23 @@ def test_weight_setter_loops_by_default_and_once_opts_out():
     assert legacy_args.once is False
 
 
+# --- wandb defaults (issue #102) --------------------------------------------------
+
+
+def test_wandb_defaults_to_glyph_research_org_text_compression():
+    from validator.service import build_parser as validator_build_parser
+
+    default_args = validator_build_parser().parse_args([])
+    assert default_args.wandb_project == "text-compression"
+    assert default_args.wandb_entity == "glyph-research-org"
+
+    override_args = validator_build_parser().parse_args(
+        ["--wandb.project", "my-proj", "--wandb.entity", "my-team"]
+    )
+    assert override_args.wandb_project == "my-proj"
+    assert override_args.wandb_entity == "my-team"
+
+
 def test_main_loops_continuously_without_once_or_loop_flag(monkeypatch):
     # issue #79: this used to run exactly one round and exit unless --loop was passed, with no
     # indication anywhere that this was expected -- prove main() now keeps going by default.

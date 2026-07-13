@@ -155,10 +155,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable Weights & Biases logging (default: ON). Pure observability -- disabling "
         "it changes nothing about scoring/promotion/weights/burn.",
     )
-    parser.add_argument("--wandb.project", dest="wandb_project", default="glyph-subnet")
+    parser.add_argument("--wandb.project", dest="wandb_project", default="text-compression")
     parser.add_argument(
-        "--wandb.entity", dest="wandb_entity", default=None,
-        help="wandb entity (team/org). Defaults to your wandb account if unset.",
+        "--wandb.entity", dest="wandb_entity", default="glyph-research-org",
+        help="wandb entity (team/org). Defaults to the glyph-research-org team run.",
     )
     parser.add_argument(
         "--wandb.offline", dest="wandb_offline", action="store_true",

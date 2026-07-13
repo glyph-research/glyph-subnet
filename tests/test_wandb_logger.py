@@ -88,6 +88,16 @@ def test_offline_mode_passed_through(fake_wandb):
     assert fake_wandb.init.call_args.kwargs["mode"] == "offline"
 
 
+def test_make_wandb_logger_defaults_to_glyph_research_org_text_compression(fake_wandb):
+    # issue #102: an args object that never set wandb_project/wandb_entity at all (e.g.
+    # constructed programmatically rather than via build_parser) must still land the run in
+    # the glyph-research-org/text-compression team project, not an arbitrary/personal one.
+    args = argparse.Namespace(wandb_off=False)
+    logger = make_wandb_logger(args)
+    assert logger._project == "text-compression"
+    assert logger._entity == "glyph-research-org"
+
+
 def test_build_round_metrics_has_expected_keys_for_simulated_round():
     outcomes = {"hkA": _outcome("hkA", 0.42), "hkB": _outcome("hkB", 0.5)}
     metrics = build_round_metrics(
