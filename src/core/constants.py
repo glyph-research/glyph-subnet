@@ -22,6 +22,16 @@ COMPACT_COMMITMENT_PREFIX = "g1|"
 # mempool watcher who only learns repo|rev at reveal time can never commit earlier.
 COMMIT_PHASE_PREFIX = "g1c|"
 REVEAL_PHASE_PREFIX = "g1r|"
+# Observability-only record of the current champion (issue #103), published by a validator
+# on its own hotkey's commitment slot (unused by any other validator code path) whenever the
+# crown changes. Distinct payload/prefix from the miner commit/reveal forms above, since it's
+# a different kind of thing occupying the same on-chain commitment mechanism. NEVER trusted
+# as ground truth by any validator's own scoring/promotion -- every validator always
+# independently re-benchmarks the on-chain codec commitments (reigning champion included)
+# every round; this exists purely as a cheap, auditable crown-change trail for
+# tooling/dashboards and a bootstrapping cross-check signal.
+WINNER_COMMITMENT_PREFIX = "g1w|"
+WINNER_COMMITMENT_VERSION = 1
 # Commit-reveal polling/pruning (exploit vector #9 follow-ups, issue #21).
 # A reveal lands ~1 block after its commit, so validators must observe commitments at
 # roughly block cadence to capture the commit-phase block (full eval rounds are far too
