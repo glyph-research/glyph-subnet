@@ -57,6 +57,7 @@ from eval.runner import (
     ArtifactRef,
     CompressOutcome,
     DecompressOutcome,
+    InsufficientGpuMemoryError,
     ResourceCaps,
     RunnerError,
     StreamInput,
@@ -77,6 +78,11 @@ _DEFAULT_CONTAINER_USER = "65534:65534"
 _FORWARDED_ENV_VARS = ("CUDA_VISIBLE_DEVICES", "GLYPH_TS_ZIP_DEVICE", "GLYPH_TS_ZIP_THREADS")
 _WARMUP_READY_POLL_SECS = 1.0
 _MIN_CONTAINER_CREATE_TIMEOUT_SECS = 60.0
+# Headroom required above a manifest's declared resources["vram_gb"] before launching that
+# codec's container (issue #105): declared values are miner-supplied and not verified
+# elsewhere, and a prior container's leaked/still-tearing-down memory shouldn't be counted as
+# available. Flat rather than proportional so it means the same thing at any declared size.
+_GPU_MEMORY_HEADROOM_GB = 2.0
 
 
 def _allow_sandbox_read_tree(root: Path) -> None:
@@ -170,6 +176,63 @@ def _verify_gpu_model(gpu_device: str | None, reference_gpu: str) -> None:
         raise RunnerError(
             f"DockerRunner requires GPU model containing {reference_gpu!r} for cross-validator "
             f"throughput comparability; found: {', '.join(mismatched)}"
+        )
+
+
+def _free_gpu_memory_gb(gpu_device: str | None) -> float | None:
+    """Minimum free VRAM (GiB) across the GPU(s) this runner would use, via ``nvidia-smi``.
+
+    Returns None if it cannot be determined (missing binary, query failure, unparseable
+    output) so the caller skips the preflight check rather than false-failing a codec on a
+    host-tooling hiccup unrelated to actual GPU capacity.
+    """
+
+    if shutil.which("nvidia-smi") is None:
+        return None
+    cmd = ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]
+    if gpu_device:
+        cmd += ["-i", gpu_device]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if proc.returncode != 0:
+            return None
+        values_mib = [int(line.strip()) for line in proc.stdout.splitlines() if line.strip()]
+    except Exception:  # noqa: BLE001
+        return None
+    if not values_mib:
+        return None
+    return min(values_mib) / 1024.0  # nvidia-smi reports MiB; report the tightest GPU
+
+
+def _check_gpu_memory(manifest, gpu_device: str | None) -> None:
+    """Fail closed before launching a codec's container if its declared
+    ``resources["vram_gb"]`` plus a safety margin doesn't fit in currently-free VRAM
+    (issue #105).
+
+    Distinguishes a host-capacity problem (this GPU doesn't have room right now, e.g. a
+    leaked/still-tearing-down prior container in the same round) from an entrypoint crash, so
+    it surfaces as InsufficientGpuMemoryError rather than an indistinguishable "entrypoint
+    exited ..." RunnerError. A manifest with no declared ``vram_gb``, or a host where free
+    memory can't be determined, has nothing to check against and is skipped -- this is a
+    defense-in-depth capacity guard, not a replacement for the manifest schema requiring the
+    field.
+    """
+
+    declared = manifest.resources.get("vram_gb")
+    if declared is None:
+        return
+    try:
+        needed_gb = float(declared) + _GPU_MEMORY_HEADROOM_GB
+    except (TypeError, ValueError):
+        return
+    free_gb = _free_gpu_memory_gb(gpu_device)
+    if free_gb is None:
+        return
+    if free_gb < needed_gb:
+        raise InsufficientGpuMemoryError(
+            f"insufficient free GPU memory: need ~{needed_gb:.1f} GiB "
+            f"(declared {float(declared):.1f} GiB + {_GPU_MEMORY_HEADROOM_GB:.1f} GiB headroom), "
+            f"{free_gb:.1f} GiB free"
         )
 
 
@@ -277,6 +340,8 @@ class DockerRunner:
         image (issue #48's networked warmup/seal/benchmark lifecycle) or not (the original
         single-shot ``--network none``-from-start path, unchanged)."""
 
+        if self.gpu:
+            _check_gpu_memory(manifest, self.gpu_device)
         if manifest.image is not None:
             return self._run_networked_lifecycle(argv, artifact_dir, tmp_dir, caps, manifest, input_data)
         (tmp_dir / "in.bin").write_bytes(input_data)

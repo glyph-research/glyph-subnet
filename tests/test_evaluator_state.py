@@ -1,11 +1,12 @@
 import json
 from pathlib import Path
 
+import pytest
 from bittensor.utils.btlogging import logging as bt_logging
 
 from eval.corpus import StaticLocalProvider
-from eval.evaluator import paired_eval
-from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
+from eval.evaluator import evaluate_artifact, paired_eval
+from eval.runner import ArtifactRef, InsufficientGpuMemoryError, LocalSubprocessRunner, ResourceCaps
 from core.state import ScoreState, ValidatorState, load_state, save_state
 from eval.streams import sample_source_streams
 from core.weights import WinnerEntry
@@ -57,6 +58,29 @@ def test_paired_eval_reference_valid_broken_invalid(tmp_path):
     assert outcomes["hk_broken"].score.valid is False
     # burn-seed material is available from the valid codec's per-stream outputs
     assert len(outcomes["hk_ref"].burn_outputs()) == 3
+
+
+# --- GPU-memory host fault must abort, not invalidate/exclude the codec (issue #105) ------
+
+
+class _OutOfGpuMemoryRunner:
+    def run_stream(self, artifact, stream, *, caps):
+        raise InsufficientGpuMemoryError("insufficient free GPU memory: need ~22.0 GiB, 5.0 GiB free")
+
+
+def test_evaluate_artifact_propagates_gpu_memory_fault_instead_of_invalidating(tmp_path):
+    provider = StaticLocalProvider(CORPUS)
+    specs = sample_source_streams(42, 0, provider.total_bytes, stream_bytes=4096, streams=1)
+    artifact = ArtifactRef("hk/codec", "local", local_path=str(tmp_path))
+
+    # Must raise (round aborts, this codec is never scored or one-shot-excluded) -- not
+    # return an EvalOutcome with an invalid result, which is what happens for a genuine
+    # entrypoint crash (see test_paired_eval_reference_valid_broken_invalid above).
+    with pytest.raises(InsufficientGpuMemoryError):
+        evaluate_artifact(
+            _OutOfGpuMemoryRunner(), "hk_gpu_starved", artifact, provider, specs,
+            caps=ResourceCaps(), floor_bps=FLOOR, budget_secs=BUDGET,
+        )
 
 
 def test_evaluate_artifact_logs_per_stream_progress_and_result(tmp_path, caplog):
