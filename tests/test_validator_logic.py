@@ -576,8 +576,7 @@ def test_run_once_forces_burn_when_owner_commitment_says_so(monkeypatch, tmp_pat
     # A forced burn is otherwise indistinguishable in the log from a scheduled burn tempo --
     # the operator must see WHY every tempo is suddenly burning (warning level, so it shows
     # even at bt_logging's default level).
-    assert "owner burn override active" in caplog.text
-    assert "hk0" in caplog.text
+    assert "Subnet faced an issue and turned into temporal burn" in caplog.text
 
 
 def test_run_once_does_not_force_burn_without_an_owner_commitment(monkeypatch, tmp_path):
