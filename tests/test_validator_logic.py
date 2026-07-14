@@ -927,3 +927,105 @@ def test_select_specs_bare_source_falls_back_to_eval_streams(tmp_path):
     specs = _select_specs(args, provider, seed=42)
     assert len(specs) == 2
     assert all(s.source == "demo" and s.scored for s in specs)
+
+
+# --- version-key mismatch waits for the chain instead of killing the process (#120) ------
+
+
+def _version_mismatch_setup(monkeypatch, tmp_path):
+    """Common stubs: version check raises SystemExit; anything past it must not run."""
+
+    state = ValidatorState()
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: _FakeChain())
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+
+    def mismatch(chain):
+        raise SystemExit("version key mismatch: local 1010 != chain 1001")
+
+    monkeypatch.setattr("validator.service._assert_version_key_matches", mismatch)
+
+    def must_not_run(*a, **k):
+        raise AssertionError("must not evaluate/score/set weights under a version mismatch")
+
+    monkeypatch.setattr("validator.service._evaluate_round", must_not_run)
+    monkeypatch.setattr("validator.service.decide_weights", must_not_run)
+
+    return type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": False, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+
+def test_run_once_waits_out_a_version_mismatch_instead_of_exiting(monkeypatch, tmp_path, caplog):
+    # SystemExit inherits from BaseException, so it sailed straight past main()'s
+    # `except Exception` retry loop and killed the whole process on the first round of every
+    # release rollout (pm2 crash-restart loop) until the on-chain weights_version caught up.
+    args = _version_mismatch_setup(monkeypatch, tmp_path)
+
+    run_once(args, wandb_logger=_FakeWandb())  # must return, not raise SystemExit
+
+    assert "weights_version mismatch, waiting for on-chain update" in caplog.text
+
+
+def test_run_reign_only_waits_out_a_version_mismatch_instead_of_exiting(monkeypatch, tmp_path, caplog):
+    args = _version_mismatch_setup(monkeypatch, tmp_path)
+
+    run_reign_only(args, wandb_logger=_FakeWandb())  # must return, not raise SystemExit
+
+    assert "weights_version mismatch, waiting for on-chain update" in caplog.text
+
+
+def test_other_systemexits_in_the_round_still_propagate(monkeypatch, tmp_path):
+    # The catch must be scoped to the version check only -- genuine misconfiguration (e.g.
+    # --corpus-dir misuse raised from _evaluate_round) needs operator intervention, won't
+    # self-heal with time, and must keep hard-stopping the process as before.
+    state = ValidatorState()
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: _FakeChain())
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+
+    def misconfigured(*a, **k):
+        raise SystemExit("--corpus-dir is offline-demo-only")
+
+    monkeypatch.setattr("validator.service._evaluate_round", misconfigured)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": False, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    with pytest.raises(SystemExit, match="offline-demo-only"):
+        run_once(args, wandb_logger=_FakeWandb())
+
+
+def test_weight_setter_run_waits_out_a_version_mismatch_instead_of_exiting(monkeypatch, tmp_path, caplog):
+    import weight_setter.service as ws
+
+    monkeypatch.setattr(ws, "load_state", lambda path: ValidatorState())
+
+    class _NoTouchChain:
+        def __getattr__(self, name):
+            raise AssertionError(f"chain.{name} must not be reached under a version mismatch")
+
+    monkeypatch.setattr("chain.chain.BittensorChain", lambda config: _NoTouchChain())
+
+    def mismatch(chain):
+        raise SystemExit("version key mismatch: local 1010 != chain 1001")
+
+    monkeypatch.setattr(ws, "assert_weights_version_matches", mismatch)
+
+    args = type(
+        "Args", (),
+        {
+            "state_dir": str(tmp_path), "netuid": 117, "network": "finney",
+            "wallet_name": "w", "hotkey_name": "h", "wallet_path": None,
+            "burn_uid": 0, "window_anchor": 0, "dry_run": False,
+        },
+    )()
+
+    ws.run(args)  # must return, not raise SystemExit
+
+    assert "weights_version mismatch, waiting for on-chain update" in caplog.text

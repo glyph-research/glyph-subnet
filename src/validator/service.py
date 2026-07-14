@@ -702,7 +702,19 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         chain = _make_chain(args)
         wandb_logger = wandb_logger or make_wandb_logger(args, identity_name=_wandb_identity_name(chain))
         version_key = _local_version_key()
-        bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
+        try:
+            bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
+        except SystemExit as exc:
+            # A version-key mismatch is the expected, transient state during a release
+            # rollout until the owner updates the on-chain weights_version hyperparameter --
+            # it self-heals with time, unlike genuine misconfiguration. Skip this cycle
+            # (nothing scored, no weights set -- same safety property as exiting) and let the
+            # outer loop's normal sleep/retry cadence pick up once the chain catches up,
+            # instead of letting SystemExit sail past main()'s `except Exception` and kill
+            # the process into a pm2 crash-restart loop (issue #120). Scoped to the version
+            # check only: any other SystemExit still hard-stops as before.
+            bt_logging.warning(f"weights_version mismatch, waiting for on-chain update: {exc}")
+            return
         if not chain.commit_reveal_enabled():
             bt_logging.warning("commit-reveal is not enabled on this subnet; anti-copy weights are weaker")
 
@@ -779,7 +791,13 @@ def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = 
 
         chain = _make_chain(args)
         wandb_logger = wandb_logger or make_wandb_logger(args, identity_name=_wandb_identity_name(chain))
-        bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
+        try:
+            bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
+        except SystemExit as exc:
+            # Same as run_once (issue #120): a release-rollout mismatch self-heals once the
+            # on-chain weights_version updates -- skip the cycle, don't kill the process.
+            bt_logging.warning(f"weights_version mismatch, waiting for on-chain update: {exc}")
+            return
         _block, round_metrics, _raw_commitments = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
             wandb_logger.log(round_metrics)
