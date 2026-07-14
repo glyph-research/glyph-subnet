@@ -438,8 +438,9 @@ class _FakeWandb:
 
 
 class _FakeChain:
-    def __init__(self, rate_limit_remaining=None):
+    def __init__(self, rate_limit_remaining=None, raw_commitments=None):
         self._rate_limit_remaining = rate_limit_remaining
+        self._raw_commitments = raw_commitments or {}
         self.set_weights_called = False
 
     def commit_reveal_enabled(self):
@@ -450,6 +451,9 @@ class _FakeChain:
 
     def metagraph(self):
         return type("Metagraph", (), {"hotkeys": ["hk0"], "uids": [0]})()
+
+    def get_all_commitments(self):
+        return self._raw_commitments
 
     def set_weights(self, uids, weights, version_key):
         self.set_weights_called = True
@@ -472,7 +476,10 @@ def test_run_once_prints_champion_and_concise_set_weights_on_a_quiet_round(monke
     monkeypatch.setattr("validator.service._make_chain", lambda args: _FakeChain())
     monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
-    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+    monkeypatch.setattr(
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+    )
     monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
 
     args = type(
@@ -497,7 +504,10 @@ def test_run_once_prints_no_champion_when_history_empty(monkeypatch, tmp_path, c
     monkeypatch.setattr("validator.service._make_chain", lambda args: _FakeChain())
     monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
-    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+    monkeypatch.setattr(
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+    )
     monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
 
     args = type(
@@ -524,7 +534,10 @@ def test_run_once_skips_set_weights_when_rate_limited(monkeypatch, tmp_path, cap
     monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
     monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
-    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+    monkeypatch.setattr(
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+    )
     monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
 
     args = type(
@@ -536,6 +549,123 @@ def test_run_once_skips_set_weights_when_rate_limited(monkeypatch, tmp_path, cap
 
     assert fake_chain.set_weights_called is False
     assert "set_weights: skipped, rate-limited (42 blocks remaining)" in caplog.text
+
+
+# --- owner emergency burn override wired into run_once (issue #113) ---------------
+
+
+def test_run_once_forces_burn_when_owner_commitment_says_so(monkeypatch, tmp_path, caplog):
+    from core.commitments import BurnOverrideCommitment, serialize_burn_override
+
+    state = ValidatorState()
+    # hotkeys=["hk0"], burn_uid=0 -> owner hotkey is "hk0" (see _FakeChain.metagraph).
+    override_raw = serialize_burn_override(BurnOverrideCommitment(force_burn=True))
+    fake_chain = _FakeChain(raw_commitments={"hk0": override_raw})
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr(
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+    )
+
+    captured = {}
+
+    def fake_decide_weights(*a, **kwargs):
+        captured["force_burn"] = kwargs.get("force_burn")
+        return [1.0], True
+
+    monkeypatch.setattr("validator.service.decide_weights", fake_decide_weights)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": True, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())
+
+    assert captured["force_burn"] is True
+    # A forced burn is otherwise indistinguishable in the log from a scheduled burn tempo --
+    # the operator must see WHY every tempo is suddenly burning (warning level, so it shows
+    # even at bt_logging's default level), including the actionable cause (the owner's
+    # on-chain override), not just that a burn happened.
+    assert "Subnet faced an issue and turned into temporal burn" in caplog.text
+    assert "force_burn=true" in caplog.text
+
+
+def test_run_once_does_not_force_burn_without_an_owner_commitment(monkeypatch, tmp_path):
+    state = ValidatorState()
+    fake_chain = _FakeChain()  # no raw_commitments at all
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr(
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+    )
+
+    captured = {}
+
+    def fake_decide_weights(*a, **kwargs):
+        captured["force_burn"] = kwargs.get("force_burn")
+        return [1.0], False
+
+    monkeypatch.setattr("validator.service.decide_weights", fake_decide_weights)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": True, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())
+
+    assert captured["force_burn"] is False
+
+
+def test_run_once_reads_the_override_from_the_round_commitments_without_a_second_fetch(monkeypatch, tmp_path):
+    # Review feedback on #114: _evaluate_round already fetched get_all_commitments() for
+    # precheck; run_once's burn-override check must reuse that dict, not re-fetch. A chain
+    # object whose get_all_commitments raises proves run_once itself never calls it.
+    state = ValidatorState()
+    fake_chain = _FakeChain()
+
+    def _boom():
+        raise AssertionError("run_once must not make a second get_all_commitments call")
+
+    fake_chain.get_all_commitments = _boom
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    # The round's already-fetched dict is what _evaluate_round returns -- empty here.
+    monkeypatch.setattr(
+        "validator.service._evaluate_round", lambda args, state, chain, salt: (999, None, {})
+    )
+
+    captured = {}
+
+    def fake_decide_weights(*a, **kwargs):
+        captured["force_burn"] = kwargs.get("force_burn")
+        return [1.0], False
+
+    monkeypatch.setattr("validator.service.decide_weights", fake_decide_weights)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": True, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())  # must not raise
+
+    assert captured["force_burn"] is False
 
 
 # --- --loop/--once default (issue #79) ------------------------------------------
@@ -633,7 +763,9 @@ def test_run_once_builds_chain_before_wandb_logger_and_passes_identity(monkeypat
     monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
     monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
-    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+    monkeypatch.setattr(
+        "validator.service._evaluate_round", lambda args, state, chain, salt: (999, None, {})
+    )
     monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
 
     captured = {}
@@ -664,7 +796,9 @@ def test_run_reign_only_builds_chain_before_wandb_logger_and_passes_identity(mon
     monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
     monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
-    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+    monkeypatch.setattr(
+        "validator.service._evaluate_round", lambda args, state, chain, salt: (999, None, {})
+    )
 
     captured = {}
 

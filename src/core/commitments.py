@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field, field_validator
 
 from core.constants import (
+    BURN_OVERRIDE_PREFIX,
+    BURN_OVERRIDE_VERSION,
     COMMIT_PHASE_PREFIX,
     COMMITMENT_PREFIX,
     COMMITMENT_VERSION,
@@ -83,6 +85,20 @@ class CodecCommitment(BaseModel):
         return f"{self.repo}@{self.rev}"
 
 
+class BurnOverrideCommitment(BaseModel):
+    """Owner-controlled emergency burn override (issue #113).
+
+    Published by the subnet owner (whichever hotkey currently occupies BURN_UID on the live
+    metagraph) on its own commitment slot. Every validator checks for this every tempo --
+    ``force_burn=true`` forces 100% burn regardless of the normal schedule, effective
+    network-wide with no code deploy. Additive-only: a missing, malformed, or
+    ``force_burn=false`` commitment always falls through to the unchanged existing schedule.
+    """
+
+    v: int = Field(default=BURN_OVERRIDE_VERSION)
+    force_burn: bool
+
+
 @dataclass(frozen=True)
 class ParsedCommitment:
     hotkey: str
@@ -125,6 +141,30 @@ def parse_commit_phase_digest(raw: str) -> str | None:
     if data.startswith(COMMIT_PHASE_PREFIX):
         return data[len(COMMIT_PHASE_PREFIX) :]
     return None
+
+
+def serialize_burn_override(override: BurnOverrideCommitment) -> str:
+    """Serialize the owner's emergency burn-override commitment (issue #113)."""
+
+    payload = override.model_dump(mode="json")
+    return f"{BURN_OVERRIDE_PREFIX}{json.dumps(payload, sort_keys=True)}"
+
+
+def parse_burn_override(raw: str) -> BurnOverrideCommitment | None:
+    """Parse an owner-published burn-override commitment, or ``None`` if ``raw`` isn't one,
+    is malformed, or is an unsupported future version."""
+
+    data = raw.strip()
+    if not data.startswith(BURN_OVERRIDE_PREFIX):
+        return None
+    try:
+        payload = json.loads(data[len(BURN_OVERRIDE_PREFIX) :])
+        override = BurnOverrideCommitment.model_validate(payload)
+    except Exception:
+        return None
+    if override.v != BURN_OVERRIDE_VERSION:
+        return None
+    return override
 
 
 def parse_commitment(raw: str) -> tuple[CodecCommitment, str | None]:
