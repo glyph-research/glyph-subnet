@@ -70,7 +70,9 @@ design** (`DockerRunner` checks the GPU model via `nvidia-smi` and refuses to ru
 else). See [docs/VALIDATING.md](docs/VALIDATING.md) for the full requirement and CPU-only opt-out.
 
 Every validator builds its own copy of the evaluation corpus live from HuggingFace
-(FineWeb + Pile + enwik9), keyed by the round's on-chain beacon — no owner-run oracle
+(FineWeb-Edu + Pile, 2x/1x scored mix, plus enwik9 as a benchmark-only display window),
+keyed by the round's on-chain beacon and a seed-derived dataset shard so the reachable
+sampling range is the whole dataset, not a fixed slice (issue #112) — no owner-run oracle
 process, no shared corpus file to host or keep in sync (issue #71); see
 [docs/VALIDATING.md](docs/VALIDATING.md#corpus) for the determinism guarantee.
 
@@ -106,10 +108,12 @@ See [docs/VALIDATING.md](docs/VALIDATING.md) and [docs/reign-and-burn.md](docs/r
 
 ## Version safety
 
-The validator fail-closes when `core.__version_key__` ≠ the subnet's on-chain
-`weights_version`. With commit-reveal enabled, `set_weights` auto-routes through
-commit/reveal. The PM2 auto-updater (`scripts/run_auto_validator.sh`) tracks
-`glyph-research/glyph-subnet`.
+The validator never scores or sets weights while `core.__version_key__` ≠ the subnet's
+on-chain `weights_version` — a mismatch (expected briefly during a version-bump release,
+until the owner updates the on-chain hyperparameter) logs a warning and idles, retrying
+each round, rather than crashing the process (issue #120). With commit-reveal enabled,
+`set_weights` auto-routes through commit/reveal. The PM2 auto-updater
+(`scripts/run_auto_validator.sh`) tracks `glyph-research/glyph-subnet`.
 
 ## Tests
 
