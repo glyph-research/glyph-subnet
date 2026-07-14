@@ -22,6 +22,25 @@ COMPACT_COMMITMENT_PREFIX = "g1|"
 # mempool watcher who only learns repo|rev at reveal time can never commit earlier.
 COMMIT_PHASE_PREFIX = "g1c|"
 REVEAL_PHASE_PREFIX = "g1r|"
+# Observability-only record of the current champion (issue #103), published by a validator
+# on its own hotkey's commitment slot (unused by any other validator code path) whenever the
+# crown changes. Distinct payload/prefix from the miner commit/reveal forms above, since it's
+# a different kind of thing occupying the same on-chain commitment mechanism. NEVER trusted
+# as ground truth by any validator's own scoring/promotion -- every validator always
+# independently re-benchmarks the on-chain codec commitments (reigning champion included)
+# every round; this exists purely as a cheap, auditable crown-change trail for
+# tooling/dashboards and a bootstrapping cross-check signal.
+WINNER_COMMITMENT_PREFIX = "g1w|"
+WINNER_COMMITMENT_VERSION = 1
+# On-chain, owner-controlled emergency burn override (issue #113): the subnet owner (whichever
+# hotkey currently occupies BURN_UID on the live metagraph) can publish {v, force_burn} on its
+# own commitment slot; force_burn=true makes every validator burn 100% every tempo regardless
+# of the normal schedule, effective network-wide with no code deploy. Distinct prefix so it can
+# never collide with the miner commit/reveal/compact forms above. Additive-only by design: a
+# missing, malformed, or force_burn=false commitment always falls through to the unchanged
+# existing schedule -- this can only ever force MORE burning, never suppress a scheduled one.
+BURN_OVERRIDE_PREFIX = "g1b|"
+BURN_OVERRIDE_VERSION = 1
 # Commit-reveal polling/pruning (exploit vector #9 follow-ups, issue #21).
 # A reveal lands ~1 block after its commit, so validators must observe commitments at
 # roughly block cadence to capture the commit-phase block (full eval rounds are far too
@@ -61,13 +80,28 @@ SCRATCH_CAP_BYTES = 117 * 2**30  # 117 GiB
 
 MAX_CHALLENGERS_PER_ROUND = 32
 
-# --- Per-source evaluation (issue #10) ----------------------------------------
-# Score each miner on two random 4 MiB FineWeb windows and two random 4 MiB Pile windows.
-# The score is the mean of the FineWeb average and the Pile average, so each dataset carries
-# equal weight. enwik9 runs as a one-window benchmark display only: it is not scored and
-# does not affect validity. Window starts are salt-seeded (see eval/streams.derive_seed), so
-# each validator independently picks fresh random windows every benchmarking round.
-EVAL_SOURCE = "fineweb,pile"
+# Version stamp for the scoring surfaces that determine a codec's measured ratio (issue
+# #104): eval/scoring.py's aggregation formula, BASELINE_LEVEL, the corpus source list/
+# sampling, and the validity gates (roundtrip check, throughput floor). Bump this whenever a
+# change to any of those would change a codec's measured ratio -- ScoreState entries stamped
+# with an older value are dropped on state load (core.state.load_state) rather than trusted
+# forever, so every hotkey (including a reigning champion, including one-shot-excluded
+# losers) gets fairly re-benchmarked under the new rules instead of being silently compared
+# against numbers computed under the old ones.
+# v2 (issue #112): shard-randomized corpus sampling, fineweb -> fineweb-edu (2x/1x mix),
+# retired pile shard 0 (burned range), flat-average scored_ratio. Invalidates every score
+# computed under the exploitable prefix-bounded sampler -- the exploiting champion included.
+SCORING_VERSION = 2
+
+# --- Per-source evaluation (issue #10; remixed by issue #112) -------------------
+# Score each miner on three 4 MiB windows: two random fineweb-edu windows and one pile
+# window, each stream weighted equally in the final score (flat average -- see
+# eval/scoring.scored_ratio). The "name:count" syntax sets per-source scored stream counts;
+# a bare name falls back to --eval-streams. enwik9 runs as a one-window benchmark display
+# only: it is not scored and does not affect validity. Window starts are salt-seeded (see
+# eval/streams.derive_seed), so each validator independently picks fresh random windows
+# every benchmarking round.
+EVAL_SOURCE = "fineweb-edu:2,pile:1"
 EVAL_BENCHMARK_SOURCE = "enwik9"
 EVAL_STREAMS = 2
 EVAL_BENCHMARK_STREAMS = 1

@@ -15,11 +15,27 @@ from pathlib import Path
 from bittensor.utils.btlogging import logging as bt_logging
 
 from core.burn_schedule import derive_burn_seed, is_burn_tempo
+from core.commitments import parse_burn_override
 from core.constants import BURN_ENABLED, BURN_UID, DEFAULT_NETUID, WINDOW_ANCHOR_BLOCK
 from core.log_config import add_logging_args
 from core.state import load_state
 from core.version import assert_weights_version_matches, local_version_key
 from core.weights import WinnerEntry, compute_weights
+
+
+def resolve_force_burn(raw_commitments: dict[str, str], owner_hotkey: str) -> bool:
+    """True only if ``owner_hotkey`` (whichever hotkey currently occupies BURN_UID on the
+    live metagraph) has published a ``force_burn=true`` commitment (issue #113).
+
+    Missing, malformed, or ``force_burn=false`` all resolve to False -- this is strictly
+    additive (can only ever force MORE burning), never a way to suppress a scheduled burn.
+    """
+
+    raw = raw_commitments.get(owner_hotkey)
+    if not raw:
+        return False
+    override = parse_burn_override(raw)
+    return bool(override and override.force_burn)
 
 
 def decide_weights(
@@ -31,15 +47,21 @@ def decide_weights(
     last_round_outputs,
     anchor: int = WINDOW_ANCHOR_BLOCK,
     burn_uid: int = BURN_UID,
+    force_burn: bool = False,
 ) -> tuple[list[float], bool]:
     """Compute the weights for the current tempo, applying the temporal burn schedule.
 
     Short-circuits to "never a burn tempo" when ``core.constants.BURN_ENABLED`` is False
     (issue #43) -- a network-wide, source-committed switch, not a per-operator override.
+
+    ``force_burn`` (issue #113) is the caller's already-resolved on-chain owner override
+    (see ``resolve_force_burn``): when True, burn unconditionally regardless of
+    ``BURN_ENABLED``/the schedule -- an emergency, owner-controlled kill switch, additive
+    only (can force a burn tempo, never suppress one).
     """
 
     seed = derive_burn_seed(last_round_outputs)
-    burn = BURN_ENABLED and is_burn_tempo(block, tempo, seed, anchor)
+    burn = force_burn or (BURN_ENABLED and is_burn_tempo(block, tempo, seed, anchor))
     weights = compute_weights(hotkeys, history, is_burn_tempo=burn, burn_uid=burn_uid)
     return weights, burn
 
@@ -85,7 +107,17 @@ def run(args: argparse.Namespace) -> None:
         )
     )
     version_key = local_version_key()
-    bt_logging.info(f"version key ok: {assert_weights_version_matches(chain)}")
+    try:
+        bt_logging.info(f"version key ok: {assert_weights_version_matches(chain)}")
+    except SystemExit as exc:
+        # A version-key mismatch is the expected, transient state during a release rollout
+        # until the owner updates the on-chain weights_version hyperparameter -- skip this
+        # cycle (no weights set) and let main()'s sleep/retry loop pick up once the chain
+        # catches up, instead of SystemExit sailing past `except Exception` and killing the
+        # process into a pm2 crash-restart loop (issue #120). Scoped to the version check
+        # only: any other SystemExit still hard-stops as before.
+        bt_logging.warning(f"weights_version mismatch, waiting for on-chain update: {exc}")
+        return
     block = chain.current_block()
     tempo = chain.tempo()
     anchor = (
@@ -97,6 +129,26 @@ def run(args: argparse.Namespace) -> None:
     hotkeys = list(metagraph.hotkeys)
     uids = [int(uid) for uid in metagraph.uids]
 
+    # Owner emergency burn override (issue #113) -- best-effort: a chain hiccup here must
+    # not block weight-setting, so it just falls through to the unchanged normal schedule.
+    try:
+        raw_commitments = chain.get_all_commitments()
+    except Exception:
+        raw_commitments = {}
+    force_burn = (
+        resolve_force_burn(raw_commitments, hotkeys[args.burn_uid])
+        if 0 <= args.burn_uid < len(hotkeys)
+        else False
+    )
+    if force_burn:
+        # Without this line, a forced burn is indistinguishable in the log from an ordinary
+        # scheduled burn tempo -- except it happens EVERY tempo, which reads as a bug unless
+        # the operator knows the owner override is active.
+        bt_logging.warning(
+            "Subnet faced an issue and turned into temporal burn "
+            "(owner emergency override: on-chain force_burn=true) -- burning 100% this tempo"
+        )
+
     weights, burn = decide_weights(
         hotkeys,
         state.winner_history,
@@ -105,6 +157,7 @@ def run(args: argparse.Namespace) -> None:
         last_round_outputs=state.last_round_outputs,
         anchor=anchor,
         burn_uid=args.burn_uid,
+        force_burn=force_burn,
     )
     nonzero = [(uids[i], round(w, 4)) for i, w in enumerate(weights) if w > 0]
     bt_logging.info(f"block={block} tempo={tempo} burn_tempo={burn} weights={nonzero}")

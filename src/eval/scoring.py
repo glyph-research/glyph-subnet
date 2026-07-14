@@ -72,20 +72,21 @@ def source_ratio_breakdown(results: Sequence[StreamResult]) -> dict[str, float]:
 
 
 def scored_ratio(results: Sequence[StreamResult]) -> float:
-    """Final scored ratio.
+    """Final scored ratio: the flat, equally-weighted mean of each scored stream's ratio.
 
-    Labeled streams use the launch aggregation rule: mean ratio per scored dataset first,
-    then the mean of those dataset averages. Unlabeled streams keep the legacy pooled
-    compressed/raw ratio.
+    Every scored stream counts the same regardless of which source it came from (issue
+    #112). The previous mean-of-per-source-means rule weighted by *source* -- with the
+    asymmetric 2x fineweb-edu / 1x pile mix, fineweb-edu's two streams would collectively
+    count the same as pile's one. ``source_ratio_breakdown`` still exists for wandb
+    per-source visibility; it is just no longer the aggregation step for the final score.
+    Unlabeled streams keep the legacy pooled compressed/raw ratio.
     """
 
     scored = [result for result in results if result.scored]
     if not scored:
         return float("inf")
     if any(result.source is not None for result in scored):
-        breakdown = source_ratio_breakdown(scored)
-        if breakdown:
-            return sum(breakdown.values()) / len(breakdown)
+        return sum(stream_ratio(result) for result in scored) / len(scored)
     return aggregate_ratio(scored)
 
 

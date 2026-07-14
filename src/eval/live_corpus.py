@@ -7,21 +7,33 @@ operational dependency and a single point of failure -- if the oracle process st
 corpus goes stale for the whole network.
 
 Instead, each validator builds its own copy of the corpus directly, independently, from the
-same beacon-seeded skip offset -- no shared file, no owner process. Determinism across
-independent validators comes from ``_skip_for_seed`` and ``fetch_source_chunks`` being pure
-functions of ``(seed, dataset)``: given the same seed and the same pinned dataset revision,
-two validators land on byte-identical chunks without coordinating.
+same beacon-seeded shard + skip offset -- no shared file, no owner process. Determinism
+across independent validators comes from ``_shard_for_seed``/``_skip_for_seed``/
+``fetch_source_chunks`` being pure functions of ``(seed, dataset)``: given the same seed and
+the same dataset file layout, two validators land on byte-identical chunks without
+coordinating.
 
 The anti-memorisation guarantee does not rest on freshness (a mixed-source corpus rebuilt
 from a fixed dataset revision is no less resistant to memorisation than one rebuilt daily --
 see ``MIXED_SOURCES``' history). It rests on:
 
-1. **Scale + an unpredictable slice.** FineWeb / The Pile are tens of TB -- far beyond what a
+1. **Scale + an unpredictable slice.** fineweb-edu / The Pile are TBs -- far beyond what a
    codec can embed under the artifact size cap. We do NOT take the fixed prefix of each
-   dataset (a miner could just memorise the first few MiB); we skip a seed-derived number of
-   records first, so *which* slice lands in the corpus is not knowable in advance. The seed is
-   the post-commitment chain beacon, so the slice is fixed for a given round yet unpredictable
+   dataset (a miner could just memorise the first few MiB). A seed-derived *shard* of the
+   dataset is selected first, THEN a seed-derived number of records is skipped within that
+   one shard (issue #112) -- the reachable universe is the whole dataset, while the
+   per-round streaming cost stays a bounded walk into one file. The seed is the
+   post-commitment chain beacon, so the slice is fixed for a given round yet unpredictable
    at commit time.
+
+   History (issue #112): the bounded skip originally applied from record 0 of the whole
+   dataset, so the entire reachable attack surface was the first ``skip_cap`` records per
+   source -- a few hundred MB, trivially embeddable, and confirmed exploited on mainnet by a
+   dictionary-lookup codec. Shard-randomisation makes the skip bound a latency decision
+   again instead of the security boundary. It still doesn't make a partial-cache hit
+   *impossible* on any single round -- it works because the incumbent is freshly
+   re-evaluated on independently-redrawn shards every round it holds the crown, so a
+   partial cache must hit on every scored source simultaneously, every round, forever.
 2. **Beacon-seeded stream sampling** (eval/streams.py) over the resolved corpus, so which
    windows are actually scored is unpredictable too.
 3. **Source mixing**, which bounds the influence of any single poisoned source to a
@@ -42,15 +54,28 @@ from eval.corpus import StaticLocalProvider
 # Minimum bytes for a record to be worth keeping (drops boilerplate/stubs).
 _MIN_DOC_BYTES = 200
 
-# Default per-round corpus shape: 8 x 2 MiB (3x FineWeb / 3x Pile / 2x enwik9), matching the
-# launch mix (issue #10).
-DEFAULT_CHUNK_BYTES = 2 * 2**20
+# Per-round corpus shape (issue #112): 5 x 4 MiB (2x fineweb-edu / 1x pile / 2x enwik9).
+# Chunk size matches EVAL_STREAM_BYTES so each scored source's span supports its scored
+# windows: fineweb-edu's 8 MiB span gives its two 4 MiB windows real start-offset freedom,
+# pile's 4 MiB span is exactly its one 4 MiB window (its per-round unpredictability comes
+# from the shard+skip randomisation of the slice itself).
+DEFAULT_CHUNK_BYTES = 4 * 2**20
+# Bounds how far the seed-derived record skip can reach WITHIN the selected shard -- purely
+# a latency cap so no validator has to walk a whole shard every round. NOT a security
+# boundary: which shard is walked is itself seed-derived out of the full dataset (issue
+# #112; this cap being the entire reachable universe was exactly the exploited flaw).
 DEFAULT_SKIP_CAP = 100_000
 
 
 @dataclass(frozen=True)
 class Source:
-    """One mixed-corpus source and how many chunk files it contributes."""
+    """One mixed-corpus source and how many chunk files it contributes.
+
+    ``excluded_shards`` retires dataset shards that are permanently compromised for scoring
+    (issue #112): pile's shard 0 covers records [0, 100_000) -- the entire reachable universe
+    of the original prefix-bounded sampler, confirmed embedded in an exploiting codec's
+    lookup dictionary -- so it is never selectable again.
+    """
 
     name: str
     dataset: str
@@ -58,13 +83,17 @@ class Source:
     split: str
     text_field: str
     chunks: int
+    excluded_shards: tuple[int, ...] = ()
 
 
-# The launch mix: 3x FineWeb / 3x Pile / 2x enwik9 (issue #10). Order here is the order the
-# chunk files are concatenated into the corpus.
+# The scored mix (issue #112): 2x fineweb-edu / 1x pile, plus 2x enwik9 (benchmark-only
+# display, not scored -- see EVAL_BENCHMARK_SOURCE). fineweb-edu's `default` config is the
+# full corpus spanning all CommonCrawl dumps (3.5+ TB), not the sample-10BT/100BT/350BT
+# convenience subsets -- brand new to scoring, so no burned-range exclusion needed. Order
+# here is the order the chunk files are concatenated into the corpus.
 MIXED_SOURCES: list[Source] = [
-    Source("fineweb", "HuggingFaceFW/fineweb", "sample-10BT", "train", "text", 3),
-    Source("pile", "monology/pile-uncopyrighted", None, "train", "text", 3),
+    Source("fineweb-edu", "HuggingFaceFW/fineweb-edu", "default", "train", "text", 2),
+    Source("pile", "monology/pile-uncopyrighted", None, "train", "text", 1, excluded_shards=(0,)),
     Source("enwik9", "haukur/enwik9", None, "train", "text", 2),
 ]
 
@@ -86,11 +115,12 @@ def _extract_text(record: dict, text_field: str) -> str:
 
 
 def _skip_for_seed(source_name: str, seed: str, dataset_records_skip_cap: int) -> int:
-    """Deterministic, seed-derived number of records to skip before sampling a source.
+    """Deterministic, seed-derived number of records to skip within the selected shard.
 
-    Taking the fixed prefix of a public dataset would let a miner memorise exactly that
-    slice, so the start offset is derived from the beacon ``seed``. It is bounded by
-    ``dataset_records_skip_cap`` so no validator has to stream forever.
+    Taking the fixed prefix of a shard would let a miner memorise every shard's prefix, so
+    the start offset within the shard is derived from the beacon ``seed`` too. It is bounded
+    by ``dataset_records_skip_cap`` so no validator has to stream forever -- a pure latency
+    cap, not the security boundary (see ``_shard_for_seed`` / issue #112).
     """
 
     digest = hashlib.sha256(f"{seed}:{source_name}".encode()).digest()
@@ -99,7 +129,37 @@ def _skip_for_seed(source_name: str, seed: str, dataset_records_skip_cap: int) -
     return int.from_bytes(digest[:8], "big") % dataset_records_skip_cap
 
 
-def _iter_dataset(source: Source, token: str | None) -> Iterator[dict]:
+def _shard_for_seed(source: Source, seed: str, num_shards: int) -> int:
+    """Deterministic, seed-derived shard index for one source, from the selectable pool.
+
+    Selecting the shard first is what makes the whole dataset the reachable sampling
+    universe (issue #112): the bounded record skip then applies within that one shard, so
+    per-round streaming cost stays a bounded walk into one file while the slice a miner
+    would have to pre-embed grows from ~skip_cap records to the entire dataset. Shards in
+    ``source.excluded_shards`` (permanently compromised ranges) are never selectable. Pure
+    function of ``(seed, source)`` -- two validators pick the same shard without
+    coordinating, as long as they see the same dataset file layout.
+    """
+
+    pool = [index for index in range(num_shards) if index not in source.excluded_shards]
+    if not pool:
+        raise RuntimeError(
+            f"source {source.name!r} has no selectable shards "
+            f"({num_shards} total, {len(source.excluded_shards)} excluded)"
+        )
+    digest = hashlib.sha256(f"{seed}:{source.name}:shard".encode()).digest()
+    return pool[int.from_bytes(digest[:8], "big") % len(pool)]
+
+
+def _iter_dataset(source: Source, token: str | None, *, seed: str) -> tuple[Iterator[dict], dict]:
+    """Open one seed-selected shard of ``source`` as a streaming record iterator.
+
+    Returns ``(iterator, shard_meta)`` where ``shard_meta`` records which shard was drawn
+    out of how many, for provenance. ``num_shards`` comes from the dataset's file layout, so
+    it is identical for every validator reading the same dataset state -- same property the
+    record contents themselves already rely on.
+    """
+
     from datasets import load_dataset
 
     dataset = load_dataset(
@@ -109,7 +169,11 @@ def _iter_dataset(source: Source, token: str | None) -> Iterator[dict]:
         streaming=True,
         token=token,
     )
-    return iter(dataset)
+    num_shards = int(dataset.n_shards)
+    shard_index = _shard_for_seed(source, seed, num_shards)
+    # num_shards == n_shards -> each group is exactly one underlying file (contiguous split).
+    dataset = dataset.shard(num_shards=num_shards, index=shard_index)
+    return iter(dataset), {"shard_index": shard_index, "num_shards": num_shards}
 
 
 def fetch_source_chunks(
@@ -123,15 +187,20 @@ def fetch_source_chunks(
 ) -> tuple[list[bytes], dict]:
     """Stream ``source`` into ``source.chunks`` chunks of ``chunk_bytes`` bytes each.
 
-    Skips a seed-derived number of records first (so the slice is not the fixed prefix), then
-    concatenates documents until the chunks are filled. ``records`` is injectable for tests;
-    in production it comes from a streaming ``datasets`` iterator. Returns the chunk byte blobs
+    Selects a seed-derived shard of the dataset (issue #112), skips a seed-derived number of
+    records within it (so the slice is not any shard's fixed prefix), then concatenates
+    documents until the chunks are filled. ``records`` is injectable for tests (bypassing
+    shard selection -- the injected iterable IS the shard); in production it comes from a
+    streaming ``datasets`` iterator over the selected shard. Returns the chunk byte blobs
     plus a provenance entry recording exactly what was drawn.
     """
 
     target = chunk_bytes * source.chunks
     skip = _skip_for_seed(source.name, seed, skip_cap)
-    iterator = iter(records) if records is not None else _iter_dataset(source, token)
+    if records is not None:
+        iterator, shard_meta = iter(records), {"shard_index": None, "num_shards": None}
+    else:
+        iterator, shard_meta = _iter_dataset(source, token, seed=seed)
 
     buffer = bytearray()
     docs = 0
@@ -151,7 +220,7 @@ def fetch_source_chunks(
     if len(buffer) < target:
         raise RuntimeError(
             f"source {source.name!r} yielded {len(buffer)} bytes, need {target} "
-            f"({source.chunks} x {chunk_bytes}); dataset exhausted or skip_cap too high"
+            f"({source.chunks} x {chunk_bytes}); shard exhausted or skip_cap too high"
         )
 
     chunks = [bytes(buffer[i * chunk_bytes : (i + 1) * chunk_bytes]) for i in range(source.chunks)]
@@ -161,6 +230,8 @@ def fetch_source_chunks(
         "config": source.config,
         "split": source.split,
         "chunks": source.chunks,
+        "shard_index": shard_meta["shard_index"],
+        "num_shards": shard_meta["num_shards"],
         "records_skipped": skip,
         "records_used": docs,
         "bytes": target,

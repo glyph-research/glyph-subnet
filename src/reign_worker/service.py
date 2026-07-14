@@ -14,6 +14,7 @@ from bittensor.utils.btlogging import logging as bt_logging
 from eval.evaluator import paired_eval
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
 from core.artifact import local_snapshot_dir
+from core.constants import SCORING_VERSION
 from core.state import CommitmentState, ScoreState, ValidatorState
 from core.weights import WinnerEntry, promote_winner, rank_key, should_promote
 
@@ -113,6 +114,7 @@ def run_round(
             valid=outcome.score.valid,
             commit_block=commitment.block or 0,
             evaluated_at_block=block,
+            scoring_version=SCORING_VERSION,
         )
 
     current_ratio = None

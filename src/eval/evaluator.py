@@ -14,7 +14,14 @@ from dataclasses import dataclass, field, replace
 from bittensor.utils.btlogging import logging as bt_logging
 
 from eval.corpus import CorpusProvider
-from eval.runner import ArtifactRef, CodecRunner, ResourceCaps, RunnerError, StreamInput
+from eval.runner import (
+    ArtifactRef,
+    CodecRunner,
+    InsufficientGpuMemoryError,
+    ResourceCaps,
+    RunnerError,
+    StreamInput,
+)
 from eval.scoring import CodecScore, StreamResult, score_codec
 from eval.streams import StreamSpec
 
@@ -76,6 +83,12 @@ def evaluate_artifact(
                 f"roundtrip_ok={result.roundtrip_ok} compress_secs={result.compress_secs:.1f} "
                 f"decompress_secs={result.decompress_secs:.1f}"
             )
+        except InsufficientGpuMemoryError:
+            # A host-capacity fault, not a codec fault (issue #105) -- propagate so the round
+            # aborts instead of scoring/one-shot-excluding this codec. The caller (validator
+            # main loop) already logs a failed round and retries next round, by which point
+            # other containers this round may have torn down and freed the GPU.
+            raise
         except RunnerError as exc:
             bt_logging.warning(f"evaluating {hotkey}: stream {spec.stream_id} failed: {exc}")
             # A crashing entrypoint is a failed (non-bit-exact) stream; the codec is invalid.

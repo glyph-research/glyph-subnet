@@ -30,11 +30,15 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field, field_validator
 
 from core.constants import (
+    BURN_OVERRIDE_PREFIX,
+    BURN_OVERRIDE_VERSION,
     COMMIT_PHASE_PREFIX,
     COMMITMENT_PREFIX,
     COMMITMENT_VERSION,
     COMPACT_COMMITMENT_PREFIX,
     REVEAL_PHASE_PREFIX,
+    WINNER_COMMITMENT_PREFIX,
+    WINNER_COMMITMENT_VERSION,
 )
 
 
@@ -83,6 +87,38 @@ class CodecCommitment(BaseModel):
         return f"{self.repo}@{self.rev}"
 
 
+class WinnerCommitment(BaseModel):
+    """Observability-only on-chain record of the current champion (issue #103).
+
+    Published by a validator on its own hotkey's commitment slot whenever the crown
+    changes -- never read back into that same validator's own scoring/promotion, which
+    always independently re-benchmarks the on-chain codec commitments (reigning champion
+    included) every round regardless of what's published here.
+    """
+
+    v: int = Field(default=WINNER_COMMITMENT_VERSION)
+    hotkey: str = Field(min_length=1, max_length=64)
+    repo: str
+    rev: str
+    ratio: float
+    commit_block: int
+    scoring_version: int
+
+
+class BurnOverrideCommitment(BaseModel):
+    """Owner-controlled emergency burn override (issue #113).
+
+    Published by the subnet owner (whichever hotkey currently occupies BURN_UID on the live
+    metagraph) on its own commitment slot. Every validator checks for this every tempo --
+    ``force_burn=true`` forces 100% burn regardless of the normal schedule, effective
+    network-wide with no code deploy. Additive-only: a missing, malformed, or
+    ``force_burn=false`` commitment always falls through to the unchanged existing schedule.
+    """
+
+    v: int = Field(default=BURN_OVERRIDE_VERSION)
+    force_burn: bool
+
+
 @dataclass(frozen=True)
 class ParsedCommitment:
     hotkey: str
@@ -118,6 +154,30 @@ def serialize_reveal_phase(repo: str, rev: str, salt: str) -> str:
     return f"{REVEAL_PHASE_PREFIX}{repo}|{rev}|{salt}"
 
 
+def serialize_winner_commitment(winner: WinnerCommitment) -> str:
+    """Serialize a validator's observability-only champion record (issue #103)."""
+
+    payload = winner.model_dump(mode="json")
+    return f"{WINNER_COMMITMENT_PREFIX}{json.dumps(payload, sort_keys=True)}"
+
+
+def parse_winner_commitment(raw: str) -> WinnerCommitment | None:
+    """Parse a validator-published winner commitment, or ``None`` if ``raw`` isn't one, is
+    malformed, or is an unsupported future version."""
+
+    data = raw.strip()
+    if not data.startswith(WINNER_COMMITMENT_PREFIX):
+        return None
+    try:
+        payload = json.loads(data[len(WINNER_COMMITMENT_PREFIX) :])
+        winner = WinnerCommitment.model_validate(payload)
+    except Exception:
+        return None
+    if winner.v != WINNER_COMMITMENT_VERSION:
+        return None
+    return winner
+
+
 def parse_commit_phase_digest(raw: str) -> str | None:
     """Return the digest if ``raw`` is a commit-phase value, else None."""
 
@@ -125,6 +185,30 @@ def parse_commit_phase_digest(raw: str) -> str | None:
     if data.startswith(COMMIT_PHASE_PREFIX):
         return data[len(COMMIT_PHASE_PREFIX) :]
     return None
+
+
+def serialize_burn_override(override: BurnOverrideCommitment) -> str:
+    """Serialize the owner's emergency burn-override commitment (issue #113)."""
+
+    payload = override.model_dump(mode="json")
+    return f"{BURN_OVERRIDE_PREFIX}{json.dumps(payload, sort_keys=True)}"
+
+
+def parse_burn_override(raw: str) -> BurnOverrideCommitment | None:
+    """Parse an owner-published burn-override commitment, or ``None`` if ``raw`` isn't one,
+    is malformed, or is an unsupported future version."""
+
+    data = raw.strip()
+    if not data.startswith(BURN_OVERRIDE_PREFIX):
+        return None
+    try:
+        payload = json.loads(data[len(BURN_OVERRIDE_PREFIX) :])
+        override = BurnOverrideCommitment.model_validate(payload)
+    except Exception:
+        return None
+    if override.v != BURN_OVERRIDE_VERSION:
+        return None
+    return override
 
 
 def parse_commitment(raw: str) -> tuple[CodecCommitment, str | None]:

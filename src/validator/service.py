@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,9 +19,11 @@ from bittensor.utils.btlogging import logging as bt_logging
 
 from chain.chain import BittensorChain, ChainConfig
 from core.commitments import (
+    WinnerCommitment,
     parse_commit_phase_by_hotkey,
     parse_commitments_by_hotkey,
     prune_commit_phase_seen,
+    serialize_winner_commitment,
 )
 from core.constants import (
     BASELINE_LEVEL,
@@ -38,6 +41,7 @@ from core.constants import (
     EVAL_STREAMS,
     PRECHECK_FULL_RECHECK_INTERVAL_BLOCKS,
     REFERENCE_SKU,
+    SCORING_VERSION,
     THROUGHPUT_FLOOR_BPS,
     WINDOW_ANCHOR_BLOCK,
 )
@@ -54,7 +58,7 @@ from eval.scoring import source_ratio_breakdown, stream_ratio, zstd_baseline_rat
 from eval.streams import derive_seed, sample_source_streams
 from validation.precheck import precheck_artifact_dir, precheck_codec
 from reign_worker.service import run_round
-from weight_setter.service import decide_weights
+from weight_setter.service import decide_weights, resolve_force_burn
 
 if TYPE_CHECKING:
     from eval.runner_chutes import ChutesRunner
@@ -155,10 +159,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable Weights & Biases logging (default: ON). Pure observability -- disabling "
         "it changes nothing about scoring/promotion/weights/burn.",
     )
-    parser.add_argument("--wandb.project", dest="wandb_project", default="glyph-subnet")
+    parser.add_argument("--wandb.project", dest="wandb_project", default="text-compression")
     parser.add_argument(
-        "--wandb.entity", dest="wandb_entity", default=None,
-        help="wandb entity (team/org). Defaults to your wandb account if unset.",
+        "--wandb.entity", dest="wandb_entity", default="glyph-research-org",
+        help="wandb entity (team/org). Defaults to the glyph-research-org team run.",
+    )
+    parser.add_argument(
+        "--wandb.name", dest="wandb_name", default=None,
+        help="Override the wandb run name. Defaults to this coldkey's on-chain identity name "
+        "('btcli wallet set-identity'), or its hotkey ss58 if no identity is set, so multiple "
+        "validators are distinguishable at a glance in the shared project.",
     )
     parser.add_argument(
         "--wandb.offline", dest="wandb_offline", action="store_true",
@@ -258,11 +268,33 @@ def _parse_local_artifacts(args) -> dict[str, str]:
 
 
 def _load_salt(state_dir: Path, salt_file: str | None) -> str:
-    path = Path(salt_file) if salt_file else state_dir / "validator_salt.txt"
-    if path.exists():
-        return path.read_text().strip()
+    """Resolve this round's private seed salt.
+
+    Default path (no --salt-file): a FRESH salt every call (issue #116). _load_salt runs at
+    the top of every run_once, so this makes both the public (block hash) and private (salt)
+    seed components fresh each round -- previously the salt was generated once and reused for
+    the validator's entire lifetime, so a single leak of the on-disk value exposed every
+    future round's sampling. The file is still written each time, but purely for
+    after-the-fact observability (which salt produced a given round's seed) -- it is never
+    read back.
+
+    An explicit --salt-file keeps the original read-and-reuse behavior unchanged: that flag
+    exists for tests/manual reproducibility, where a fixed, known salt is the point.
+    """
+
     import secrets
 
+    if salt_file:
+        path = Path(salt_file)
+        if path.exists():
+            return path.read_text().strip()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        salt = secrets.token_hex(32)
+        path.write_text(salt)
+        path.chmod(0o600)
+        return salt
+
+    path = state_dir / "validator_salt.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     salt = secrets.token_hex(32)
     path.write_text(salt)
@@ -444,8 +476,32 @@ def _make_demo_provider(args) -> StaticLocalProvider:
     return provider
 
 
-def _parse_sources(value: str) -> list[str]:
-    return [part.strip() for part in value.split(",") if part.strip()]
+def _parse_sources(value: str) -> list[tuple[str, int | None]]:
+    """Parse an --eval-source list into ``(name, streams)`` pairs.
+
+    Each entry is ``name`` or ``name:count`` -- the optional count sets that source's scored
+    stream count (issue #112's asymmetric 2x fineweb-edu / 1x pile mix); a bare name yields
+    ``None`` and the caller falls back to --eval-streams.
+    """
+
+    sources: list[tuple[str, int | None]] = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, count = part.partition(":")
+        name = name.strip()
+        if not count:
+            sources.append((name, None))
+            continue
+        try:
+            streams = int(count)
+        except ValueError:
+            raise SystemExit(f"--eval-source entry {part!r}: stream count must be an integer") from None
+        if streams <= 0:
+            raise SystemExit(f"--eval-source entry {part!r}: stream count must be positive")
+        sources.append((name, streams))
+    return sources
 
 
 def _source_seed(seed: int, source: str) -> int:
@@ -472,15 +528,22 @@ def _source_specs(args, provider, seed: int, source: str, *, scored: bool, strea
 
 
 def _select_specs(args, provider, seed):
-    """Select scored FineWeb/Pile streams plus benchmark-only enwik9 streams."""
+    """Select the scored fineweb-edu/pile streams plus benchmark-only enwik9 streams."""
 
     sources = _parse_sources(getattr(args, "eval_source", "") or "")
     if not sources:
-        raise SystemExit("--eval-source must name at least one provenance source (e.g. 'fineweb,pile')")
+        raise SystemExit(
+            "--eval-source must name at least one provenance source (e.g. 'fineweb-edu:2,pile:1')"
+        )
 
     specs = []
-    for scored_source in sources:
-        specs.extend(_source_specs(args, provider, seed, scored_source, scored=True, streams=args.eval_streams))
+    for scored_source, source_streams in sources:
+        specs.extend(
+            _source_specs(
+                args, provider, seed, scored_source, scored=True,
+                streams=source_streams if source_streams is not None else args.eval_streams,
+            )
+        )
     benchmark_source = (getattr(args, "eval_benchmark_source", "") or "").strip()
     benchmark_streams = getattr(args, "eval_benchmark_streams", 0)
     if benchmark_source and benchmark_streams > 0:
@@ -506,13 +569,67 @@ def _make_chain(args) -> BittensorChain:
     )
 
 
-def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: str) -> tuple[int, dict | None]:
+def _publish_winner_commitment(chain: BittensorChain, champion: WinnerEntry) -> None:
+    """Best-effort, observability-only publish of the new champion on this validator's own
+    commitment slot (issue #103) -- never read back into this validator's own scoring/
+    promotion (see WinnerCommitment's docstring), and a publish failure must never crash or
+    delay the round.
+    """
+
+    winner = WinnerCommitment(
+        hotkey=champion.hotkey,
+        repo=champion.repo,
+        rev=champion.revision,
+        ratio=champion.ratio,
+        commit_block=champion.commit_block,
+        scoring_version=SCORING_VERSION,
+    )
+    try:
+        response = chain.set_commitment(serialize_winner_commitment(winner))
+        if getattr(response, "success", True):
+            bt_logging.info(f"published winner commitment: {champion.hotkey} ratio={champion.ratio:.4f}")
+        else:
+            bt_logging.warning(f"failed to publish winner commitment: {response}")
+    except Exception as exc:
+        bt_logging.warning(f"failed to publish winner commitment: {exc}")
+
+
+def _wandb_identity_name(chain: BittensorChain) -> str | None:
+    """Best-effort wandb run-name fallback (issue #102 follow-up): this validator's on-chain
+    identity name if set (``btcli wallet set-identity``), else its hotkey ss58 -- still
+    distinguishes validators at a glance in the shared project even though set-identity is
+    opt-in and most hotkeys won't have one. An explicit --wandb.name always overrides this
+    (see core.wandb_logger.make_wandb_logger)."""
+
+    return chain.identity_name() or chain.hotkey
+
+
+def _startup_wandb_identity_name(args) -> str | None:
+    """Resolve the wandb run-name identity fallback via a throwaway chain connection before
+    the wandb run starts (``main()`` only -- ``run_once``/``run_reign_only`` reuse the chain
+    they build for the round itself). Unlike that per-round chain, a failure constructing
+    this one must never crash/delay startup -- it's a nice-to-have label, and the real
+    per-round chain (built fresh inside the retried round loop) surfaces a genuine
+    wallet/network problem properly either way."""
+
+    try:
+        return _wandb_identity_name(_make_chain(args))
+    except Exception:
+        return None
+
+
+def _evaluate_round(
+    args, state: ValidatorState, chain: BittensorChain, salt: str
+) -> tuple[int, dict | None, dict[str, str]]:
     """Precheck commitments and, if there are new challengers, run one reign round.
 
-    Returns ``(block, round_metrics)``; ``round_metrics`` is ``None`` when no challengers ran
-    this round (nothing new to report). ``round_metrics`` is a plain dict built by
-    ``core.wandb_logger.build_round_metrics`` purely from what this round already decided --
-    reporting it changes nothing about scoring/promotion (issue #41).
+    Returns ``(block, round_metrics, raw_commitments)``; ``round_metrics`` is ``None`` when no
+    challengers ran this round (nothing new to report). ``round_metrics`` is a plain dict
+    built by ``core.wandb_logger.build_round_metrics`` purely from what this round already
+    decided -- reporting it changes nothing about scoring/promotion (issue #41).
+    ``raw_commitments`` is the commitment dict this round already fetched for precheck,
+    passed back so ``run_once``'s burn-override check (issue #113) doesn't need a second,
+    redundant ``get_all_commitments()`` round-trip moments later.
     """
 
     if getattr(args, "corpus_dir", None):
@@ -560,7 +677,10 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
         # keyed by the same beacon-derived seed used for stream-window sampling below -- no
         # shared file, no owner-run oracle process, and every validator lands on byte-identical
         # chunks by construction (issue #71).
-        provider = resolve_live_corpus(str(seed))
+        # HF_TOKEN is optional (anonymous streaming still works) but avoids intermittent
+        # 403/AccessDenied from HF's Xet-backed CDN throttling fully anonymous traffic
+        # (issue #108) -- a free-tier read token is enough, no special dataset permissions.
+        provider = resolve_live_corpus(str(seed), token=os.environ.get("HF_TOKEN"))
         specs = _select_specs(args, provider, seed)
         scored_specs = _scored_specs(specs)
         baseline = zstd_baseline_ratio(
@@ -582,6 +702,9 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
             margin=args.win_margin, block=block, eligible_hotkeys=eligible, baseline_ratio=baseline,
         )
         champion_after = state.winner_history[0] if state.winner_history else None
+        crown_changed = bool(champion_after) and champion_after.hotkey != champion_before
+        if crown_changed:
+            _publish_winner_commitment(chain, champion_after)
         round_metrics = build_round_metrics(
             block=block,
             baseline_ratio=baseline,
@@ -591,9 +714,9 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
             commit_phase_seen_count=sum(len(v) for v in state.commit_phase_seen.values()),
             winner_hotkey=champion_after.hotkey if champion_after else None,
             winner_ratio=champion_after.ratio if champion_after else None,
-            crown_changed=bool(champion_after) and champion_after.hotkey != champion_before,
+            crown_changed=crown_changed,
         )
-    return block, round_metrics
+    return block, round_metrics, raw_commitments
 
 
 # Production paths (require chain access)
@@ -601,7 +724,6 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
 
 def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) -> None:
     owns_logger = wandb_logger is None
-    wandb_logger = wandb_logger or make_wandb_logger(args)
     try:
         state_dir = Path(args.state_dir)
         state_path = state_dir / "validator_state.json"
@@ -609,12 +731,25 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         salt = _load_salt(state_dir, args.salt_file)
 
         chain = _make_chain(args)
+        wandb_logger = wandb_logger or make_wandb_logger(args, identity_name=_wandb_identity_name(chain))
         version_key = _local_version_key()
-        bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
+        try:
+            bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
+        except SystemExit as exc:
+            # A version-key mismatch is the expected, transient state during a release
+            # rollout until the owner updates the on-chain weights_version hyperparameter --
+            # it self-heals with time, unlike genuine misconfiguration. Skip this cycle
+            # (nothing scored, no weights set -- same safety property as exiting) and let the
+            # outer loop's normal sleep/retry cadence pick up once the chain catches up,
+            # instead of letting SystemExit sail past main()'s `except Exception` and kill
+            # the process into a pm2 crash-restart loop (issue #120). Scoped to the version
+            # check only: any other SystemExit still hard-stops as before.
+            bt_logging.warning(f"weights_version mismatch, waiting for on-chain update: {exc}")
+            return
         if not chain.commit_reveal_enabled():
             bt_logging.warning("commit-reveal is not enabled on this subnet; anti-copy weights are weaker")
 
-        block, round_metrics = _evaluate_round(args, state, chain, salt)
+        block, round_metrics, raw_commitments = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
             wandb_logger.log(round_metrics)
         champion = state.winner_history[0] if state.winner_history else None
@@ -630,9 +765,26 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         hotkeys = list(metagraph.hotkeys)
         uids = [int(uid) for uid in metagraph.uids]
 
+        # Owner emergency burn override (issue #113), read from the commitment dict
+        # _evaluate_round already fetched for precheck -- no second chain round-trip.
+        force_burn = (
+            resolve_force_burn(raw_commitments, hotkeys[args.burn_uid])
+            if 0 <= args.burn_uid < len(hotkeys)
+            else False
+        )
+        if force_burn:
+            # Without this line, a forced burn is indistinguishable in the log from an
+            # ordinary scheduled burn tempo -- except it happens EVERY tempo, which reads
+            # as a bug unless the operator knows the owner override is active.
+            bt_logging.warning(
+                "Subnet faced an issue and turned into temporal burn "
+                "(owner emergency override: on-chain force_burn=true) -- burning 100% this tempo"
+            )
+
         weights, burn = decide_weights(
             hotkeys, state.winner_history, block=block, tempo=tempo,
             last_round_outputs=state.last_round_outputs, anchor=anchor, burn_uid=args.burn_uid,
+            force_burn=force_burn,
         )
         wandb_logger.log(build_weights_metrics(block=block, tempo=tempo, is_burn_tempo=burn, uids=uids, weights=weights))
         save_state(state_path, state)
@@ -652,7 +804,9 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         else:
             bt_logging.warning(f"set_weights: success=False error={response.error} message={response.message}")
     finally:
-        if owns_logger:
+        # wandb_logger may still be None here if an exception struck before chain was built
+        # (it's now created after chain, to resolve the run-name identity fallback from it).
+        if owns_logger and wandb_logger is not None:
             wandb_logger.finish()
 
 
@@ -660,7 +814,6 @@ def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = 
     """The reign half only (evaluate + update crown), no weight setting."""
 
     owns_logger = wandb_logger is None
-    wandb_logger = wandb_logger or make_wandb_logger(args)
     try:
         state_dir = Path(args.state_dir)
         state_path = state_dir / "validator_state.json"
@@ -668,14 +821,22 @@ def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = 
         salt = _load_salt(state_dir, args.salt_file)
 
         chain = _make_chain(args)
-        bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
-        _block, round_metrics = _evaluate_round(args, state, chain, salt)
+        wandb_logger = wandb_logger or make_wandb_logger(args, identity_name=_wandb_identity_name(chain))
+        try:
+            bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
+        except SystemExit as exc:
+            # Same as run_once (issue #120): a release-rollout mismatch self-heals once the
+            # on-chain weights_version updates -- skip the cycle, don't kill the process.
+            bt_logging.warning(f"weights_version mismatch, waiting for on-chain update: {exc}")
+            return
+        _block, round_metrics, _raw_commitments = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
             wandb_logger.log(round_metrics)
         save_state(state_path, state)
         bt_logging.info(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in state.winner_history]}")
     finally:
-        if owns_logger:
+        # wandb_logger may still be None if an exception struck before chain was built.
+        if owns_logger and wandb_logger is not None:
             wandb_logger.finish()
 
 
@@ -805,7 +966,7 @@ def main() -> None:
     # One wandb run for the whole process lifetime (not one per --loop iteration) so console
     # capture starts before the first round and metrics from every round land in the same run
     # (see core.wandb_logger's own restart_interval for keeping very long runs bounded).
-    wandb_logger = make_wandb_logger(args)
+    wandb_logger = make_wandb_logger(args, identity_name=_startup_wandb_identity_name(args))
     poll_chain = None
     try:
         while True:

@@ -1,11 +1,13 @@
 import json
 from pathlib import Path
 
+import pytest
 from bittensor.utils.btlogging import logging as bt_logging
 
 from eval.corpus import StaticLocalProvider
-from eval.evaluator import paired_eval
-from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
+from eval.evaluator import evaluate_artifact, paired_eval
+from eval.runner import ArtifactRef, InsufficientGpuMemoryError, LocalSubprocessRunner, ResourceCaps
+from core.constants import SCORING_VERSION
 from core.state import ScoreState, ValidatorState, load_state, save_state
 from eval.streams import sample_source_streams
 from core.weights import WinnerEntry
@@ -59,6 +61,29 @@ def test_paired_eval_reference_valid_broken_invalid(tmp_path):
     assert len(outcomes["hk_ref"].burn_outputs()) == 3
 
 
+# --- GPU-memory host fault must abort, not invalidate/exclude the codec (issue #105) ------
+
+
+class _OutOfGpuMemoryRunner:
+    def run_stream(self, artifact, stream, *, caps):
+        raise InsufficientGpuMemoryError("insufficient free GPU memory: need ~22.0 GiB, 5.0 GiB free")
+
+
+def test_evaluate_artifact_propagates_gpu_memory_fault_instead_of_invalidating(tmp_path):
+    provider = StaticLocalProvider(CORPUS)
+    specs = sample_source_streams(42, 0, provider.total_bytes, stream_bytes=4096, streams=1)
+    artifact = ArtifactRef("hk/codec", "local", local_path=str(tmp_path))
+
+    # Must raise (round aborts, this codec is never scored or one-shot-excluded) -- not
+    # return an EvalOutcome with an invalid result, which is what happens for a genuine
+    # entrypoint crash (see test_paired_eval_reference_valid_broken_invalid above).
+    with pytest.raises(InsufficientGpuMemoryError):
+        evaluate_artifact(
+            _OutOfGpuMemoryRunner(), "hk_gpu_starved", artifact, provider, specs,
+            caps=ResourceCaps(), floor_bps=FLOOR, budget_secs=BUDGET,
+        )
+
+
 def test_evaluate_artifact_logs_per_stream_progress_and_result(tmp_path, caplog):
     # issue #86: the log went completely silent for the full compress+decompress duration of
     # every stream -- up to ~450s each -- with nothing to distinguish "still working" from
@@ -96,6 +121,7 @@ def test_state_round_trip(tmp_path):
     state.scores["hkA:a/c@rev123456"] = ScoreState(
         hotkey="hkA", repo="a/c", revision="rev123456", ratio=0.42,
         roundtrip_ok=True, throughput_bps=50000.0, valid=True, commit_block=100,
+        scoring_version=SCORING_VERSION,
     )
     state.last_round_outputs = [("s0", 123, "abc"), ("s1", 456, "def")]
     state.excluded_hotkeys = {"hk_loser"}

@@ -30,7 +30,12 @@ def test_shared_version_key_gate_fails_closed(monkeypatch):
     assert "netuid 488" in str(exc.value)
 
 
-def test_weight_setter_checks_weights_version_before_chain_reads(monkeypatch, tmp_path):
+def test_weight_setter_checks_weights_version_before_chain_reads(monkeypatch, tmp_path, caplog):
+    # The safety property: NOTHING chain-side (and no weight-setting) happens after a
+    # mismatch. Since issue #120 that no longer means raising SystemExit -- a mismatch is the
+    # expected transient state during a release rollout, so run() skips the cycle and returns
+    # (main()'s sleep/retry loop picks up once the on-chain weights_version catches up)
+    # instead of killing the process.
     class MismatchedChain(FakeChain):
         def __init__(self, _config):
             super().__init__(12)
@@ -53,9 +58,8 @@ def test_weight_setter_checks_weights_version_before_chain_reads(monkeypatch, tm
         window_anchor=0,
         dry_run=True,
     )
-    with pytest.raises(SystemExit) as exc:
-        run_weight_setter(args)
-    assert "version key mismatch" in str(exc.value)
+    run_weight_setter(args)  # must return, not raise SystemExit (issue #120)
+    assert "weights_version mismatch, waiting for on-chain update" in caplog.text
 
 
 def test_auto_update_tracks_version_key():

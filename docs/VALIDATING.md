@@ -26,6 +26,12 @@ The always-on parts (chain polling, precheck, weight setting) are cheap CPU eith
 pytest -q
 ```
 
+Every round streams a fresh corpus slice straight from HuggingFace
+(`eval.live_corpus.resolve_live_corpus`). This works fully anonymously, but HF's Xet-backed
+CDN increasingly throttles/denies anonymous traffic with an intermittent `403 Forbidden` --
+set `HF_TOKEN` in `.env` (a free-tier read token, no special dataset permissions needed;
+create one at https://huggingface.co/settings/tokens) to avoid it. See `.env.example`.
+
 ## Set up the default Docker runner
 
 `--runner docker` (`src/eval/runner_docker.py`, the default) is a drop-in alternative to
@@ -159,18 +165,25 @@ glyph-validator --offline-demo --runner local --local-codec mine=./my-codec ...
 
 There is no owner-run corpus process and nothing to configure: every validator builds its
 own copy of the evaluation corpus directly from HuggingFace at the start of each round
-(`eval.live_corpus.resolve_live_corpus`, issue #71) -- the launch mix is the same 8 x 2 MiB
-(3x FineWeb, 3x Pile-derived, 2x enwik9) it always was.
+(`eval.live_corpus.resolve_live_corpus`, issue #71) -- the mix is 5 x 4 MiB (2x fineweb-edu,
+1x Pile-derived, scored; 2x enwik9, benchmark-only display) since issue #112.
 
 The corpus is keyed off the same beacon (derived from the round's chain block hash) already
-used to pick which stream windows get scored, via a seed-derived skip offset
-(`_skip_for_seed`) into each dataset -- never the fixed dataset prefix, so a miner cannot
-memorise it in advance. Because that skip offset is a pure function of `(seed, dataset)`,
-independent validators land on byte-identical bytes with no shared file and no coordination
-between them; `tests/test_live_corpus.py` proves this directly (same seed -> identical
-corpus, different seed -> different corpus, slice is never the dataset prefix). Results are
-cached locally per seed (`eval.live_corpus.local_corpus_cache_dir`) so re-evaluating the same
-round doesn't re-stream from HuggingFace.
+used to pick which stream windows get scored, via a seed-derived *shard* of the dataset
+(`_shard_for_seed`) followed by a seed-derived skip offset within that shard
+(`_skip_for_seed`) -- never a fixed prefix of any shard, so a miner cannot memorise it in
+advance. Selecting the shard first (rather than only bounding the skip within the dataset as
+a whole) is what makes the *entire* dataset the reachable sampling range instead of a small,
+cacheable slice (issue #112 -- an earlier version of this scheme bounded the skip from record
+0 of the whole dataset, which made the first `skip_cap` records the entire reachable universe
+and was exploited by a codec that pre-embedded that whole slice as a lookup dictionary). Pile
+additionally retires shard 0 (the burned range from that exploit) from selection permanently.
+Because shard and skip selection are both pure functions of `(seed, dataset)`, independent
+validators land on byte-identical bytes with no shared file and no coordination between them;
+`tests/test_live_corpus.py` proves this directly (same seed -> identical corpus, different
+seed -> different corpus, slice is never a fixed prefix). Results are cached locally per seed
+(`eval.live_corpus.local_corpus_cache_dir`) so re-evaluating the same round doesn't re-stream
+from HuggingFace.
 
 `--corpus-dir` still exists but is **offline-demo only** (see below) -- passing it to a real
 round is refused outright with a `SystemExit`, since it would otherwise be silently ignored.
@@ -232,7 +245,7 @@ silent for many minutes and showing exactly which stream is running and how long
 
 Every validator process (`glyph-validator`, and `glyph-reign-worker` in the split-service
 form) streams per-round metrics to [Weights & Biases](https://wandb.ai) by default —
-per-challenger ratio/throughput/validity, the scored FineWeb/Pile breakdown, the
+per-challenger ratio/throughput/validity, the scored fineweb-edu/Pile breakdown, the
 enwik9 benchmark-only ratio, crown changes, and (all-in-one path only) the weights/burn
 decision. It also mirrors the process's own stdout/stderr into the run's Logs tab. This is
 pure observability: wandb is never read back into scoring, promotion, or weight-setting, and
@@ -250,17 +263,21 @@ it prompts for the key in the foreground (there's no terminal to answer a prompt
 process is backgrounded under pm2). Pass `--wandb-non-interactive` to skip the prompt for
 scripted/CI use and let wandb attempt the anonymous fallback instead.
 
-To log to your own wandb project/entity instead, set `WANDB_API_KEY` in the environment (or
-`.env`) and pass:
+By default, runs log to the `glyph-research-org/text-compression` team project. To log to
+your own wandb project/entity instead, set `WANDB_API_KEY` in the environment (or `.env`) and
+pass:
 
 ```bash
---wandb.project glyph-subnet --wandb.entity <your-wandb-entity>
+--wandb.project <your-project> --wandb.entity <your-wandb-entity>
 ```
 
 Other flags:
 
 - `--wandb.off` — disable wandb entirely (no import, no network, byte-identical behavior
   to a build without this feature).
+- `--wandb.name` — override the run name. Defaults to this coldkey's on-chain identity name
+  (`btcli wallet set-identity`), or its hotkey ss58 if no identity is set, so multiple
+  validators sharing the project are distinguishable at a glance.
 - `--wandb.offline` — log locally only (writes under `./wandb/`, no network), useful for
   CI or air-gapped testing.
 - `--wandb.notes "..."` — free-text note attached to the run.

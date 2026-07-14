@@ -13,8 +13,11 @@ from validator.service import (
     _assert_version_key_matches,
     _make_demo_provider,
     _make_runner,
+    _startup_wandb_identity_name,
+    _wandb_identity_name,
     decide_weights,
     run_once,
+    run_reign_only,
 )
 from core.weights import WinnerEntry
 
@@ -435,8 +438,9 @@ class _FakeWandb:
 
 
 class _FakeChain:
-    def __init__(self, rate_limit_remaining=None):
+    def __init__(self, rate_limit_remaining=None, raw_commitments=None):
         self._rate_limit_remaining = rate_limit_remaining
+        self._raw_commitments = raw_commitments or {}
         self.set_weights_called = False
 
     def commit_reveal_enabled(self):
@@ -447,6 +451,9 @@ class _FakeChain:
 
     def metagraph(self):
         return type("Metagraph", (), {"hotkeys": ["hk0"], "uids": [0]})()
+
+    def get_all_commitments(self):
+        return self._raw_commitments
 
     def set_weights(self, uids, weights, version_key):
         self.set_weights_called = True
@@ -469,7 +476,10 @@ def test_run_once_prints_champion_and_concise_set_weights_on_a_quiet_round(monke
     monkeypatch.setattr("validator.service._make_chain", lambda args: _FakeChain())
     monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
-    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+    monkeypatch.setattr(
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+    )
     monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
 
     args = type(
@@ -494,7 +504,10 @@ def test_run_once_prints_no_champion_when_history_empty(monkeypatch, tmp_path, c
     monkeypatch.setattr("validator.service._make_chain", lambda args: _FakeChain())
     monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
-    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+    monkeypatch.setattr(
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+    )
     monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
 
     args = type(
@@ -521,7 +534,10 @@ def test_run_once_skips_set_weights_when_rate_limited(monkeypatch, tmp_path, cap
     monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
     monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
-    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+    monkeypatch.setattr(
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+    )
     monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
 
     args = type(
@@ -533,6 +549,123 @@ def test_run_once_skips_set_weights_when_rate_limited(monkeypatch, tmp_path, cap
 
     assert fake_chain.set_weights_called is False
     assert "set_weights: skipped, rate-limited (42 blocks remaining)" in caplog.text
+
+
+# --- owner emergency burn override wired into run_once (issue #113) ---------------
+
+
+def test_run_once_forces_burn_when_owner_commitment_says_so(monkeypatch, tmp_path, caplog):
+    from core.commitments import BurnOverrideCommitment, serialize_burn_override
+
+    state = ValidatorState()
+    # hotkeys=["hk0"], burn_uid=0 -> owner hotkey is "hk0" (see _FakeChain.metagraph).
+    override_raw = serialize_burn_override(BurnOverrideCommitment(force_burn=True))
+    fake_chain = _FakeChain(raw_commitments={"hk0": override_raw})
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr(
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+    )
+
+    captured = {}
+
+    def fake_decide_weights(*a, **kwargs):
+        captured["force_burn"] = kwargs.get("force_burn")
+        return [1.0], True
+
+    monkeypatch.setattr("validator.service.decide_weights", fake_decide_weights)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": True, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())
+
+    assert captured["force_burn"] is True
+    # A forced burn is otherwise indistinguishable in the log from a scheduled burn tempo --
+    # the operator must see WHY every tempo is suddenly burning (warning level, so it shows
+    # even at bt_logging's default level), including the actionable cause (the owner's
+    # on-chain override), not just that a burn happened.
+    assert "Subnet faced an issue and turned into temporal burn" in caplog.text
+    assert "force_burn=true" in caplog.text
+
+
+def test_run_once_does_not_force_burn_without_an_owner_commitment(monkeypatch, tmp_path):
+    state = ValidatorState()
+    fake_chain = _FakeChain()  # no raw_commitments at all
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr(
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+    )
+
+    captured = {}
+
+    def fake_decide_weights(*a, **kwargs):
+        captured["force_burn"] = kwargs.get("force_burn")
+        return [1.0], False
+
+    monkeypatch.setattr("validator.service.decide_weights", fake_decide_weights)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": True, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())
+
+    assert captured["force_burn"] is False
+
+
+def test_run_once_reads_the_override_from_the_round_commitments_without_a_second_fetch(monkeypatch, tmp_path):
+    # Review feedback on #114: _evaluate_round already fetched get_all_commitments() for
+    # precheck; run_once's burn-override check must reuse that dict, not re-fetch. A chain
+    # object whose get_all_commitments raises proves run_once itself never calls it.
+    state = ValidatorState()
+    fake_chain = _FakeChain()
+
+    def _boom():
+        raise AssertionError("run_once must not make a second get_all_commitments call")
+
+    fake_chain.get_all_commitments = _boom
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    # The round's already-fetched dict is what _evaluate_round returns -- empty here.
+    monkeypatch.setattr(
+        "validator.service._evaluate_round", lambda args, state, chain, salt: (999, None, {})
+    )
+
+    captured = {}
+
+    def fake_decide_weights(*a, **kwargs):
+        captured["force_burn"] = kwargs.get("force_burn")
+        return [1.0], False
+
+    monkeypatch.setattr("validator.service.decide_weights", fake_decide_weights)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": True, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())  # must not raise
+
+    assert captured["force_burn"] is False
 
 
 # --- --loop/--once default (issue #79) ------------------------------------------
@@ -567,6 +700,121 @@ def test_weight_setter_loops_by_default_and_once_opts_out():
     assert legacy_args.once is False
 
 
+# --- wandb defaults (issue #102) --------------------------------------------------
+
+
+def test_wandb_defaults_to_glyph_research_org_text_compression():
+    from validator.service import build_parser as validator_build_parser
+
+    default_args = validator_build_parser().parse_args([])
+    assert default_args.wandb_project == "text-compression"
+    assert default_args.wandb_entity == "glyph-research-org"
+
+    override_args = validator_build_parser().parse_args(
+        ["--wandb.project", "my-proj", "--wandb.entity", "my-team"]
+    )
+    assert override_args.wandb_project == "my-proj"
+    assert override_args.wandb_entity == "my-team"
+
+
+def test_wandb_name_flag_defaults_unset_and_parses_when_passed():
+    from validator.service import build_parser as validator_build_parser
+
+    default_args = validator_build_parser().parse_args([])
+    assert default_args.wandb_name is None
+
+    named_args = validator_build_parser().parse_args(["--wandb.name", "my-validator"])
+    assert named_args.wandb_name == "my-validator"
+
+
+# --- wandb run name resolved from on-chain identity (issue #102 follow-up) --------------
+
+
+def test_wandb_identity_name_prefers_identity_over_hotkey():
+    chain = type("C", (), {"identity_name": lambda self: "my-id", "hotkey": "hk-ss58"})()
+    assert _wandb_identity_name(chain) == "my-id"
+
+
+def test_wandb_identity_name_falls_back_to_hotkey_when_no_identity_set():
+    chain = type("C", (), {"identity_name": lambda self: None, "hotkey": "hk-ss58"})()
+    assert _wandb_identity_name(chain) == "hk-ss58"
+
+
+def test_startup_wandb_identity_name_returns_none_on_chain_build_failure(monkeypatch):
+    # Never allowed to block/crash startup -- a wallet/network hiccup resolving this
+    # nice-to-have falls back to None; the real per-round chain surfaces genuine problems.
+    def _boom(args):
+        raise RuntimeError("wallet not found")
+
+    monkeypatch.setattr("validator.service._make_chain", _boom)
+    assert _startup_wandb_identity_name(object()) is None
+
+
+def test_run_once_builds_chain_before_wandb_logger_and_passes_identity(monkeypatch, tmp_path):
+    # Previously make_wandb_logger was called before any chain existed, so the run-name
+    # identity fallback could never actually be resolved from it.
+    state = ValidatorState()
+    fake_chain = _FakeChain()
+    fake_chain.identity_name = lambda: None
+    fake_chain.hotkey = "hk-ss58-abc"
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr(
+        "validator.service._evaluate_round", lambda args, state, chain, salt: (999, None, {})
+    )
+    monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
+
+    captured = {}
+
+    def fake_make_wandb_logger(args, *, identity_name=None):
+        captured["identity_name"] = identity_name
+        return _FakeWandb()
+
+    monkeypatch.setattr("validator.service.make_wandb_logger", fake_make_wandb_logger)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": False, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args)  # no wandb_logger passed -> owns_logger path exercises make_wandb_logger
+
+    assert captured["identity_name"] == "hk-ss58-abc"
+
+
+def test_run_reign_only_builds_chain_before_wandb_logger_and_passes_identity(monkeypatch, tmp_path):
+    state = ValidatorState()
+    fake_chain = _FakeChain()
+    fake_chain.identity_name = lambda: "on-chain-name"
+    fake_chain.hotkey = "hk-ss58-abc"
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr(
+        "validator.service._evaluate_round", lambda args, state, chain, salt: (999, None, {})
+    )
+
+    captured = {}
+
+    def fake_make_wandb_logger(args, *, identity_name=None):
+        captured["identity_name"] = identity_name
+        return _FakeWandb()
+
+    monkeypatch.setattr("validator.service.make_wandb_logger", fake_make_wandb_logger)
+
+    args = type("Args", (), {"state_dir": str(tmp_path), "salt_file": None})()
+
+    run_reign_only(args)  # no wandb_logger passed -> owns_logger path
+
+    assert captured["identity_name"] == "on-chain-name"
+
+
 def test_main_loops_continuously_without_once_or_loop_flag(monkeypatch):
     # issue #79: this used to run exactly one round and exit unless --loop was passed, with no
     # indication anywhere that this was expected -- prove main() now keeps going by default.
@@ -581,7 +829,7 @@ def test_main_loops_continuously_without_once_or_loop_flag(monkeypatch):
             raise KeyboardInterrupt
 
     monkeypatch.setattr(vs, "run_once", fake_run_once)
-    monkeypatch.setattr(vs, "make_wandb_logger", lambda args: _FakeWandb())
+    monkeypatch.setattr(vs, "make_wandb_logger", lambda args, **kwargs: _FakeWandb())
     monkeypatch.setattr(vs, "_make_chain", lambda args: _FakeChain())
     monkeypatch.setattr(vs, "_sleep_with_commit_polls", lambda args, chain: None)
     monkeypatch.setattr("core.dotenv.load_dotenv", lambda: None)
@@ -589,3 +837,195 @@ def test_main_loops_continuously_without_once_or_loop_flag(monkeypatch):
     vs.main()
 
     assert call_count["n"] >= 3
+
+
+# --- per-source scored stream counts (issue #112) ----------------------------------
+
+
+def test_parse_sources_supports_optional_per_source_stream_counts():
+    from validator.service import _parse_sources
+
+    # Bare names keep the legacy behavior (fall back to --eval-streams).
+    assert _parse_sources("fineweb,pile") == [("fineweb", None), ("pile", None)]
+    # name:count sets that source's scored stream count (the 2x/1x remix).
+    assert _parse_sources("fineweb-edu:2,pile:1") == [("fineweb-edu", 2), ("pile", 1)]
+    # Mixed forms and whitespace are fine.
+    assert _parse_sources(" fineweb-edu:2 , pile ") == [("fineweb-edu", 2), ("pile", None)]
+    assert _parse_sources("") == []
+
+
+def test_parse_sources_rejects_bad_counts():
+    from validator.service import _parse_sources
+
+    with pytest.raises(SystemExit, match="must be an integer"):
+        _parse_sources("fineweb-edu:two")
+    with pytest.raises(SystemExit, match="must be positive"):
+        _parse_sources("pile:0")
+
+
+def _corpus_with_provenance(tmp_path, chunk_map):
+    """Write a corpus dir with provenance for the given {source: chunk_count} map."""
+
+    import json as _json
+
+    entries = []
+    index = 0
+    for source, count in chunk_map.items():
+        chunk_ids = []
+        for _ in range(count):
+            name = f"chunk_{index:02d}_{source}.txt"
+            (tmp_path / name).write_bytes(b"x" * 8192)
+            chunk_ids.append(name)
+            index += 1
+        entries.append({"source": source, "chunk_ids": chunk_ids})
+    (tmp_path / "provenance.json").write_text(_json.dumps(entries))
+    from eval.corpus import StaticLocalProvider
+
+    return StaticLocalProvider(tmp_path)
+
+
+def test_select_specs_asymmetric_mix_yields_per_source_counts(tmp_path):
+    from validator.service import _select_specs
+
+    provider = _corpus_with_provenance(tmp_path, {"fineweb-edu": 2, "pile": 1, "enwik9": 2})
+    args = type(
+        "Args", (),
+        {
+            "eval_source": "fineweb-edu:2,pile:1",
+            "eval_streams": 99,  # must be ignored when counts are explicit
+            "eval_stream_bytes": 4096,
+            "eval_benchmark_source": "enwik9",
+            "eval_benchmark_streams": 1,
+        },
+    )()
+
+    specs = _select_specs(args, provider, seed=42)
+    scored = [s for s in specs if s.scored]
+    benchmark = [s for s in specs if not s.scored]
+    by_source = {}
+    for spec in scored:
+        by_source[spec.source] = by_source.get(spec.source, 0) + 1
+    assert by_source == {"fineweb-edu": 2, "pile": 1}
+    assert len(benchmark) == 1 and benchmark[0].source == "enwik9"
+
+
+def test_select_specs_bare_source_falls_back_to_eval_streams(tmp_path):
+    from validator.service import _select_specs
+
+    provider = _corpus_with_provenance(tmp_path, {"demo": 3})
+    args = type(
+        "Args", (),
+        {
+            "eval_source": "demo",
+            "eval_streams": 2,
+            "eval_stream_bytes": 1024,
+            "eval_benchmark_source": "",
+            "eval_benchmark_streams": 0,
+        },
+    )()
+
+    specs = _select_specs(args, provider, seed=42)
+    assert len(specs) == 2
+    assert all(s.source == "demo" and s.scored for s in specs)
+
+
+# --- version-key mismatch waits for the chain instead of killing the process (#120) ------
+
+
+def _version_mismatch_setup(monkeypatch, tmp_path):
+    """Common stubs: version check raises SystemExit; anything past it must not run."""
+
+    state = ValidatorState()
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: _FakeChain())
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+
+    def mismatch(chain):
+        raise SystemExit("version key mismatch: local 1010 != chain 1001")
+
+    monkeypatch.setattr("validator.service._assert_version_key_matches", mismatch)
+
+    def must_not_run(*a, **k):
+        raise AssertionError("must not evaluate/score/set weights under a version mismatch")
+
+    monkeypatch.setattr("validator.service._evaluate_round", must_not_run)
+    monkeypatch.setattr("validator.service.decide_weights", must_not_run)
+
+    return type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": False, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+
+def test_run_once_waits_out_a_version_mismatch_instead_of_exiting(monkeypatch, tmp_path, caplog):
+    # SystemExit inherits from BaseException, so it sailed straight past main()'s
+    # `except Exception` retry loop and killed the whole process on the first round of every
+    # release rollout (pm2 crash-restart loop) until the on-chain weights_version caught up.
+    args = _version_mismatch_setup(monkeypatch, tmp_path)
+
+    run_once(args, wandb_logger=_FakeWandb())  # must return, not raise SystemExit
+
+    assert "weights_version mismatch, waiting for on-chain update" in caplog.text
+
+
+def test_run_reign_only_waits_out_a_version_mismatch_instead_of_exiting(monkeypatch, tmp_path, caplog):
+    args = _version_mismatch_setup(monkeypatch, tmp_path)
+
+    run_reign_only(args, wandb_logger=_FakeWandb())  # must return, not raise SystemExit
+
+    assert "weights_version mismatch, waiting for on-chain update" in caplog.text
+
+
+def test_other_systemexits_in_the_round_still_propagate(monkeypatch, tmp_path):
+    # The catch must be scoped to the version check only -- genuine misconfiguration (e.g.
+    # --corpus-dir misuse raised from _evaluate_round) needs operator intervention, won't
+    # self-heal with time, and must keep hard-stopping the process as before.
+    state = ValidatorState()
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: _FakeChain())
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+
+    def misconfigured(*a, **k):
+        raise SystemExit("--corpus-dir is offline-demo-only")
+
+    monkeypatch.setattr("validator.service._evaluate_round", misconfigured)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": False, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    with pytest.raises(SystemExit, match="offline-demo-only"):
+        run_once(args, wandb_logger=_FakeWandb())
+
+
+def test_weight_setter_run_waits_out_a_version_mismatch_instead_of_exiting(monkeypatch, tmp_path, caplog):
+    import weight_setter.service as ws
+
+    monkeypatch.setattr(ws, "load_state", lambda path: ValidatorState())
+
+    class _NoTouchChain:
+        def __getattr__(self, name):
+            raise AssertionError(f"chain.{name} must not be reached under a version mismatch")
+
+    monkeypatch.setattr("chain.chain.BittensorChain", lambda config: _NoTouchChain())
+
+    def mismatch(chain):
+        raise SystemExit("version key mismatch: local 1010 != chain 1001")
+
+    monkeypatch.setattr(ws, "assert_weights_version_matches", mismatch)
+
+    args = type(
+        "Args", (),
+        {
+            "state_dir": str(tmp_path), "netuid": 117, "network": "finney",
+            "wallet_name": "w", "hotkey_name": "h", "wallet_path": None,
+            "burn_uid": 0, "window_anchor": 0, "dry_run": False,
+        },
+    )()
+
+    ws.run(args)  # must return, not raise SystemExit
+
+    assert "weights_version mismatch, waiting for on-chain update" in caplog.text

@@ -112,30 +112,31 @@ def test_source_range_non_contiguous_is_none(tmp_path):
 
 
 def test_validator_selects_scored_sources_and_benchmark_only_enwik9(tmp_path):
+    # Pins the default round shape (issue #112): 2 scored fineweb-edu windows, 1 scored pile
+    # window (the "name:count" counts in EVAL_SOURCE, not --eval-streams), 1 benchmark-only
+    # enwik9 window.
     from validator.service import _select_specs, build_parser
 
     _write_corpus(tmp_path, [
-        ("chunk_00_fineweb.txt", 10_000, "fineweb"),
+        ("chunk_00_fineweb-edu.txt", 10_000, "fineweb-edu"),
         ("chunk_01_pile.txt", 10_000, "pile"),
         ("chunk_02_enwik9.txt", 10_000, "enwik9"),
     ])
     provider = StaticLocalProvider(tmp_path)
     args = build_parser().parse_args([])
     args.eval_stream_bytes = 1024
-    args.eval_streams = 2
     args.eval_benchmark_streams = 1
 
     specs = _select_specs(args, provider, seed=123)
 
     assert [(spec.source, spec.scored) for spec in specs] == [
-        ("fineweb", True),
-        ("fineweb", True),
-        ("pile", True),
+        ("fineweb-edu", True),
+        ("fineweb-edu", True),
         ("pile", True),
         ("enwik9", False),
     ]
     assert all(0 <= spec.offset and spec.offset + spec.length <= 10_000 for spec in specs[:2])
-    assert all(10_000 <= spec.offset and spec.offset + spec.length <= 20_000 for spec in specs[2:4])
-    assert 20_000 <= specs[4].offset and specs[4].offset + specs[4].length <= 30_000
+    assert 10_000 <= specs[2].offset and specs[2].offset + specs[2].length <= 20_000
+    assert 20_000 <= specs[3].offset and specs[3].offset + specs[3].length <= 30_000
     assert specs == _select_specs(args, provider, seed=123)
     assert [spec.offset for spec in specs] != [spec.offset for spec in _select_specs(args, provider, seed=124)]
