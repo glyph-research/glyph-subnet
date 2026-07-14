@@ -38,16 +38,39 @@ def test_all_pass_is_valid():
     assert score.ratio == 0.45
 
 
-def test_scored_ratio_equal_weights_dataset_averages():
+def test_scored_ratio_is_the_flat_mean_of_stream_ratios():
+    # issue #112: every scored stream counts equally, regardless of source. On a symmetric
+    # 2+2 fixture the flat mean coincides with the old mean-of-source-means (0.55) -- the
+    # asymmetric regression test below is what actually pins the rule change.
     rs = [
-        result("fineweb-0", 10_000, 2_000, source="fineweb"),
-        result("fineweb-1", 10_000, 4_000, source="fineweb"),
+        result("fineweb-edu-0", 10_000, 2_000, source="fineweb-edu"),
+        result("fineweb-edu-1", 10_000, 4_000, source="fineweb-edu"),
         result("pile-0", 1_000, 900, source="pile"),
         result("pile-1", 1_000, 700, source="pile"),
     ]
-    assert source_ratio_breakdown(rs) == pytest.approx({"fineweb": 0.3, "pile": 0.8})
+    assert source_ratio_breakdown(rs) == pytest.approx({"fineweb-edu": 0.3, "pile": 0.8})
     assert scored_ratio(rs) == pytest.approx(0.55)
     assert score_codec(rs, floor_bps=FLOOR, budget_secs=BUDGET).ratio == pytest.approx(0.55)
+
+
+def test_scored_ratio_asymmetric_mix_is_not_source_weighted():
+    # issue #112's regression guard: with the 2x fineweb-edu / 1x pile mix, the old
+    # mean-of-per-source-means would give (mean(0.2, 0.4) + 0.9) / 2 = 0.6 -- pile's single
+    # stream counting as much as fineweb-edu's two combined. The flat per-stream mean is
+    # (0.2 + 0.4 + 0.9) / 3 = 0.5. The two must differ on this fixture, or the aggregation
+    # has silently reverted to source-weighted averaging.
+    rs = [
+        result("fineweb-edu-0", 10_000, 2_000, source="fineweb-edu"),
+        result("fineweb-edu-1", 10_000, 4_000, source="fineweb-edu"),
+        result("pile-0", 1_000, 900, source="pile"),
+    ]
+    breakdown = source_ratio_breakdown(rs)
+    old_mean_of_means = sum(breakdown.values()) / len(breakdown)
+    assert old_mean_of_means == pytest.approx(0.6)
+    assert scored_ratio(rs) == pytest.approx(0.5)
+    assert scored_ratio(rs) != pytest.approx(old_mean_of_means)
+    # source_ratio_breakdown itself stays intact for wandb per-source visibility.
+    assert breakdown == pytest.approx({"fineweb-edu": 0.3, "pile": 0.9})
 
 
 def test_benchmark_only_streams_do_not_affect_score_or_validity():

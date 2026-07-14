@@ -444,8 +444,32 @@ def _make_demo_provider(args) -> StaticLocalProvider:
     return provider
 
 
-def _parse_sources(value: str) -> list[str]:
-    return [part.strip() for part in value.split(",") if part.strip()]
+def _parse_sources(value: str) -> list[tuple[str, int | None]]:
+    """Parse an --eval-source list into ``(name, streams)`` pairs.
+
+    Each entry is ``name`` or ``name:count`` -- the optional count sets that source's scored
+    stream count (issue #112's asymmetric 2x fineweb-edu / 1x pile mix); a bare name yields
+    ``None`` and the caller falls back to --eval-streams.
+    """
+
+    sources: list[tuple[str, int | None]] = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, count = part.partition(":")
+        name = name.strip()
+        if not count:
+            sources.append((name, None))
+            continue
+        try:
+            streams = int(count)
+        except ValueError:
+            raise SystemExit(f"--eval-source entry {part!r}: stream count must be an integer") from None
+        if streams <= 0:
+            raise SystemExit(f"--eval-source entry {part!r}: stream count must be positive")
+        sources.append((name, streams))
+    return sources
 
 
 def _source_seed(seed: int, source: str) -> int:
@@ -472,15 +496,22 @@ def _source_specs(args, provider, seed: int, source: str, *, scored: bool, strea
 
 
 def _select_specs(args, provider, seed):
-    """Select scored FineWeb/Pile streams plus benchmark-only enwik9 streams."""
+    """Select the scored fineweb-edu/pile streams plus benchmark-only enwik9 streams."""
 
     sources = _parse_sources(getattr(args, "eval_source", "") or "")
     if not sources:
-        raise SystemExit("--eval-source must name at least one provenance source (e.g. 'fineweb,pile')")
+        raise SystemExit(
+            "--eval-source must name at least one provenance source (e.g. 'fineweb-edu:2,pile:1')"
+        )
 
     specs = []
-    for scored_source in sources:
-        specs.extend(_source_specs(args, provider, seed, scored_source, scored=True, streams=args.eval_streams))
+    for scored_source, source_streams in sources:
+        specs.extend(
+            _source_specs(
+                args, provider, seed, scored_source, scored=True,
+                streams=source_streams if source_streams is not None else args.eval_streams,
+            )
+        )
     benchmark_source = (getattr(args, "eval_benchmark_source", "") or "").strip()
     benchmark_streams = getattr(args, "eval_benchmark_streams", 0)
     if benchmark_source and benchmark_streams > 0:
