@@ -38,6 +38,18 @@ class RunnerError(Exception):
     """Raised when a codec entrypoint fails, times out, or produces no output."""
 
 
+class InsufficientGpuMemoryError(RunnerError):
+    """Raised when the validator host doesn't have enough free GPU memory to run a codec's
+    declared ``resources.vram_gb`` -- a host-capacity fault, not a codec fault (issue #105).
+
+    Distinct from a plain RunnerError so callers can tell "the codec is broken" (entrypoint
+    crashed/timed out -> invalid, one-shot exclusion) apart from "our machine doesn't have
+    room right now" (a leaked/stuck prior container, several codecs' declared vram_gb simply
+    not fitting back-to-back in one round) -- the latter should not permanently disqualify an
+    otherwise-good codec just because it happened to run after something else left the GPU
+    full."""
+
+
 @dataclass
 class ArtifactRef:
     repo: str
