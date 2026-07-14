@@ -54,7 +54,7 @@ from eval.scoring import source_ratio_breakdown, stream_ratio, zstd_baseline_rat
 from eval.streams import derive_seed, sample_source_streams
 from validation.precheck import precheck_artifact_dir, precheck_codec
 from reign_worker.service import run_round
-from weight_setter.service import decide_weights
+from weight_setter.service import decide_weights, resolve_force_burn
 
 if TYPE_CHECKING:
     from eval.runner_chutes import ChutesRunner
@@ -630,9 +630,22 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         hotkeys = list(metagraph.hotkeys)
         uids = [int(uid) for uid in metagraph.uids]
 
+        # Owner emergency burn override (issue #113) -- best-effort: a chain hiccup here
+        # must not block weight-setting, so it just falls through to the normal schedule.
+        try:
+            raw_commitments = chain.get_all_commitments()
+        except Exception:
+            raw_commitments = {}
+        force_burn = (
+            resolve_force_burn(raw_commitments, hotkeys[args.burn_uid])
+            if 0 <= args.burn_uid < len(hotkeys)
+            else False
+        )
+
         weights, burn = decide_weights(
             hotkeys, state.winner_history, block=block, tempo=tempo,
             last_round_outputs=state.last_round_outputs, anchor=anchor, burn_uid=args.burn_uid,
+            force_burn=force_burn,
         )
         wandb_logger.log(build_weights_metrics(block=block, tempo=tempo, is_burn_tempo=burn, uids=uids, weights=weights))
         save_state(state_path, state)

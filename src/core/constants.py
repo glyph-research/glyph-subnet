@@ -22,6 +22,15 @@ COMPACT_COMMITMENT_PREFIX = "g1|"
 # mempool watcher who only learns repo|rev at reveal time can never commit earlier.
 COMMIT_PHASE_PREFIX = "g1c|"
 REVEAL_PHASE_PREFIX = "g1r|"
+# On-chain, owner-controlled emergency burn override (issue #113): the subnet owner (whichever
+# hotkey currently occupies BURN_UID on the live metagraph) can publish {v, force_burn} on its
+# own commitment slot; force_burn=true makes every validator burn 100% every tempo regardless
+# of the normal schedule, effective network-wide with no code deploy. Distinct prefix so it can
+# never collide with the miner commit/reveal/compact forms above. Additive-only by design: a
+# missing, malformed, or force_burn=false commitment always falls through to the unchanged
+# existing schedule -- this can only ever force MORE burning, never suppress a scheduled one.
+BURN_OVERRIDE_PREFIX = "g1b|"
+BURN_OVERRIDE_VERSION = 1
 # Commit-reveal polling/pruning (exploit vector #9 follow-ups, issue #21).
 # A reveal lands ~1 block after its commit, so validators must observe commitments at
 # roughly block cadence to capture the commit-phase block (full eval rounds are far too

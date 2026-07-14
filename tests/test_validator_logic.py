@@ -435,8 +435,9 @@ class _FakeWandb:
 
 
 class _FakeChain:
-    def __init__(self, rate_limit_remaining=None):
+    def __init__(self, rate_limit_remaining=None, raw_commitments=None):
         self._rate_limit_remaining = rate_limit_remaining
+        self._raw_commitments = raw_commitments or {}
         self.set_weights_called = False
 
     def commit_reveal_enabled(self):
@@ -447,6 +448,9 @@ class _FakeChain:
 
     def metagraph(self):
         return type("Metagraph", (), {"hotkeys": ["hk0"], "uids": [0]})()
+
+    def get_all_commitments(self):
+        return self._raw_commitments
 
     def set_weights(self, uids, weights, version_key):
         self.set_weights_called = True
@@ -533,6 +537,106 @@ def test_run_once_skips_set_weights_when_rate_limited(monkeypatch, tmp_path, cap
 
     assert fake_chain.set_weights_called is False
     assert "set_weights: skipped, rate-limited (42 blocks remaining)" in caplog.text
+
+
+# --- owner emergency burn override wired into run_once (issue #113) ---------------
+
+
+def test_run_once_forces_burn_when_owner_commitment_says_so(monkeypatch, tmp_path):
+    from core.commitments import BurnOverrideCommitment, serialize_burn_override
+
+    state = ValidatorState()
+    # hotkeys=["hk0"], burn_uid=0 -> owner hotkey is "hk0" (see _FakeChain.metagraph).
+    override_raw = serialize_burn_override(BurnOverrideCommitment(force_burn=True))
+    fake_chain = _FakeChain(raw_commitments={"hk0": override_raw})
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+
+    captured = {}
+
+    def fake_decide_weights(*a, **kwargs):
+        captured["force_burn"] = kwargs.get("force_burn")
+        return [1.0], True
+
+    monkeypatch.setattr("validator.service.decide_weights", fake_decide_weights)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": True, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())
+
+    assert captured["force_burn"] is True
+
+
+def test_run_once_does_not_force_burn_without_an_owner_commitment(monkeypatch, tmp_path):
+    state = ValidatorState()
+    fake_chain = _FakeChain()  # no raw_commitments at all
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+
+    captured = {}
+
+    def fake_decide_weights(*a, **kwargs):
+        captured["force_burn"] = kwargs.get("force_burn")
+        return [1.0], False
+
+    monkeypatch.setattr("validator.service.decide_weights", fake_decide_weights)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": True, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())
+
+    assert captured["force_burn"] is False
+
+
+def test_run_once_force_burn_defaults_false_when_get_all_commitments_raises(monkeypatch, tmp_path):
+    # Best-effort: a chain hiccup resolving the override must not block weight-setting.
+    state = ValidatorState()
+    fake_chain = _FakeChain()
+
+    def _boom():
+        raise RuntimeError("chain unreachable")
+
+    fake_chain.get_all_commitments = _boom
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+
+    captured = {}
+
+    def fake_decide_weights(*a, **kwargs):
+        captured["force_burn"] = kwargs.get("force_burn")
+        return [1.0], False
+
+    monkeypatch.setattr("validator.service.decide_weights", fake_decide_weights)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": True, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())  # must not raise
+
+    assert captured["force_burn"] is False
 
 
 # --- --loop/--once default (issue #79) ------------------------------------------
