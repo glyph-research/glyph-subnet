@@ -78,15 +78,20 @@ MAX_CHALLENGERS_PER_ROUND = 32
 # forever, so every hotkey (including a reigning champion, including one-shot-excluded
 # losers) gets fairly re-benchmarked under the new rules instead of being silently compared
 # against numbers computed under the old ones.
-SCORING_VERSION = 1
+# v2 (issue #112): shard-randomized corpus sampling, fineweb -> fineweb-edu (2x/1x mix),
+# retired pile shard 0 (burned range), flat-average scored_ratio. Invalidates every score
+# computed under the exploitable prefix-bounded sampler -- the exploiting champion included.
+SCORING_VERSION = 2
 
-# --- Per-source evaluation (issue #10) ----------------------------------------
-# Score each miner on two random 4 MiB FineWeb windows and two random 4 MiB Pile windows.
-# The score is the mean of the FineWeb average and the Pile average, so each dataset carries
-# equal weight. enwik9 runs as a one-window benchmark display only: it is not scored and
-# does not affect validity. Window starts are salt-seeded (see eval/streams.derive_seed), so
-# each validator independently picks fresh random windows every benchmarking round.
-EVAL_SOURCE = "fineweb,pile"
+# --- Per-source evaluation (issue #10; remixed by issue #112) -------------------
+# Score each miner on three 4 MiB windows: two random fineweb-edu windows and one pile
+# window, each stream weighted equally in the final score (flat average -- see
+# eval/scoring.scored_ratio). The "name:count" syntax sets per-source scored stream counts;
+# a bare name falls back to --eval-streams. enwik9 runs as a one-window benchmark display
+# only: it is not scored and does not affect validity. Window starts are salt-seeded (see
+# eval/streams.derive_seed), so each validator independently picks fresh random windows
+# every benchmarking round.
+EVAL_SOURCE = "fineweb-edu:2,pile:1"
 EVAL_BENCHMARK_SOURCE = "enwik9"
 EVAL_STREAMS = 2
 EVAL_BENCHMARK_STREAMS = 1

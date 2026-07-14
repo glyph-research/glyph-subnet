@@ -4,11 +4,13 @@ import pytest
 
 from eval.corpus import StaticLocalProvider
 from eval.live_corpus import (
+    MIXED_SOURCES,
     Source,
     fetch_source_chunks,
     resolve_live_corpus,
     write_mixed_corpus,
     _extract_text,
+    _shard_for_seed,
     _skip_for_seed,
 )
 
@@ -135,8 +137,8 @@ def _patch_iter_dataset(monkeypatch, skip_cap):
 
     records = _records_by_source(skip_cap)
 
-    def fake_iter_dataset(source, token):
-        return iter(records[source.name])
+    def fake_iter_dataset(source, token, *, seed):
+        return iter(records[source.name]), {"shard_index": 0, "num_shards": 1}
 
     monkeypatch.setattr(live_corpus, "_iter_dataset", fake_iter_dataset)
 
@@ -177,6 +179,84 @@ def test_slice_is_not_the_dataset_prefix():
     assert skip_alpha > 0 or skip_beta > 0
 
 
+# --- shard randomization (issue #112) ---------------------------------------------------
+#
+# The bounded record skip used to apply from record 0 of the whole dataset, making the first
+# skip_cap records per source the ENTIRE reachable sampling universe (~a few hundred MB) --
+# small enough to embed in an artifact, and confirmed exploited on mainnet by a
+# dictionary-lookup codec. A seed-derived shard is now selected first; the skip applies
+# within that one shard only.
+
+
+def test_shard_for_seed_is_deterministic_and_seed_and_source_dependent():
+    source = Source("alpha", "fake/alpha", None, "train", "text", 2)
+    other = Source("beta", "fake/beta", None, "train", "text", 1)
+    a = _shard_for_seed(source, "0xbeacon", 1000)
+    # Pure function of (seed, source): two independent validators land on the same shard.
+    assert a == _shard_for_seed(source, "0xbeacon", 1000)
+    assert 0 <= a < 1000
+    # Seed- and source-sensitivity: over many draws the selections must not all collide
+    # (any single pair colliding is legitimately possible with 1000 shards; all of them
+    # colliding means the seed/source isn't actually feeding the digest).
+    assert any(_shard_for_seed(source, f"0xseed-{i}", 1000) != a for i in range(20))
+    assert any(
+        _shard_for_seed(other, f"0xseed-{i}", 1000) != _shard_for_seed(source, f"0xseed-{i}", 1000)
+        for i in range(20)
+    )
+
+
+def test_shard_for_seed_never_selects_an_excluded_shard():
+    # Pile's shard 0 covers records [0, 100_000) -- the burned range the exploiting codec's
+    # dictionary embeds -- and must never be selectable again, whatever the seed.
+    source = Source("pile", "fake/pile", None, "train", "text", 1, excluded_shards=(0,))
+    for round_index in range(500):
+        assert _shard_for_seed(source, f"beacon-{round_index}", 30) != 0
+
+
+def test_shard_for_seed_reaches_beyond_the_burned_prefix():
+    # With shard randomization the reachable universe must extend past shard 0: across many
+    # seeds, high shard indices actually get drawn (regression guard against any change that
+    # quietly collapses selection back to a fixed prefix).
+    source = Source("pile", "fake/pile", None, "train", "text", 1, excluded_shards=(0,))
+    drawn = {_shard_for_seed(source, f"beacon-{i}", 30) for i in range(500)}
+    assert len(drawn) > 20  # nearly all of the 29 selectable shards get reached
+
+
+def test_shard_for_seed_fails_closed_with_no_selectable_shards():
+    source = Source("pile", "fake/pile", None, "train", "text", 1, excluded_shards=(0,))
+    with pytest.raises(RuntimeError, match="no selectable shards"):
+        _shard_for_seed(source, "beacon", 1)  # only shard 0 exists and it is excluded
+
+
+def test_fetch_source_chunks_records_shard_provenance(monkeypatch):
+    import eval.live_corpus as live_corpus
+
+    source = Source("alpha", "fake/alpha", None, "train", "text", 1)
+
+    def fake_iter_dataset(src, token, *, seed):
+        return iter(_records("alpha", 300)), {"shard_index": 17, "num_shards": 42}
+
+    monkeypatch.setattr(live_corpus, "_iter_dataset", fake_iter_dataset)
+    _chunks, prov = fetch_source_chunks(source, 4096, seed="seed1", skip_cap=8)
+    assert prov["shard_index"] == 17
+    assert prov["num_shards"] == 42
+
+
+def test_mixed_sources_reflect_the_112_remix():
+    by_name = {s.name: s for s in MIXED_SOURCES}
+    assert set(by_name) == {"fineweb-edu", "pile", "enwik9"}
+    # fineweb-edu: the FULL corpus (default config), not a sample-* convenience subset.
+    assert by_name["fineweb-edu"].dataset == "HuggingFaceFW/fineweb-edu"
+    assert by_name["fineweb-edu"].config == "default"
+    assert by_name["fineweb-edu"].chunks == 2
+    assert by_name["fineweb-edu"].excluded_shards == ()
+    # pile: burned shard 0 retired forever.
+    assert by_name["pile"].chunks == 1
+    assert by_name["pile"].excluded_shards == (0,)
+    # enwik9: benchmark-only display, unchanged.
+    assert by_name["enwik9"].chunks == 2
+
+
 def test_resolve_live_corpus_reuses_cache_without_rebuilding(tmp_path, monkeypatch):
     _patch_iter_dataset(monkeypatch, skip_cap=8)
     cache_root = tmp_path / "cache"
@@ -188,7 +268,7 @@ def test_resolve_live_corpus_reuses_cache_without_rebuilding(tmp_path, monkeypat
 
     import eval.live_corpus as live_corpus
 
-    def failing_iter_dataset(source, token):
+    def failing_iter_dataset(source, token, *, seed):
         raise AssertionError("must not re-stream from HF for an already-cached seed")
 
     monkeypatch.setattr(live_corpus, "_iter_dataset", failing_iter_dataset)

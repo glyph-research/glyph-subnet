@@ -837,3 +837,93 @@ def test_main_loops_continuously_without_once_or_loop_flag(monkeypatch):
     vs.main()
 
     assert call_count["n"] >= 3
+
+
+# --- per-source scored stream counts (issue #112) ----------------------------------
+
+
+def test_parse_sources_supports_optional_per_source_stream_counts():
+    from validator.service import _parse_sources
+
+    # Bare names keep the legacy behavior (fall back to --eval-streams).
+    assert _parse_sources("fineweb,pile") == [("fineweb", None), ("pile", None)]
+    # name:count sets that source's scored stream count (the 2x/1x remix).
+    assert _parse_sources("fineweb-edu:2,pile:1") == [("fineweb-edu", 2), ("pile", 1)]
+    # Mixed forms and whitespace are fine.
+    assert _parse_sources(" fineweb-edu:2 , pile ") == [("fineweb-edu", 2), ("pile", None)]
+    assert _parse_sources("") == []
+
+
+def test_parse_sources_rejects_bad_counts():
+    from validator.service import _parse_sources
+
+    with pytest.raises(SystemExit, match="must be an integer"):
+        _parse_sources("fineweb-edu:two")
+    with pytest.raises(SystemExit, match="must be positive"):
+        _parse_sources("pile:0")
+
+
+def _corpus_with_provenance(tmp_path, chunk_map):
+    """Write a corpus dir with provenance for the given {source: chunk_count} map."""
+
+    import json as _json
+
+    entries = []
+    index = 0
+    for source, count in chunk_map.items():
+        chunk_ids = []
+        for _ in range(count):
+            name = f"chunk_{index:02d}_{source}.txt"
+            (tmp_path / name).write_bytes(b"x" * 8192)
+            chunk_ids.append(name)
+            index += 1
+        entries.append({"source": source, "chunk_ids": chunk_ids})
+    (tmp_path / "provenance.json").write_text(_json.dumps(entries))
+    from eval.corpus import StaticLocalProvider
+
+    return StaticLocalProvider(tmp_path)
+
+
+def test_select_specs_asymmetric_mix_yields_per_source_counts(tmp_path):
+    from validator.service import _select_specs
+
+    provider = _corpus_with_provenance(tmp_path, {"fineweb-edu": 2, "pile": 1, "enwik9": 2})
+    args = type(
+        "Args", (),
+        {
+            "eval_source": "fineweb-edu:2,pile:1",
+            "eval_streams": 99,  # must be ignored when counts are explicit
+            "eval_stream_bytes": 4096,
+            "eval_benchmark_source": "enwik9",
+            "eval_benchmark_streams": 1,
+        },
+    )()
+
+    specs = _select_specs(args, provider, seed=42)
+    scored = [s for s in specs if s.scored]
+    benchmark = [s for s in specs if not s.scored]
+    by_source = {}
+    for spec in scored:
+        by_source[spec.source] = by_source.get(spec.source, 0) + 1
+    assert by_source == {"fineweb-edu": 2, "pile": 1}
+    assert len(benchmark) == 1 and benchmark[0].source == "enwik9"
+
+
+def test_select_specs_bare_source_falls_back_to_eval_streams(tmp_path):
+    from validator.service import _select_specs
+
+    provider = _corpus_with_provenance(tmp_path, {"demo": 3})
+    args = type(
+        "Args", (),
+        {
+            "eval_source": "demo",
+            "eval_streams": 2,
+            "eval_stream_bytes": 1024,
+            "eval_benchmark_source": "",
+            "eval_benchmark_streams": 0,
+        },
+    )()
+
+    specs = _select_specs(args, provider, seed=42)
+    assert len(specs) == 2
+    assert all(s.source == "demo" and s.scored for s in specs)
