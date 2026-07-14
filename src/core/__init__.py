@@ -7,5 +7,5 @@ def _version_key_from_version(version: str) -> int:
     return major * 1000 + minor * 10 + patch
 
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 __version_key__ = _version_key_from_version(__version__)
