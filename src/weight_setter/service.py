@@ -134,7 +134,10 @@ def run(args: argparse.Namespace) -> None:
         # Without this line, a forced burn is indistinguishable in the log from an ordinary
         # scheduled burn tempo -- except it happens EVERY tempo, which reads as a bug unless
         # the operator knows the owner override is active.
-        bt_logging.warning("Subnet faced an issue and turned into temporal burn")
+        bt_logging.warning(
+            "Subnet faced an issue and turned into temporal burn "
+            "(owner emergency override: on-chain force_burn=true) -- burning 100% this tempo"
+        )
 
     weights, burn = decide_weights(
         hotkeys,

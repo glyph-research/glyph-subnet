@@ -506,13 +506,18 @@ def _make_chain(args) -> BittensorChain:
     )
 
 
-def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: str) -> tuple[int, dict | None]:
+def _evaluate_round(
+    args, state: ValidatorState, chain: BittensorChain, salt: str
+) -> tuple[int, dict | None, dict[str, str]]:
     """Precheck commitments and, if there are new challengers, run one reign round.
 
-    Returns ``(block, round_metrics)``; ``round_metrics`` is ``None`` when no challengers ran
-    this round (nothing new to report). ``round_metrics`` is a plain dict built by
-    ``core.wandb_logger.build_round_metrics`` purely from what this round already decided --
-    reporting it changes nothing about scoring/promotion (issue #41).
+    Returns ``(block, round_metrics, raw_commitments)``; ``round_metrics`` is ``None`` when no
+    challengers ran this round (nothing new to report). ``round_metrics`` is a plain dict
+    built by ``core.wandb_logger.build_round_metrics`` purely from what this round already
+    decided -- reporting it changes nothing about scoring/promotion (issue #41).
+    ``raw_commitments`` is the commitment dict this round already fetched for precheck,
+    passed back so ``run_once``'s burn-override check (issue #113) doesn't need a second,
+    redundant ``get_all_commitments()`` round-trip moments later.
     """
 
     if getattr(args, "corpus_dir", None):
@@ -593,7 +598,7 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
             winner_ratio=champion_after.ratio if champion_after else None,
             crown_changed=bool(champion_after) and champion_after.hotkey != champion_before,
         )
-    return block, round_metrics
+    return block, round_metrics, raw_commitments
 
 
 # Production paths (require chain access)
@@ -614,7 +619,7 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         if not chain.commit_reveal_enabled():
             bt_logging.warning("commit-reveal is not enabled on this subnet; anti-copy weights are weaker")
 
-        block, round_metrics = _evaluate_round(args, state, chain, salt)
+        block, round_metrics, raw_commitments = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
             wandb_logger.log(round_metrics)
         champion = state.winner_history[0] if state.winner_history else None
@@ -630,12 +635,8 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         hotkeys = list(metagraph.hotkeys)
         uids = [int(uid) for uid in metagraph.uids]
 
-        # Owner emergency burn override (issue #113) -- best-effort: a chain hiccup here
-        # must not block weight-setting, so it just falls through to the normal schedule.
-        try:
-            raw_commitments = chain.get_all_commitments()
-        except Exception:
-            raw_commitments = {}
+        # Owner emergency burn override (issue #113), read from the commitment dict
+        # _evaluate_round already fetched for precheck -- no second chain round-trip.
         force_burn = (
             resolve_force_burn(raw_commitments, hotkeys[args.burn_uid])
             if 0 <= args.burn_uid < len(hotkeys)
@@ -645,7 +646,10 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
             # Without this line, a forced burn is indistinguishable in the log from an
             # ordinary scheduled burn tempo -- except it happens EVERY tempo, which reads
             # as a bug unless the operator knows the owner override is active.
-            bt_logging.warning("Subnet faced an issue and turned into temporal burn")
+            bt_logging.warning(
+                "Subnet faced an issue and turned into temporal burn "
+                "(owner emergency override: on-chain force_burn=true) -- burning 100% this tempo"
+            )
 
         weights, burn = decide_weights(
             hotkeys, state.winner_history, block=block, tempo=tempo,
@@ -687,7 +691,7 @@ def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = 
 
         chain = _make_chain(args)
         bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
-        _block, round_metrics = _evaluate_round(args, state, chain, salt)
+        _block, round_metrics, _raw_commitments = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
             wandb_logger.log(round_metrics)
         save_state(state_path, state)
