@@ -400,6 +400,7 @@ def test_check_gpu_memory_raises_when_insufficient(monkeypatch):
     from eval.runner_docker import _check_gpu_memory
 
     monkeypatch.setattr("eval.runner_docker._free_gpu_memory_gb", lambda gpu_device: 5.0)
+    monkeypatch.setattr("eval.runner_docker._total_gpu_memory_gb", lambda gpu_device: None)
     with pytest.raises(InsufficientGpuMemoryError, match="need ~22.0 GiB"):
         _check_gpu_memory(_manifest_with_vram(20), None)
 
@@ -408,7 +409,74 @@ def test_check_gpu_memory_passes_with_enough_headroom(monkeypatch):
     from eval.runner_docker import _check_gpu_memory
 
     monkeypatch.setattr("eval.runner_docker._free_gpu_memory_gb", lambda gpu_device: 30.0)
+    monkeypatch.setattr("eval.runner_docker._total_gpu_memory_gb", lambda gpu_device: None)
     _check_gpu_memory(_manifest_with_vram(20), None)  # no raise
+
+
+# --- requirement capped at the GPU's actual total capacity (issue #123) ------------------
+#
+# declared + headroom was never capped against what the card physically has: a codec
+# honestly declaring vram_gb at/near the reference GPU's capacity (24 GiB declared -> 26 GiB
+# required vs ~23.99 GiB total) could NEVER pass -- permanent silent exclusion on that
+# hardware, not the transient deferral the preflight is for. Numbers below mirror the live
+# observation on the reference RTX 4090: total 23.99 GiB, idle free 23.30 GiB.
+
+
+def test_check_gpu_memory_caps_requirement_at_total_minus_reserve(monkeypatch):
+    from eval.runner_docker import _check_gpu_memory
+
+    # Idle reference card: declared 24 + 2 headroom = 26 GiB raw requirement, but the cap
+    # (23.99 - 0.75 = 23.24) fits in the 23.30 GiB an idle card actually has free.
+    monkeypatch.setattr("eval.runner_docker._free_gpu_memory_gb", lambda gpu_device: 23.30)
+    monkeypatch.setattr("eval.runner_docker._total_gpu_memory_gb", lambda gpu_device: 23.99)
+    _check_gpu_memory(_manifest_with_vram(24), None)  # no raise
+
+
+def test_check_gpu_memory_capped_requirement_still_blocks_a_busy_gpu(monkeypatch):
+    from eval.runner import InsufficientGpuMemoryError
+    from eval.runner_docker import _check_gpu_memory
+
+    # The cap makes a max declaration satisfiable on an IDLE card -- it must not neuter the
+    # check when the GPU genuinely is occupied (free well below total - reserve).
+    monkeypatch.setattr("eval.runner_docker._free_gpu_memory_gb", lambda gpu_device: 5.0)
+    monkeypatch.setattr("eval.runner_docker._total_gpu_memory_gb", lambda gpu_device: 23.99)
+    with pytest.raises(InsufficientGpuMemoryError, match="capped at GPU total"):
+        _check_gpu_memory(_manifest_with_vram(24), None)
+
+
+def test_check_gpu_memory_modest_declaration_unaffected_by_the_cap(monkeypatch):
+    from eval.runner import InsufficientGpuMemoryError
+    from eval.runner_docker import _check_gpu_memory
+
+    # Well under the cap: min(20 + 2, 23.24) = 22 -- identical requirement to before #123.
+    monkeypatch.setattr("eval.runner_docker._total_gpu_memory_gb", lambda gpu_device: 23.99)
+    monkeypatch.setattr("eval.runner_docker._free_gpu_memory_gb", lambda gpu_device: 23.30)
+    _check_gpu_memory(_manifest_with_vram(20), None)  # no raise
+    monkeypatch.setattr("eval.runner_docker._free_gpu_memory_gb", lambda gpu_device: 5.0)
+    with pytest.raises(InsufficientGpuMemoryError, match="need ~22.0 GiB"):
+        _check_gpu_memory(_manifest_with_vram(20), None)
+
+
+def test_check_gpu_memory_unknown_total_leaves_requirement_uncapped(monkeypatch):
+    from eval.runner import InsufficientGpuMemoryError
+    from eval.runner_docker import _check_gpu_memory
+
+    # Same fail-open posture as the free-memory query: an unknown total just skips the cap.
+    monkeypatch.setattr("eval.runner_docker._total_gpu_memory_gb", lambda gpu_device: None)
+    monkeypatch.setattr("eval.runner_docker._free_gpu_memory_gb", lambda gpu_device: 23.30)
+    with pytest.raises(InsufficientGpuMemoryError, match="need ~26.0 GiB"):
+        _check_gpu_memory(_manifest_with_vram(24), None)
+
+
+def test_total_gpu_memory_gb_parses_and_fails_open(monkeypatch):
+    from eval.runner_docker import _total_gpu_memory_gb
+
+    monkeypatch.setattr("eval.runner_docker.shutil.which", _which_stub(True))
+    monkeypatch.setattr("eval.runner_docker.subprocess.run", _run_stub("24564\n"))
+    assert _total_gpu_memory_gb(None) == pytest.approx(24564 / 1024.0)
+
+    monkeypatch.setattr("eval.runner_docker.shutil.which", _which_stub(False))
+    assert _total_gpu_memory_gb(None) is None
 
 
 def test_execute_checks_gpu_memory_before_launching_any_container(monkeypatch, tmp_path):

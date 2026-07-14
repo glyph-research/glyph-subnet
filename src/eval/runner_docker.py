@@ -83,6 +83,15 @@ _MIN_CONTAINER_CREATE_TIMEOUT_SECS = 60.0
 # elsewhere, and a prior container's leaked/still-tearing-down memory shouldn't be counted as
 # available. Flat rather than proportional so it means the same thing at any declared size.
 _GPU_MEMORY_HEADROOM_GB = 2.0
+# Baseline overhead that is never actually free even on a fully idle card. Observed on the
+# reference RTX 4090 (issue #123): total 24,564 MiB but idle free only 23,862 MiB -- ~0.69
+# GiB permanently held (219 MiB of idle processes plus ~480 MiB driver/context reserve that
+# nvidia-smi doesn't even report as "used"). The reserve must exceed that never-free gap or
+# the cap below is itself unsatisfiable on an idle card; 0.75 covers it with a little slack.
+# Used to cap the preflight requirement at what the GPU can EVER provide: without the cap, a
+# codec honestly declaring vram_gb at/near the card's capacity needed declared + headroom >
+# total -- permanently unsatisfiable, not transiently blocked.
+_RESERVED_DRIVER_OVERHEAD_GB = 0.75
 
 
 def _allow_sandbox_read_tree(root: Path) -> None:
@@ -179,17 +188,18 @@ def _verify_gpu_model(gpu_device: str | None, reference_gpu: str) -> None:
         )
 
 
-def _free_gpu_memory_gb(gpu_device: str | None) -> float | None:
-    """Minimum free VRAM (GiB) across the GPU(s) this runner would use, via ``nvidia-smi``.
+def _query_gpu_memory_gb(field: str, gpu_device: str | None) -> float | None:
+    """Minimum of one ``nvidia-smi`` memory field (GiB) across the GPU(s) this runner would
+    use.
 
     Returns None if it cannot be determined (missing binary, query failure, unparseable
-    output) so the caller skips the preflight check rather than false-failing a codec on a
-    host-tooling hiccup unrelated to actual GPU capacity.
+    output) so the caller skips the corresponding preflight logic rather than false-failing
+    a codec on a host-tooling hiccup unrelated to actual GPU capacity.
     """
 
     if shutil.which("nvidia-smi") is None:
         return None
-    cmd = ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]
+    cmd = ["nvidia-smi", f"--query-gpu={field}", "--format=csv,noheader,nounits"]
     if gpu_device:
         cmd += ["-i", gpu_device]
     try:
@@ -202,6 +212,23 @@ def _free_gpu_memory_gb(gpu_device: str | None) -> float | None:
     if not values_mib:
         return None
     return min(values_mib) / 1024.0  # nvidia-smi reports MiB; report the tightest GPU
+
+
+def _free_gpu_memory_gb(gpu_device: str | None) -> float | None:
+    """Minimum free VRAM (GiB) across the GPU(s) this runner would use, or None if unknown."""
+
+    return _query_gpu_memory_gb("memory.free", gpu_device)
+
+
+def _total_gpu_memory_gb(gpu_device: str | None) -> float | None:
+    """Minimum total VRAM (GiB) across the GPU(s) this runner would use, or None if unknown.
+
+    Queried at runtime rather than hardcoded (issue #123): real cards report small
+    unit-to-unit variance (24,564 MiB on the observed reference RTX 4090, not a clean
+    24,576), and this self-corrects for any future DOCKER_REFERENCE_GPU change.
+    """
+
+    return _query_gpu_memory_gb("memory.total", gpu_device)
 
 
 def _check_gpu_memory(manifest, gpu_device: str | None) -> None:
@@ -225,13 +252,23 @@ def _check_gpu_memory(manifest, gpu_device: str | None) -> None:
         needed_gb = float(declared) + _GPU_MEMORY_HEADROOM_GB
     except (TypeError, ValueError):
         return
+    # Cap the requirement at what this GPU can EVER provide (issue #123): a codec honestly
+    # declaring vram_gb at/near the card's capacity would otherwise need declared + headroom
+    # > total -- permanently unsatisfiable on any amount of waiting, i.e. silent permanent
+    # exclusion rather than the transient deferral this mechanism is for. The reserve
+    # accounts for overhead that's never free even on an idle card (see its comment).
+    # Unknown total -> uncapped, same fail-open posture as the free-memory query below.
+    total_gb = _total_gpu_memory_gb(gpu_device)
+    if total_gb is not None:
+        needed_gb = min(needed_gb, total_gb - _RESERVED_DRIVER_OVERHEAD_GB)
     free_gb = _free_gpu_memory_gb(gpu_device)
     if free_gb is None:
         return
     if free_gb < needed_gb:
         raise InsufficientGpuMemoryError(
             f"insufficient free GPU memory: need ~{needed_gb:.1f} GiB "
-            f"(declared {float(declared):.1f} GiB + {_GPU_MEMORY_HEADROOM_GB:.1f} GiB headroom), "
+            f"(declared {float(declared):.1f} GiB + {_GPU_MEMORY_HEADROOM_GB:.1f} GiB headroom, "
+            f"capped at GPU total minus {_RESERVED_DRIVER_OVERHEAD_GB:.1f} GiB reserve), "
             f"{free_gb:.1f} GiB free"
         )
 
