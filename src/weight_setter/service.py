@@ -107,7 +107,17 @@ def run(args: argparse.Namespace) -> None:
         )
     )
     version_key = local_version_key()
-    bt_logging.info(f"version key ok: {assert_weights_version_matches(chain)}")
+    try:
+        bt_logging.info(f"version key ok: {assert_weights_version_matches(chain)}")
+    except SystemExit as exc:
+        # A version-key mismatch is the expected, transient state during a release rollout
+        # until the owner updates the on-chain weights_version hyperparameter -- skip this
+        # cycle (no weights set) and let main()'s sleep/retry loop pick up once the chain
+        # catches up, instead of SystemExit sailing past `except Exception` and killing the
+        # process into a pm2 crash-restart loop (issue #120). Scoped to the version check
+        # only: any other SystemExit still hard-stops as before.
+        bt_logging.warning(f"weights_version mismatch, waiting for on-chain update: {exc}")
+        return
     block = chain.current_block()
     tempo = chain.tempo()
     anchor = (
