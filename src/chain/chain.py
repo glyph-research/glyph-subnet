@@ -37,6 +37,23 @@ class BittensorChain:
     def hotkey(self) -> str:
         return self.wallet.hotkey.ss58_address
 
+    def identity_name(self) -> str | None:
+        """This validator's on-chain identity name (``btcli wallet set-identity``), or None
+        if unset/unavailable.
+
+        Reads the coldkey's public ss58 address only -- no wallet unlock needed. Best-effort:
+        identity is a nice-to-have (currently just a wandb run label), so any chain hiccup
+        here is swallowed rather than allowed to block validator startup.
+        """
+
+        try:
+            identity = self.subtensor.query_identity(self.wallet.coldkeypub.ss58_address)
+        except Exception:
+            return None
+        if identity is None:
+            return None
+        return identity.name or None
+
     def metagraph(self):
         return self.subtensor.metagraph(netuid=self.config.netuid)
 

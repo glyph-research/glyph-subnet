@@ -98,26 +98,28 @@ def test_make_wandb_logger_defaults_to_glyph_research_org_text_compression(fake_
     assert logger._entity == "glyph-research-org"
 
 
-# --- run name defaults to wallet identity (issue #102 follow-up) ------------------
+# --- run name defaults to on-chain identity (issue #102 follow-up) ----------------
 
 
-def test_make_wandb_logger_names_the_run_after_wallet_and_hotkey(fake_wandb):
+def test_make_wandb_logger_uses_the_resolved_identity_name(fake_wandb):
     # Multiple validators sharing the glyph-research-org/text-compression project must be
-    # distinguishable at a glance instead of wandb's random auto-generated name.
-    args = argparse.Namespace(wandb_off=False, wallet_name="w", hotkey_name="h")
-    logger = make_wandb_logger(args)
-    assert logger._name == "w-h"
+    # distinguishable at a glance instead of wandb's random auto-generated name. The caller
+    # (validator.service) resolves the actual on-chain-identity-or-hotkey fallback and passes
+    # it straight through.
+    args = argparse.Namespace(wandb_off=False)
+    logger = make_wandb_logger(args, identity_name="5F...somehotkey")
+    assert logger._name == "5F...somehotkey"
 
 
-def test_wandb_name_flag_overrides_wallet_hotkey_default(fake_wandb):
-    args = argparse.Namespace(wandb_off=False, wallet_name="w", hotkey_name="h", wandb_name="my-custom-run")
-    logger = make_wandb_logger(args)
+def test_wandb_name_flag_overrides_identity_name(fake_wandb):
+    args = argparse.Namespace(wandb_off=False, wandb_name="my-custom-run")
+    logger = make_wandb_logger(args, identity_name="5F...somehotkey")
     assert logger._name == "my-custom-run"
 
 
-def test_make_wandb_logger_leaves_name_unset_without_wallet_or_hotkey(fake_wandb):
-    # Programmatically-built args with no wallet/hotkey identity (and no explicit override)
-    # -> name stays None, wandb picks its own, exactly like before this default existed.
+def test_make_wandb_logger_leaves_name_unset_without_identity_name(fake_wandb):
+    # No explicit override and no resolved identity (e.g. programmatically-built args, or
+    # chain lookup failed) -> name stays None, wandb picks its own.
     args = argparse.Namespace(wandb_off=False)
     logger = make_wandb_logger(args)
     assert logger._name is None

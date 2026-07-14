@@ -162,8 +162,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--wandb.name", dest="wandb_name", default=None,
-        help="Override the wandb run name. Defaults to '<wallet-name>-<hotkey-name>' so "
-        "multiple validators are distinguishable at a glance in the shared project.",
+        help="Override the wandb run name. Defaults to this coldkey's on-chain identity name "
+        "('btcli wallet set-identity'), or its hotkey ss58 if no identity is set, so multiple "
+        "validators are distinguishable at a glance in the shared project.",
     )
     parser.add_argument(
         "--wandb.offline", dest="wandb_offline", action="store_true",
@@ -511,6 +512,30 @@ def _make_chain(args) -> BittensorChain:
     )
 
 
+def _wandb_identity_name(chain: BittensorChain) -> str | None:
+    """Best-effort wandb run-name fallback (issue #102 follow-up): this validator's on-chain
+    identity name if set (``btcli wallet set-identity``), else its hotkey ss58 -- still
+    distinguishes validators at a glance in the shared project even though set-identity is
+    opt-in and most hotkeys won't have one. An explicit --wandb.name always overrides this
+    (see core.wandb_logger.make_wandb_logger)."""
+
+    return chain.identity_name() or chain.hotkey
+
+
+def _startup_wandb_identity_name(args) -> str | None:
+    """Resolve the wandb run-name identity fallback via a throwaway chain connection before
+    the wandb run starts (``main()`` only -- ``run_once``/``run_reign_only`` reuse the chain
+    they build for the round itself). Unlike that per-round chain, a failure constructing
+    this one must never crash/delay startup -- it's a nice-to-have label, and the real
+    per-round chain (built fresh inside the retried round loop) surfaces a genuine
+    wallet/network problem properly either way."""
+
+    try:
+        return _wandb_identity_name(_make_chain(args))
+    except Exception:
+        return None
+
+
 def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: str) -> tuple[int, dict | None]:
     """Precheck commitments and, if there are new challengers, run one reign round.
 
@@ -606,7 +631,6 @@ def _evaluate_round(args, state: ValidatorState, chain: BittensorChain, salt: st
 
 def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) -> None:
     owns_logger = wandb_logger is None
-    wandb_logger = wandb_logger or make_wandb_logger(args)
     try:
         state_dir = Path(args.state_dir)
         state_path = state_dir / "validator_state.json"
@@ -614,6 +638,7 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         salt = _load_salt(state_dir, args.salt_file)
 
         chain = _make_chain(args)
+        wandb_logger = wandb_logger or make_wandb_logger(args, identity_name=_wandb_identity_name(chain))
         version_key = _local_version_key()
         bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
         if not chain.commit_reveal_enabled():
@@ -657,7 +682,9 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         else:
             bt_logging.warning(f"set_weights: success=False error={response.error} message={response.message}")
     finally:
-        if owns_logger:
+        # wandb_logger may still be None here if an exception struck before chain was built
+        # (it's now created after chain, to resolve the run-name identity fallback from it).
+        if owns_logger and wandb_logger is not None:
             wandb_logger.finish()
 
 
@@ -665,7 +692,6 @@ def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = 
     """The reign half only (evaluate + update crown), no weight setting."""
 
     owns_logger = wandb_logger is None
-    wandb_logger = wandb_logger or make_wandb_logger(args)
     try:
         state_dir = Path(args.state_dir)
         state_path = state_dir / "validator_state.json"
@@ -673,6 +699,7 @@ def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = 
         salt = _load_salt(state_dir, args.salt_file)
 
         chain = _make_chain(args)
+        wandb_logger = wandb_logger or make_wandb_logger(args, identity_name=_wandb_identity_name(chain))
         bt_logging.info(f"version key ok: {_assert_version_key_matches(chain)}")
         _block, round_metrics = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
@@ -680,7 +707,8 @@ def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = 
         save_state(state_path, state)
         bt_logging.info(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in state.winner_history]}")
     finally:
-        if owns_logger:
+        # wandb_logger may still be None if an exception struck before chain was built.
+        if owns_logger and wandb_logger is not None:
             wandb_logger.finish()
 
 
@@ -810,7 +838,7 @@ def main() -> None:
     # One wandb run for the whole process lifetime (not one per --loop iteration) so console
     # capture starts before the first round and metrics from every round land in the same run
     # (see core.wandb_logger's own restart_interval for keeping very long runs bounded).
-    wandb_logger = make_wandb_logger(args)
+    wandb_logger = make_wandb_logger(args, identity_name=_startup_wandb_identity_name(args))
     poll_chain = None
     try:
         while True:

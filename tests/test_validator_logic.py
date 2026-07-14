@@ -13,8 +13,11 @@ from validator.service import (
     _assert_version_key_matches,
     _make_demo_provider,
     _make_runner,
+    _startup_wandb_identity_name,
+    _wandb_identity_name,
     decide_weights,
     run_once,
+    run_reign_only,
 )
 from core.weights import WinnerEntry
 
@@ -594,6 +597,90 @@ def test_wandb_name_flag_defaults_unset_and_parses_when_passed():
     assert named_args.wandb_name == "my-validator"
 
 
+# --- wandb run name resolved from on-chain identity (issue #102 follow-up) --------------
+
+
+def test_wandb_identity_name_prefers_identity_over_hotkey():
+    chain = type("C", (), {"identity_name": lambda self: "my-id", "hotkey": "hk-ss58"})()
+    assert _wandb_identity_name(chain) == "my-id"
+
+
+def test_wandb_identity_name_falls_back_to_hotkey_when_no_identity_set():
+    chain = type("C", (), {"identity_name": lambda self: None, "hotkey": "hk-ss58"})()
+    assert _wandb_identity_name(chain) == "hk-ss58"
+
+
+def test_startup_wandb_identity_name_returns_none_on_chain_build_failure(monkeypatch):
+    # Never allowed to block/crash startup -- a wallet/network hiccup resolving this
+    # nice-to-have falls back to None; the real per-round chain surfaces genuine problems.
+    def _boom(args):
+        raise RuntimeError("wallet not found")
+
+    monkeypatch.setattr("validator.service._make_chain", _boom)
+    assert _startup_wandb_identity_name(object()) is None
+
+
+def test_run_once_builds_chain_before_wandb_logger_and_passes_identity(monkeypatch, tmp_path):
+    # Previously make_wandb_logger was called before any chain existed, so the run-name
+    # identity fallback could never actually be resolved from it.
+    state = ValidatorState()
+    fake_chain = _FakeChain()
+    fake_chain.identity_name = lambda: None
+    fake_chain.hotkey = "hk-ss58-abc"
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+    monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
+
+    captured = {}
+
+    def fake_make_wandb_logger(args, *, identity_name=None):
+        captured["identity_name"] = identity_name
+        return _FakeWandb()
+
+    monkeypatch.setattr("validator.service.make_wandb_logger", fake_make_wandb_logger)
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": False, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args)  # no wandb_logger passed -> owns_logger path exercises make_wandb_logger
+
+    assert captured["identity_name"] == "hk-ss58-abc"
+
+
+def test_run_reign_only_builds_chain_before_wandb_logger_and_passes_identity(monkeypatch, tmp_path):
+    state = ValidatorState()
+    fake_chain = _FakeChain()
+    fake_chain.identity_name = lambda: "on-chain-name"
+    fake_chain.hotkey = "hk-ss58-abc"
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    monkeypatch.setattr("validator.service._evaluate_round", lambda args, state, chain, salt: (999, None))
+
+    captured = {}
+
+    def fake_make_wandb_logger(args, *, identity_name=None):
+        captured["identity_name"] = identity_name
+        return _FakeWandb()
+
+    monkeypatch.setattr("validator.service.make_wandb_logger", fake_make_wandb_logger)
+
+    args = type("Args", (), {"state_dir": str(tmp_path), "salt_file": None})()
+
+    run_reign_only(args)  # no wandb_logger passed -> owns_logger path
+
+    assert captured["identity_name"] == "on-chain-name"
+
+
 def test_main_loops_continuously_without_once_or_loop_flag(monkeypatch):
     # issue #79: this used to run exactly one round and exit unless --loop was passed, with no
     # indication anywhere that this was expected -- prove main() now keeps going by default.
@@ -608,7 +695,7 @@ def test_main_loops_continuously_without_once_or_loop_flag(monkeypatch):
             raise KeyboardInterrupt
 
     monkeypatch.setattr(vs, "run_once", fake_run_once)
-    monkeypatch.setattr(vs, "make_wandb_logger", lambda args: _FakeWandb())
+    monkeypatch.setattr(vs, "make_wandb_logger", lambda args, **kwargs: _FakeWandb())
     monkeypatch.setattr(vs, "_make_chain", lambda args: _FakeChain())
     monkeypatch.setattr(vs, "_sleep_with_commit_polls", lambda args, chain: None)
     monkeypatch.setattr("core.dotenv.load_dotenv", lambda: None)

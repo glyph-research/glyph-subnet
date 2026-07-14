@@ -262,8 +262,9 @@ Other flags:
 
 - `--wandb.off` — disable wandb entirely (no import, no network, byte-identical behavior
   to a build without this feature).
-- `--wandb.name` — override the run name. Defaults to `<wallet-name>-<hotkey-name>`, so
-  multiple validators sharing the project are distinguishable at a glance.
+- `--wandb.name` — override the run name. Defaults to this coldkey's on-chain identity name
+  (`btcli wallet set-identity`), or its hotkey ss58 if no identity is set, so multiple
+  validators sharing the project are distinguishable at a glance.
 - `--wandb.offline` — log locally only (writes under `./wandb/`, no network), useful for
   CI or air-gapped testing.
 - `--wandb.notes "..."` — free-text note attached to the run.

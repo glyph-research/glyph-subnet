@@ -118,20 +118,18 @@ class _NullWandbLogger(WandbLogger):
         super().__init__(enabled=False)
 
 
-def make_wandb_logger(args) -> WandbLogger:
+def make_wandb_logger(args, *, identity_name: str | None = None) -> WandbLogger:
+    """``identity_name`` is the caller's already-resolved fallback run name (e.g. the
+    validator's on-chain identity name, or its hotkey ss58 if no identity is set) -- so
+    multiple validators logging into the same shared glyph-research-org/text-compression
+    project are distinguishable at a glance instead of wandb's random auto-generated name.
+    An explicit ``--wandb.name`` always wins over it; with neither, name stays None and
+    wandb picks its own.
+    """
+
     if getattr(args, "wandb_off", False):
         return _NullWandbLogger()
-    # Default the run name to this validator's own wallet identity, so multiple validators
-    # logging into the same shared glyph-research-org/text-compression project are
-    # distinguishable at a glance instead of wandb's random auto-generated name. Explicit
-    # --wandb.name always wins; with neither set (e.g. args built without wallet/hotkey
-    # names) name stays None and wandb picks its own.
-    name = getattr(args, "wandb_name", None)
-    if not name:
-        wallet_name = getattr(args, "wallet_name", None)
-        hotkey_name = getattr(args, "hotkey_name", None)
-        if wallet_name and hotkey_name:
-            name = f"{wallet_name}-{hotkey_name}"
+    name = getattr(args, "wandb_name", None) or identity_name
     return WandbLogger(
         enabled=True,
         project=getattr(args, "wandb_project", "text-compression") or "text-compression",
