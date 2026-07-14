@@ -17,6 +17,18 @@ beacon-seeded streams (paired comparison kills sampling variance). Rules:
 
 Weights for the two live slots: **current winner 70% / previous winner 30%**.
 
+### On-chain winner commitment (observability only, issue #103)
+
+Whenever the crown changes, the validator publishes a small record — `{hotkey, repo, rev,
+ratio, commit_block, scoring_version}` — on its **own** hotkey's commitment slot (the same
+`chain.set_commitment` mechanism miners use, otherwise unused by any validator). This is a
+cheap, auditable trail of crown changes for tooling/dashboards and a bootstrapping
+cross-check signal — **it is never read back into that same validator's own scoring or
+promotion**. A validator always independently re-benchmarks the on-chain codec commitments
+(reigning champion included) every round regardless of what's published here; a fresh
+machine keeps doing exactly that, treating the current champion as just another challenger.
+A publish failure is logged and otherwise ignored — it never crashes or delays a round.
+
 ## Temporal burn (weight_setter)
 
 **Currently enabled** (`core.constants.BURN_ENABLED = True`). Disabled at launch (issue #43),

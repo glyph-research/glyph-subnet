@@ -37,6 +37,8 @@ from core.constants import (
     COMMITMENT_VERSION,
     COMPACT_COMMITMENT_PREFIX,
     REVEAL_PHASE_PREFIX,
+    WINNER_COMMITMENT_PREFIX,
+    WINNER_COMMITMENT_VERSION,
 )
 
 
@@ -83,6 +85,24 @@ class CodecCommitment(BaseModel):
     @property
     def key(self) -> str:
         return f"{self.repo}@{self.rev}"
+
+
+class WinnerCommitment(BaseModel):
+    """Observability-only on-chain record of the current champion (issue #103).
+
+    Published by a validator on its own hotkey's commitment slot whenever the crown
+    changes -- never read back into that same validator's own scoring/promotion, which
+    always independently re-benchmarks the on-chain codec commitments (reigning champion
+    included) every round regardless of what's published here.
+    """
+
+    v: int = Field(default=WINNER_COMMITMENT_VERSION)
+    hotkey: str = Field(min_length=1, max_length=64)
+    repo: str
+    rev: str
+    ratio: float
+    commit_block: int
+    scoring_version: int
 
 
 class BurnOverrideCommitment(BaseModel):
@@ -132,6 +152,30 @@ def serialize_reveal_phase(repo: str, rev: str, salt: str) -> str:
     """Phase 2: the opening commitment (publishes repo|rev|salt)."""
 
     return f"{REVEAL_PHASE_PREFIX}{repo}|{rev}|{salt}"
+
+
+def serialize_winner_commitment(winner: WinnerCommitment) -> str:
+    """Serialize a validator's observability-only champion record (issue #103)."""
+
+    payload = winner.model_dump(mode="json")
+    return f"{WINNER_COMMITMENT_PREFIX}{json.dumps(payload, sort_keys=True)}"
+
+
+def parse_winner_commitment(raw: str) -> WinnerCommitment | None:
+    """Parse a validator-published winner commitment, or ``None`` if ``raw`` isn't one, is
+    malformed, or is an unsupported future version."""
+
+    data = raw.strip()
+    if not data.startswith(WINNER_COMMITMENT_PREFIX):
+        return None
+    try:
+        payload = json.loads(data[len(WINNER_COMMITMENT_PREFIX) :])
+        winner = WinnerCommitment.model_validate(payload)
+    except Exception:
+        return None
+    if winner.v != WINNER_COMMITMENT_VERSION:
+        return None
+    return winner
 
 
 def parse_commit_phase_digest(raw: str) -> str | None:

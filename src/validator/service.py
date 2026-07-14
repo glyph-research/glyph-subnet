@@ -19,9 +19,11 @@ from bittensor.utils.btlogging import logging as bt_logging
 
 from chain.chain import BittensorChain, ChainConfig
 from core.commitments import (
+    WinnerCommitment,
     parse_commit_phase_by_hotkey,
     parse_commitments_by_hotkey,
     prune_commit_phase_seen,
+    serialize_winner_commitment,
 )
 from core.constants import (
     BASELINE_LEVEL,
@@ -39,6 +41,7 @@ from core.constants import (
     EVAL_STREAMS,
     PRECHECK_FULL_RECHECK_INTERVAL_BLOCKS,
     REFERENCE_SKU,
+    SCORING_VERSION,
     THROUGHPUT_FLOOR_BPS,
     WINDOW_ANCHOR_BLOCK,
 )
@@ -566,6 +569,31 @@ def _make_chain(args) -> BittensorChain:
     )
 
 
+def _publish_winner_commitment(chain: BittensorChain, champion: WinnerEntry) -> None:
+    """Best-effort, observability-only publish of the new champion on this validator's own
+    commitment slot (issue #103) -- never read back into this validator's own scoring/
+    promotion (see WinnerCommitment's docstring), and a publish failure must never crash or
+    delay the round.
+    """
+
+    winner = WinnerCommitment(
+        hotkey=champion.hotkey,
+        repo=champion.repo,
+        rev=champion.revision,
+        ratio=champion.ratio,
+        commit_block=champion.commit_block,
+        scoring_version=SCORING_VERSION,
+    )
+    try:
+        response = chain.set_commitment(serialize_winner_commitment(winner))
+        if getattr(response, "success", True):
+            bt_logging.info(f"published winner commitment: {champion.hotkey} ratio={champion.ratio:.4f}")
+        else:
+            bt_logging.warning(f"failed to publish winner commitment: {response}")
+    except Exception as exc:
+        bt_logging.warning(f"failed to publish winner commitment: {exc}")
+
+
 def _wandb_identity_name(chain: BittensorChain) -> str | None:
     """Best-effort wandb run-name fallback (issue #102 follow-up): this validator's on-chain
     identity name if set (``btcli wallet set-identity``), else its hotkey ss58 -- still
@@ -674,6 +702,9 @@ def _evaluate_round(
             margin=args.win_margin, block=block, eligible_hotkeys=eligible, baseline_ratio=baseline,
         )
         champion_after = state.winner_history[0] if state.winner_history else None
+        crown_changed = bool(champion_after) and champion_after.hotkey != champion_before
+        if crown_changed:
+            _publish_winner_commitment(chain, champion_after)
         round_metrics = build_round_metrics(
             block=block,
             baseline_ratio=baseline,
@@ -683,7 +714,7 @@ def _evaluate_round(
             commit_phase_seen_count=sum(len(v) for v in state.commit_phase_seen.values()),
             winner_hotkey=champion_after.hotkey if champion_after else None,
             winner_ratio=champion_after.ratio if champion_after else None,
-            crown_changed=bool(champion_after) and champion_after.hotkey != champion_before,
+            crown_changed=crown_changed,
         )
     return block, round_metrics, raw_commitments
 

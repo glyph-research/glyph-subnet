@@ -22,6 +22,16 @@ COMPACT_COMMITMENT_PREFIX = "g1|"
 # mempool watcher who only learns repo|rev at reveal time can never commit earlier.
 COMMIT_PHASE_PREFIX = "g1c|"
 REVEAL_PHASE_PREFIX = "g1r|"
+# Observability-only record of the current champion (issue #103), published by a validator
+# on its own hotkey's commitment slot (unused by any other validator code path) whenever the
+# crown changes. Distinct payload/prefix from the miner commit/reveal forms above, since it's
+# a different kind of thing occupying the same on-chain commitment mechanism. NEVER trusted
+# as ground truth by any validator's own scoring/promotion -- every validator always
+# independently re-benchmarks the on-chain codec commitments (reigning champion included)
+# every round; this exists purely as a cheap, auditable crown-change trail for
+# tooling/dashboards and a bootstrapping cross-check signal.
+WINNER_COMMITMENT_PREFIX = "g1w|"
+WINNER_COMMITMENT_VERSION = 1
 # On-chain, owner-controlled emergency burn override (issue #113): the subnet owner (whichever
 # hotkey currently occupies BURN_UID on the live metagraph) can publish {v, force_burn} on its
 # own commitment slot; force_burn=true makes every validator burn 100% every tempo regardless
