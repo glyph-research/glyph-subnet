@@ -40,6 +40,10 @@ class ScoreState(BaseModel):
     valid: bool
     commit_block: int = 0
     evaluated_at_block: int | None = None
+    # Stamped at evaluation time against core.constants.SCORING_VERSION (issue #104).
+    # Defaults to 0 (never matches a real SCORING_VERSION, which starts at 1) so state
+    # persisted before this field existed is treated as stale rather than trusted forever.
+    scoring_version: int = 0
 
     def as_winner(self) -> WinnerEntry:
         return WinnerEntry(
@@ -72,10 +76,35 @@ class ValidatorState(BaseModel):
         return {item.hotkey for item in self.commitments.values() if item.valid}
 
 
+def _invalidate_stale_scores(state: ValidatorState) -> None:
+    """Drop any ``ScoreState`` computed under an older ``SCORING_VERSION`` and clear
+    one-shot exclusions decided under that same stale regime (issue #104).
+
+    ``SCORING_VERSION`` is a single network-wide constant, not per-hotkey, so a bump is an
+    all-or-nothing event: every already-recorded score is equally stale, and every exclusion
+    decided against those old numbers shouldn't outlive them either -- "everyone competes
+    fresh," not "everyone except whoever already lost under the old math." Dropping a
+    hotkey's score is enough on its own to re-admit it to the challenger filter
+    (``c.key not in state.scores``); the reigning incumbent is unaffected either way since
+    it's already unconditionally re-evaluated every round regardless of this cache.
+    """
+
+    from core.constants import SCORING_VERSION
+
+    stale_keys = [key for key, score in state.scores.items() if score.scoring_version != SCORING_VERSION]
+    if not stale_keys:
+        return
+    for key in stale_keys:
+        del state.scores[key]
+    state.excluded_hotkeys.clear()
+
+
 def load_state(path: Path) -> ValidatorState:
     if not path.exists():
         return ValidatorState()
-    return ValidatorState.model_validate_json(path.read_text())
+    state = ValidatorState.model_validate_json(path.read_text())
+    _invalidate_stale_scores(state)
+    return state
 
 
 def save_state(path: Path, state: ValidatorState) -> None:
