@@ -584,6 +584,16 @@ def test_wandb_defaults_to_glyph_research_org_text_compression():
     assert override_args.wandb_entity == "my-team"
 
 
+def test_wandb_name_flag_defaults_unset_and_parses_when_passed():
+    from validator.service import build_parser as validator_build_parser
+
+    default_args = validator_build_parser().parse_args([])
+    assert default_args.wandb_name is None
+
+    named_args = validator_build_parser().parse_args(["--wandb.name", "my-validator"])
+    assert named_args.wandb_name == "my-validator"
+
+
 def test_main_loops_continuously_without_once_or_loop_flag(monkeypatch):
     # issue #79: this used to run exactly one round and exit unless --loop was passed, with no
     # indication anywhere that this was expected -- prove main() now keeps going by default.

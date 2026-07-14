@@ -161,6 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="wandb entity (team/org). Defaults to the glyph-research-org team run.",
     )
     parser.add_argument(
+        "--wandb.name", dest="wandb_name", default=None,
+        help="Override the wandb run name. Defaults to '<wallet-name>-<hotkey-name>' so "
+        "multiple validators are distinguishable at a glance in the shared project.",
+    )
+    parser.add_argument(
         "--wandb.offline", dest="wandb_offline", action="store_true",
         help="Log locally only, no network (for tests/CI -- no WANDB_API_KEY needed).",
     )

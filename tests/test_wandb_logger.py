@@ -98,6 +98,36 @@ def test_make_wandb_logger_defaults_to_glyph_research_org_text_compression(fake_
     assert logger._entity == "glyph-research-org"
 
 
+# --- run name defaults to wallet identity (issue #102 follow-up) ------------------
+
+
+def test_make_wandb_logger_names_the_run_after_wallet_and_hotkey(fake_wandb):
+    # Multiple validators sharing the glyph-research-org/text-compression project must be
+    # distinguishable at a glance instead of wandb's random auto-generated name.
+    args = argparse.Namespace(wandb_off=False, wallet_name="w", hotkey_name="h")
+    logger = make_wandb_logger(args)
+    assert logger._name == "w-h"
+
+
+def test_wandb_name_flag_overrides_wallet_hotkey_default(fake_wandb):
+    args = argparse.Namespace(wandb_off=False, wallet_name="w", hotkey_name="h", wandb_name="my-custom-run")
+    logger = make_wandb_logger(args)
+    assert logger._name == "my-custom-run"
+
+
+def test_make_wandb_logger_leaves_name_unset_without_wallet_or_hotkey(fake_wandb):
+    # Programmatically-built args with no wallet/hotkey identity (and no explicit override)
+    # -> name stays None, wandb picks its own, exactly like before this default existed.
+    args = argparse.Namespace(wandb_off=False)
+    logger = make_wandb_logger(args)
+    assert logger._name is None
+
+
+def test_start_run_passes_name_to_wandb_init(fake_wandb):
+    WandbLogger(enabled=True, name="w-h")
+    assert fake_wandb.init.call_args.kwargs["name"] == "w-h"
+
+
 def test_build_round_metrics_has_expected_keys_for_simulated_round():
     outcomes = {"hkA": _outcome("hkA", 0.42), "hkB": _outcome("hkB", 0.5)}
     metrics = build_round_metrics(
