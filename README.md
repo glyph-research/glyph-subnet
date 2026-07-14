@@ -45,7 +45,7 @@ docs/  tests/
 ```bash
 ./scripts/install_deps.sh           # venv + package + pm2
 # or: pip install -e ".[dev]"
-cp .env.example .env                # miners: set HF_TOKEN; validators: only if using --runner chutes
+cp .env.example .env                # miners: set HF_TOKEN (write); validators: recommended too (read-only, avoids anonymous HF CDN 403s) -- see docs/VALIDATING.md
 pytest -q
 ```
 

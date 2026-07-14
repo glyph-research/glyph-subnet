@@ -338,6 +338,111 @@ def test_no_gpu_flag_skips_the_check_entirely(monkeypatch):
     DockerRunner(gpu=False)  # would raise if the GPU check ran despite gpu=False
 
 
+# --- GPU-memory preflight (issue #105): fail closed before launching a codec's container if
+# its declared resources["vram_gb"] (+ headroom) doesn't fit in currently-free VRAM, so this
+# surfaces as a distinct host-capacity error rather than an opaque "entrypoint exited ...".
+
+
+def _manifest_with_vram(vram_gb):
+    from core.artifact import Entrypoints, Manifest
+
+    resources = {} if vram_gb is None else {"vram_gb": vram_gb}
+    return Manifest(
+        entrypoints=Entrypoints(
+            compress=["true", "{input}", "{output}"], decompress=["true", "{input}", "{output}"]
+        ),
+        resources=resources,
+    )
+
+
+def test_free_gpu_memory_gb_reports_the_tightest_gpu(monkeypatch):
+    from eval.runner_docker import _free_gpu_memory_gb
+
+    monkeypatch.setattr("eval.runner_docker.shutil.which", _which_stub(True))
+    monkeypatch.setattr("eval.runner_docker.subprocess.run", _run_stub("2048\n40960\n"))
+    assert _free_gpu_memory_gb(None) == pytest.approx(2.0)
+
+
+def test_free_gpu_memory_gb_none_when_nvidia_smi_missing(monkeypatch):
+    from eval.runner_docker import _free_gpu_memory_gb
+
+    monkeypatch.setattr("eval.runner_docker.shutil.which", _which_stub(False))
+    assert _free_gpu_memory_gb(None) is None
+
+
+def test_free_gpu_memory_gb_none_on_query_failure(monkeypatch):
+    from eval.runner_docker import _free_gpu_memory_gb
+
+    monkeypatch.setattr("eval.runner_docker.shutil.which", _which_stub(True))
+    monkeypatch.setattr("eval.runner_docker.subprocess.run", _run_stub("", returncode=1))
+    assert _free_gpu_memory_gb(None) is None
+
+
+def test_check_gpu_memory_skips_when_vram_gb_not_declared(monkeypatch):
+    from eval.runner_docker import _check_gpu_memory
+
+    def _boom(gpu_device):
+        raise AssertionError("must not query free memory when nothing is declared to check")
+
+    monkeypatch.setattr("eval.runner_docker._free_gpu_memory_gb", _boom)
+    _check_gpu_memory(_manifest_with_vram(None), None)  # no raise
+
+
+def test_check_gpu_memory_skips_when_free_memory_unknown(monkeypatch):
+    from eval.runner_docker import _check_gpu_memory
+
+    monkeypatch.setattr("eval.runner_docker._free_gpu_memory_gb", lambda gpu_device: None)
+    _check_gpu_memory(_manifest_with_vram(20), None)  # can't verify -> don't block
+
+
+def test_check_gpu_memory_raises_when_insufficient(monkeypatch):
+    from eval.runner import InsufficientGpuMemoryError
+    from eval.runner_docker import _check_gpu_memory
+
+    monkeypatch.setattr("eval.runner_docker._free_gpu_memory_gb", lambda gpu_device: 5.0)
+    with pytest.raises(InsufficientGpuMemoryError, match="need ~22.0 GiB"):
+        _check_gpu_memory(_manifest_with_vram(20), None)
+
+
+def test_check_gpu_memory_passes_with_enough_headroom(monkeypatch):
+    from eval.runner_docker import _check_gpu_memory
+
+    monkeypatch.setattr("eval.runner_docker._free_gpu_memory_gb", lambda gpu_device: 30.0)
+    _check_gpu_memory(_manifest_with_vram(20), None)  # no raise
+
+
+def test_execute_checks_gpu_memory_before_launching_any_container(monkeypatch, tmp_path):
+    from eval.runner import ArtifactRef, InsufficientGpuMemoryError
+
+    monkeypatch.setattr("eval.runner_docker.shutil.which", _which_stub(True))
+    seen_cmds = []
+
+    def _run(cmd, **kwargs):
+        import subprocess as _sp
+
+        seen_cmds.append(cmd)
+        return _sp.CompletedProcess(cmd, 0, stdout="NVIDIA GeForce RTX 4090\n", stderr="")
+
+    monkeypatch.setattr("eval.runner_docker.subprocess.run", _run)
+    runner = DockerRunner(gpu=True)  # one subprocess.run call already happened (GPU model check)
+    monkeypatch.setattr("eval.runner_docker._free_gpu_memory_gb", lambda gpu_device: 1.0)
+
+    artifact_dir = tmp_path / "codec"
+    artifact_dir.mkdir()
+    _write_manifest_and_scripts(artifact_dir)
+    manifest_path = artifact_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["resources"] = {"vram_gb": 20}
+    manifest_path.write_text(json.dumps(manifest))
+    artifact = ArtifactRef(repo="t/codec", rev="local", local_path=str(artifact_dir))
+
+    with pytest.raises(InsufficientGpuMemoryError):
+        runner.compress(artifact, b"hello", caps=ResourceCaps())
+
+    # No "docker run"/"docker exec" call reached -- only the constructor's GPU-model query.
+    assert all("run" not in cmd and "exec" not in cmd for cmd in seen_cmds)
+
+
 # --- issue #66: a snapshot_download of a real HF repo returns symlinks-into-blobs/ by default;
 # DockerRunner bind-mounts ONLY the snapshot dir, so those symlinks dangle inside the container.
 # local_snapshot_dir()-based downloads (the fix, wired in reign_worker.service.artifact_ref /

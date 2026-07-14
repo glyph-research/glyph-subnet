@@ -1,12 +1,15 @@
 import pytest
 
 from core.commitments import (
+    BurnOverrideCommitment,
     CodecCommitment,
     commitment_digest,
+    parse_burn_override,
     parse_commit_phase_by_hotkey,
     parse_commit_phase_digest,
     parse_commitment,
     parse_commitments_by_hotkey,
+    serialize_burn_override,
     serialize_commit_phase,
     serialize_commitment,
     serialize_reveal_phase,
@@ -137,3 +140,40 @@ def test_commit_phase_seen_stays_bounded_across_many_rounds():
     assert total <= 6
     assert all(digests for digests in seen.values())  # no empty hotkey dicts linger
     assert "hk0" not in seen
+
+
+# --- owner emergency burn override (issue #113) -----------------------------------
+
+
+def test_burn_override_round_trips_true_and_false():
+    for value in (True, False):
+        raw = serialize_burn_override(BurnOverrideCommitment(force_burn=value))
+        assert raw.startswith("g1b|")
+        parsed = parse_burn_override(raw)
+        assert parsed is not None
+        assert parsed.force_burn is value
+
+
+def test_burn_override_prefix_is_distinct_from_other_commitment_forms():
+    raw = serialize_burn_override(BurnOverrideCommitment(force_burn=True))
+    assert not raw.startswith("g1|")
+    assert not raw.startswith("g1c|")
+    assert not raw.startswith("g1r|")
+
+
+def test_parse_burn_override_rejects_other_commitment_forms():
+    assert parse_burn_override(serialize_commitment(CodecCommitment(repo="a/b", rev=_SHA_A))) is None
+    assert parse_burn_override(serialize_commit_phase("deadbeef")) is None
+    assert parse_burn_override(serialize_reveal_phase("a/b", _SHA_A, "salt")) is None
+
+
+def test_parse_burn_override_rejects_malformed_payload():
+    assert parse_burn_override("g1b|not json") is None
+    assert parse_burn_override("g1b|{}") is None  # missing required force_burn field
+
+
+def test_parse_burn_override_rejects_unsupported_future_version():
+    raw = serialize_burn_override(BurnOverrideCommitment(force_burn=True))
+    bumped = raw.replace('"v": 1', '"v": 2')
+    assert bumped != raw  # sanity: the replace actually matched something
+    assert parse_burn_override(bumped) is None
