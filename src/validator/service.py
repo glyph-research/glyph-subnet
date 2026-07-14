@@ -265,11 +265,33 @@ def _parse_local_artifacts(args) -> dict[str, str]:
 
 
 def _load_salt(state_dir: Path, salt_file: str | None) -> str:
-    path = Path(salt_file) if salt_file else state_dir / "validator_salt.txt"
-    if path.exists():
-        return path.read_text().strip()
+    """Resolve this round's private seed salt.
+
+    Default path (no --salt-file): a FRESH salt every call (issue #116). _load_salt runs at
+    the top of every run_once, so this makes both the public (block hash) and private (salt)
+    seed components fresh each round -- previously the salt was generated once and reused for
+    the validator's entire lifetime, so a single leak of the on-disk value exposed every
+    future round's sampling. The file is still written each time, but purely for
+    after-the-fact observability (which salt produced a given round's seed) -- it is never
+    read back.
+
+    An explicit --salt-file keeps the original read-and-reuse behavior unchanged: that flag
+    exists for tests/manual reproducibility, where a fixed, known salt is the point.
+    """
+
     import secrets
 
+    if salt_file:
+        path = Path(salt_file)
+        if path.exists():
+            return path.read_text().strip()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        salt = secrets.token_hex(32)
+        path.write_text(salt)
+        path.chmod(0o600)
+        return salt
+
+    path = state_dir / "validator_salt.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     salt = secrets.token_hex(32)
     path.write_text(salt)
