@@ -25,8 +25,9 @@ class WandbLogger:
         self,
         *,
         enabled: bool = True,
-        project: str = "glyph-subnet",
-        entity: str | None = None,
+        project: str = "text-compression",
+        entity: str | None = "glyph-research-org",
+        name: str | None = None,
         offline: bool = False,
         notes: str | None = None,
         restart_interval_hours: float = 24.0,
@@ -34,6 +35,7 @@ class WandbLogger:
         self.enabled = enabled
         self._project = project
         self._entity = entity
+        self._name = name
         self._offline = offline
         self._notes = notes
         self._restart_interval_secs = max(restart_interval_hours, 0.0) * 3600.0
@@ -68,6 +70,7 @@ class WandbLogger:
         self._run = wandb.init(
             project=self._project,
             entity=self._entity,
+            name=self._name,
             mode=mode,
             notes=self._notes,
             anonymous=anonymous,
@@ -115,13 +118,23 @@ class _NullWandbLogger(WandbLogger):
         super().__init__(enabled=False)
 
 
-def make_wandb_logger(args) -> WandbLogger:
+def make_wandb_logger(args, *, identity_name: str | None = None) -> WandbLogger:
+    """``identity_name`` is the caller's already-resolved fallback run name (e.g. the
+    validator's on-chain identity name, or its hotkey ss58 if no identity is set) -- so
+    multiple validators logging into the same shared glyph-research-org/text-compression
+    project are distinguishable at a glance instead of wandb's random auto-generated name.
+    An explicit ``--wandb.name`` always wins over it; with neither, name stays None and
+    wandb picks its own.
+    """
+
     if getattr(args, "wandb_off", False):
         return _NullWandbLogger()
+    name = getattr(args, "wandb_name", None) or identity_name
     return WandbLogger(
         enabled=True,
-        project=getattr(args, "wandb_project", "glyph-subnet") or "glyph-subnet",
-        entity=getattr(args, "wandb_entity", None),
+        project=getattr(args, "wandb_project", "text-compression") or "text-compression",
+        entity=getattr(args, "wandb_entity", "glyph-research-org"),
+        name=name,
         offline=getattr(args, "wandb_offline", False),
         notes=getattr(args, "wandb_notes", None),
         restart_interval_hours=getattr(args, "wandb_restart_interval", 24.0),

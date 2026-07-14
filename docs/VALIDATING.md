@@ -26,6 +26,12 @@ The always-on parts (chain polling, precheck, weight setting) are cheap CPU eith
 pytest -q
 ```
 
+Every round streams a fresh corpus slice straight from HuggingFace
+(`eval.live_corpus.resolve_live_corpus`). This works fully anonymously, but HF's Xet-backed
+CDN increasingly throttles/denies anonymous traffic with an intermittent `403 Forbidden` --
+set `HF_TOKEN` in `.env` (a free-tier read token, no special dataset permissions needed;
+create one at https://huggingface.co/settings/tokens) to avoid it. See `.env.example`.
+
 ## Set up the default Docker runner
 
 `--runner docker` (`src/eval/runner_docker.py`, the default) is a drop-in alternative to
@@ -250,17 +256,21 @@ it prompts for the key in the foreground (there's no terminal to answer a prompt
 process is backgrounded under pm2). Pass `--wandb-non-interactive` to skip the prompt for
 scripted/CI use and let wandb attempt the anonymous fallback instead.
 
-To log to your own wandb project/entity instead, set `WANDB_API_KEY` in the environment (or
-`.env`) and pass:
+By default, runs log to the `glyph-research-org/text-compression` team project. To log to
+your own wandb project/entity instead, set `WANDB_API_KEY` in the environment (or `.env`) and
+pass:
 
 ```bash
---wandb.project glyph-subnet --wandb.entity <your-wandb-entity>
+--wandb.project <your-project> --wandb.entity <your-wandb-entity>
 ```
 
 Other flags:
 
 - `--wandb.off` — disable wandb entirely (no import, no network, byte-identical behavior
   to a build without this feature).
+- `--wandb.name` — override the run name. Defaults to this coldkey's on-chain identity name
+  (`btcli wallet set-identity`), or its hotkey ss58 if no identity is set, so multiple
+  validators sharing the project are distinguishable at a glance.
 - `--wandb.offline` — log locally only (writes under `./wandb/`, no network), useful for
   CI or air-gapped testing.
 - `--wandb.notes "..."` — free-text note attached to the run.

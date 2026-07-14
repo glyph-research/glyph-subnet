@@ -111,7 +111,10 @@ def _setup_round(monkeypatch, tmp_path, *, winner_history, new_winner_entry_or_n
     (real_corpus_dir / "provenance.json").write_text(
         json.dumps([{"source": "fineweb", "chunk_ids": ["chunk_00_fineweb.txt"]}])
     )
-    monkeypatch.setattr("validator.service.resolve_live_corpus", lambda seed: StaticLocalProvider(real_corpus_dir))
+    monkeypatch.setattr(
+        "validator.service.resolve_live_corpus",
+        lambda seed, token=None: StaticLocalProvider(real_corpus_dir),
+    )
 
     state = ValidatorState()
     if winner_history is not None:
@@ -164,7 +167,7 @@ def test_evaluate_round_survives_a_publish_failure(monkeypatch, tmp_path, caplog
 
     chain.set_commitment = boom
 
-    block, round_metrics = _evaluate_round(args, state, chain, "saltval")
+    block, round_metrics, _raw_commitments = _evaluate_round(args, state, chain, "saltval")
 
     assert round_metrics["winner/crown_changed"] is True
     assert "failed to publish winner commitment" in caplog.text
