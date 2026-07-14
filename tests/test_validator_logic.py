@@ -542,7 +542,7 @@ def test_run_once_skips_set_weights_when_rate_limited(monkeypatch, tmp_path, cap
 # --- owner emergency burn override wired into run_once (issue #113) ---------------
 
 
-def test_run_once_forces_burn_when_owner_commitment_says_so(monkeypatch, tmp_path):
+def test_run_once_forces_burn_when_owner_commitment_says_so(monkeypatch, tmp_path, caplog):
     from core.commitments import BurnOverrideCommitment, serialize_burn_override
 
     state = ValidatorState()
@@ -573,6 +573,11 @@ def test_run_once_forces_burn_when_owner_commitment_says_so(monkeypatch, tmp_pat
     run_once(args, wandb_logger=_FakeWandb())
 
     assert captured["force_burn"] is True
+    # A forced burn is otherwise indistinguishable in the log from a scheduled burn tempo --
+    # the operator must see WHY every tempo is suddenly burning (warning level, so it shows
+    # even at bt_logging's default level).
+    assert "owner burn override active" in caplog.text
+    assert "hk0" in caplog.text
 
 
 def test_run_once_does_not_force_burn_without_an_owner_commitment(monkeypatch, tmp_path):

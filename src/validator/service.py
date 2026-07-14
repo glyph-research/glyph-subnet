@@ -641,6 +641,15 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
             if 0 <= args.burn_uid < len(hotkeys)
             else False
         )
+        if force_burn:
+            # Without this line, a forced burn is indistinguishable in the log from an
+            # ordinary scheduled burn tempo -- except it happens EVERY tempo, which reads
+            # as a bug unless the operator knows the owner override is active.
+            bt_logging.warning(
+                f"owner burn override active (issue #113): {hotkeys[args.burn_uid]} has "
+                "force_burn=true on-chain -- burning 100% this tempo and every tempo until "
+                "the owner clears it"
+            )
 
         weights, burn = decide_weights(
             hotkeys, state.winner_history, block=block, tempo=tempo,
