@@ -88,6 +88,48 @@ def test_offline_mode_passed_through(fake_wandb):
     assert fake_wandb.init.call_args.kwargs["mode"] == "offline"
 
 
+def test_make_wandb_logger_defaults_to_glyph_research_org_text_compression(fake_wandb):
+    # issue #102: an args object that never set wandb_project/wandb_entity at all (e.g.
+    # constructed programmatically rather than via build_parser) must still land the run in
+    # the glyph-research-org/text-compression team project, not an arbitrary/personal one.
+    args = argparse.Namespace(wandb_off=False)
+    logger = make_wandb_logger(args)
+    assert logger._project == "text-compression"
+    assert logger._entity == "glyph-research-org"
+
+
+# --- run name defaults to on-chain identity (issue #102 follow-up) ----------------
+
+
+def test_make_wandb_logger_uses_the_resolved_identity_name(fake_wandb):
+    # Multiple validators sharing the glyph-research-org/text-compression project must be
+    # distinguishable at a glance instead of wandb's random auto-generated name. The caller
+    # (validator.service) resolves the actual on-chain-identity-or-hotkey fallback and passes
+    # it straight through.
+    args = argparse.Namespace(wandb_off=False)
+    logger = make_wandb_logger(args, identity_name="5F...somehotkey")
+    assert logger._name == "5F...somehotkey"
+
+
+def test_wandb_name_flag_overrides_identity_name(fake_wandb):
+    args = argparse.Namespace(wandb_off=False, wandb_name="my-custom-run")
+    logger = make_wandb_logger(args, identity_name="5F...somehotkey")
+    assert logger._name == "my-custom-run"
+
+
+def test_make_wandb_logger_leaves_name_unset_without_identity_name(fake_wandb):
+    # No explicit override and no resolved identity (e.g. programmatically-built args, or
+    # chain lookup failed) -> name stays None, wandb picks its own.
+    args = argparse.Namespace(wandb_off=False)
+    logger = make_wandb_logger(args)
+    assert logger._name is None
+
+
+def test_start_run_passes_name_to_wandb_init(fake_wandb):
+    WandbLogger(enabled=True, name="w-h")
+    assert fake_wandb.init.call_args.kwargs["name"] == "w-h"
+
+
 def test_build_round_metrics_has_expected_keys_for_simulated_round():
     outcomes = {"hkA": _outcome("hkA", 0.42), "hkB": _outcome("hkB", 0.5)}
     metrics = build_round_metrics(
