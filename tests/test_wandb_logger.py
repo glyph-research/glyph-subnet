@@ -185,6 +185,33 @@ def test_build_round_metrics_surfaces_the_runner_error_when_the_codec_never_ran(
     assert metrics["challenger/hkA/runner_error"] == "docker pull denied: repository does not exist"
 
 
+def test_build_round_metrics_labels_hotkeys_with_uids_when_a_mapping_is_supplied():
+    # issue #126: following wandb otherwise requires manually cross-referencing hotkeys
+    # against the metagraph.
+    outcomes = {"hkA": _outcome("hkA", 0.42), "hkB": _outcome("hkB", 0.5)}
+    metrics = build_round_metrics(
+        block=1, baseline_ratio=0.6, num_challengers=2, outcomes=outcomes,
+        excluded_hotkeys_count=0, commit_phase_seen_count=0, winner_hotkey="hkA",
+        winner_ratio=0.42, crown_changed=True, hotkey_to_uid={"hkA": 12, "hkB": 34},
+    )
+    assert metrics["challenger/hkA/uid"] == 12
+    assert metrics["challenger/hkB/uid"] == 34
+    assert metrics["winner/uid"] == 12
+
+
+def test_build_round_metrics_uid_defaults_to_minus_one_when_unknown():
+    # No mapping supplied (or a hotkey not currently registered): -1 = unknown, documented
+    # fallback so the metric keys stay stable either way.
+    outcomes = {"hkA": _outcome("hkA", 0.42)}
+    metrics = build_round_metrics(
+        block=1, baseline_ratio=0.6, num_challengers=1, outcomes=outcomes,
+        excluded_hotkeys_count=0, commit_phase_seen_count=0, winner_hotkey=None,
+        winner_ratio=None, crown_changed=False,
+    )
+    assert metrics["challenger/hkA/uid"] == -1
+    assert metrics["winner/uid"] == -1
+
+
 def test_build_weights_metrics_has_expected_keys():
     metrics = build_weights_metrics(
         block=10, tempo=360, is_burn_tempo=False, uids=[0, 1, 2], weights=[0.0, 1.0, 0.0]

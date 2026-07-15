@@ -632,16 +632,20 @@ def _startup_wandb_identity_name(args) -> str | None:
 
 def _evaluate_round(
     args, state: ValidatorState, chain: BittensorChain, salt: str
-) -> tuple[int, dict | None, dict[str, str]]:
+) -> tuple[int, dict | None, dict[str, str], "object"]:
     """Precheck commitments and, if there are new challengers, run one reign round.
 
-    Returns ``(block, round_metrics, raw_commitments)``; ``round_metrics`` is ``None`` when no
-    challengers ran this round (nothing new to report). ``round_metrics`` is a plain dict
-    built by ``core.wandb_logger.build_round_metrics`` purely from what this round already
-    decided -- reporting it changes nothing about scoring/promotion (issue #41).
-    ``raw_commitments`` is the commitment dict this round already fetched for precheck,
-    passed back so ``run_once``'s burn-override check (issue #113) doesn't need a second,
-    redundant ``get_all_commitments()`` round-trip moments later.
+    Returns ``(block, round_metrics, raw_commitments, metagraph)``; ``round_metrics`` is
+    ``None`` when no challengers ran this round (nothing new to report). ``round_metrics``
+    is a plain dict built by ``core.wandb_logger.build_round_metrics`` purely from what this
+    round already decided -- reporting it changes nothing about scoring/promotion (issue
+    #41). ``raw_commitments`` is the commitment dict this round already fetched for
+    precheck, passed back so ``run_once``'s burn-override check (issue #113) doesn't need a
+    second, redundant ``get_all_commitments()`` round-trip moments later. ``metagraph`` is
+    fetched here (same de-dup pattern, issue #126) both to label round metrics/logs with
+    UIDs alongside hotkeys and for ``run_once``'s weight-setting to reuse -- this also
+    deliberately gives ``run_reign_only`` (which never fetched one before) UID labeling in
+    its round metrics.
     """
 
     if getattr(args, "corpus_dir", None):
@@ -657,6 +661,8 @@ def _evaluate_round(
     if state.window_anchor_block is None:
         state.window_anchor_block = args.window_anchor or block
     raw_commitments = chain.get_all_commitments()
+    metagraph = chain.metagraph()
+    hotkey_to_uid = {hk: int(uid) for hk, uid in zip(metagraph.hotkeys, metagraph.uids)}
     # Record commit-phase digests as we see them so a later reveal can tie-break off the
     # commit-phase block (exploit vector #9). Observing this requires polling during the
     # commit/reveal window; a validator that only catches the reveal degrades to the
@@ -703,10 +709,15 @@ def _evaluate_round(
         runner = _make_runner(args)
         caps = ResourceCaps(wall_clock_secs=args.compress_budget_secs, artifact_bytes=args.max_artifact_bytes)
         champion_before = state.winner_history[0].hotkey if state.winner_history else None
-        challenger_hotkeys = [c.hotkey for c in challengers]
+        # uid alongside hotkey (issue #126): following the log otherwise requires manually
+        # cross-referencing the metagraph.
+        def _with_uid(hotkey: str) -> str:
+            return f"{hotkey} (uid {hotkey_to_uid.get(hotkey, '?')})"
+
+        challenger_descs = [_with_uid(c.hotkey) for c in challengers]
         bt_logging.info(
-            f"round: evaluating incumbent={champion_before or 'none'}, "
-            f"{len(challengers)} challenger(s): {challenger_hotkeys} (baseline zstd ratio={baseline:.4f})"
+            f"round: evaluating incumbent={_with_uid(champion_before) if champion_before else 'none'}, "
+            f"{len(challengers)} challenger(s): {challenger_descs} (baseline zstd ratio={baseline:.4f})"
         )
         outcomes = run_round(
             state, runner, challengers, provider, specs,
@@ -727,8 +738,9 @@ def _evaluate_round(
             winner_hotkey=champion_after.hotkey if champion_after else None,
             winner_ratio=champion_after.ratio if champion_after else None,
             crown_changed=crown_changed,
+            hotkey_to_uid=hotkey_to_uid,
         )
-    return block, round_metrics, raw_commitments
+    return block, round_metrics, raw_commitments, metagraph
 
 
 # Production paths (require chain access)
@@ -761,21 +773,26 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         if not chain.commit_reveal_enabled():
             bt_logging.warning("commit-reveal is not enabled on this subnet; anti-copy weights are weaker")
 
-        block, round_metrics, raw_commitments = _evaluate_round(args, state, chain, salt)
+        block, round_metrics, raw_commitments, metagraph = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
             wandb_logger.log(round_metrics)
+        # Reuse the metagraph _evaluate_round already fetched (issue #126) -- same
+        # no-second-round-trip pattern as raw_commitments (issue #113).
+        hotkeys = list(metagraph.hotkeys)
+        uids = [int(uid) for uid in metagraph.uids]
+        hotkey_to_uid = dict(zip(hotkeys, uids))
         champion = state.winner_history[0] if state.winner_history else None
-        champion_desc = f"{champion.hotkey} ratio={champion.ratio:.4f}" if champion else "none"
+        champion_desc = (
+            f"{champion.hotkey} (uid {hotkey_to_uid.get(champion.hotkey, '?')}) ratio={champion.ratio:.4f}"
+            if champion
+            else "none"
+        )
         challengers_desc = (
             f"{round_metrics['round/num_challengers']} challenger(s)" if round_metrics else "0 challengers"
         )
         bt_logging.info(f"round: block={block} champion={champion_desc} {challengers_desc}")
         tempo = chain.tempo()
         anchor = state.window_anchor_block
-
-        metagraph = chain.metagraph()
-        hotkeys = list(metagraph.hotkeys)
-        uids = [int(uid) for uid in metagraph.uids]
 
         # Owner emergency burn override (issue #113), read from the commitment dict
         # _evaluate_round already fetched for precheck -- no second chain round-trip.
@@ -841,7 +858,7 @@ def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = 
             # on-chain weights_version updates -- skip the cycle, don't kill the process.
             bt_logging.warning(f"weights_version mismatch, waiting for on-chain update: {exc}")
             return
-        _block, round_metrics, _raw_commitments = _evaluate_round(args, state, chain, salt)
+        _block, round_metrics, _raw_commitments, _metagraph = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
             wandb_logger.log(round_metrics)
         save_state(state_path, state)

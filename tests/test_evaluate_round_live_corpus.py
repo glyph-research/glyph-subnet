@@ -32,6 +32,9 @@ class FakeChain:
     def get_all_commitments(self) -> dict:
         return self._raw_commitments
 
+    def metagraph(self):
+        return type("Metagraph", (), {"hotkeys": ["hk-a"], "uids": [5]})()
+
 
 def _args(**overrides):
     defaults = {
