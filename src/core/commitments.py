@@ -94,15 +94,33 @@ class WinnerCommitment(BaseModel):
     changes -- never read back into that same validator's own scoring/promotion, which
     always independently re-benchmarks the on-chain codec commitments (reigning champion
     included) every round regardless of what's published here.
+
+    Deliberately minimal (issue #125): Bittensor commitments cap at 128 raw bytes
+    (``Raw0-128``), and the original JSON payload with ``repo``/``rev``/``commit_block``
+    was ~232 bytes for any real 48-char SS58 hotkey -- every production publish failed.
+    Those fields are independently recoverable (the miner's own commitment records
+    ``repo@rev`` on-chain; ``commit_block`` is in every validator's own state), so only
+    the point of the feature remains: who is champion, at what ratio. The ratio is a
+    scaled fixed-point integer (parts-per-million) because a raw float's text length is
+    unpredictable; ppm is bounded, short, and matches the ~4-6 significant digits used
+    everywhere ratios are reported.
     """
 
     v: int = Field(default=WINNER_COMMITMENT_VERSION)
     hotkey: str = Field(min_length=1, max_length=64)
-    repo: str
-    rev: str
-    ratio: float
-    commit_block: int
+    ratio_ppm: int = Field(ge=0)
     scoring_version: int
+
+    @field_validator("hotkey")
+    @classmethod
+    def validate_hotkey(cls, value: str) -> str:
+        if "|" in value:
+            raise ValueError("hotkey must not contain '|'")
+        return value
+
+    @property
+    def ratio(self) -> float:
+        return self.ratio_ppm / 1_000_000
 
 
 class BurnOverrideCommitment(BaseModel):
@@ -155,22 +173,32 @@ def serialize_reveal_phase(repo: str, rev: str, salt: str) -> str:
 
 
 def serialize_winner_commitment(winner: WinnerCommitment) -> str:
-    """Serialize a validator's observability-only champion record (issue #103)."""
+    """Serialize a validator's observability-only champion record (issue #103).
 
-    payload = winner.model_dump(mode="json")
-    return f"{WINNER_COMMITMENT_PREFIX}{json.dumps(payload, sort_keys=True)}"
+    Compact pipe form ``g1w|<v>|<hotkey>|<ratio_ppm>|<scoring_version>`` -- matching the
+    ``g1|``/``g1c|``/``g1r|``/``g1b|`` convention, not JSON, so a real 48-char SS58 hotkey
+    stays well under Bittensor's 128-byte commitment cap (issue #125).
+    """
+
+    return (
+        f"{WINNER_COMMITMENT_PREFIX}{winner.v}|{winner.hotkey}|{winner.ratio_ppm}|"
+        f"{winner.scoring_version}"
+    )
 
 
 def parse_winner_commitment(raw: str) -> WinnerCommitment | None:
     """Parse a validator-published winner commitment, or ``None`` if ``raw`` isn't one, is
-    malformed, or is an unsupported future version."""
+    malformed, or is an unsupported version (including the pre-#125 JSON form, which never
+    successfully published anyway)."""
 
     data = raw.strip()
     if not data.startswith(WINNER_COMMITMENT_PREFIX):
         return None
     try:
-        payload = json.loads(data[len(WINNER_COMMITMENT_PREFIX) :])
-        winner = WinnerCommitment.model_validate(payload)
+        v, hotkey, ratio_ppm, scoring_version = data[len(WINNER_COMMITMENT_PREFIX) :].split("|", 3)
+        winner = WinnerCommitment(
+            v=int(v), hotkey=hotkey, ratio_ppm=int(ratio_ppm), scoring_version=int(scoring_version)
+        )
     except Exception:
         return None
     if winner.v != WINNER_COMMITMENT_VERSION:

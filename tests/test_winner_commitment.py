@@ -22,14 +22,26 @@ from validation.precheck import PrecheckResult
 from validator.service import _evaluate_round
 
 _REV_A = "a" * 40
+# A real-length (48-char) SS58 hotkey, not a short placeholder like "hk-a" -- issue #125:
+# short fake hotkeys were exactly what hid the 128-byte commitment-cap overflow in tests.
+_SS58_HOTKEY = "5FnBUXYqJ5cr5RT9n2QDSa6AuV3EpJ2uNxXjRRMTUrasEZQy"
 
 
 def test_winner_commitment_round_trips_through_serializer_parser():
-    winner = WinnerCommitment(
-        hotkey="hk-a", repo="a/codec", rev=_REV_A, ratio=0.31, commit_block=100, scoring_version=SCORING_VERSION,
-    )
+    winner = WinnerCommitment(hotkey=_SS58_HOTKEY, ratio_ppm=310_000, scoring_version=SCORING_VERSION)
     raw = serialize_winner_commitment(winner)
     assert parse_winner_commitment(raw) == winner
+    assert winner.ratio == 0.31
+
+
+def test_winner_commitment_stays_under_the_128_byte_chain_cap_for_worst_case_inputs():
+    # Bittensor's set_commitment supports Raw0-128 only; the pre-#125 JSON payload was 232
+    # bytes for a real hotkey and failed 100% of the time. Worst realistic case: 64-char
+    # hotkey (the model's own cap; real SS58 is 48), an absurdly bad ratio, huge versions.
+    winner = WinnerCommitment(
+        v=99, hotkey="x" * 64, ratio_ppm=999_999_999, scoring_version=99
+    )
+    assert len(serialize_winner_commitment(winner).encode()) <= 128
 
 
 def test_parse_winner_commitment_returns_none_for_other_commitment_forms():
@@ -39,10 +51,18 @@ def test_parse_winner_commitment_returns_none_for_other_commitment_forms():
 
 
 def test_parse_winner_commitment_rejects_unsupported_future_version():
-    payload = {"v": 999, "hotkey": "hk-a", "repo": "a/codec", "rev": _REV_A, "ratio": 0.3, "commit_block": 1,
-               "scoring_version": 1}
-    raw = "g1w|" + json.dumps(payload)
-    assert parse_winner_commitment(raw) is None
+    assert parse_winner_commitment(f"g1w|999|{_SS58_HOTKEY}|310000|1") is None
+
+
+def test_parse_winner_commitment_rejects_the_old_v1_json_form():
+    payload = {"v": 1, "hotkey": _SS58_HOTKEY, "repo": "a/codec", "rev": _REV_A, "ratio": 0.3,
+               "commit_block": 1, "scoring_version": 1}
+    assert parse_winner_commitment("g1w|" + json.dumps(payload)) is None
+
+
+def test_parse_winner_commitment_rejects_malformed_compact_payloads():
+    assert parse_winner_commitment("g1w|2|only-three|fields") is None
+    assert parse_winner_commitment(f"g1w|2|{_SS58_HOTKEY}|not-an-int|1") is None
 
 
 class _FakeChain:
@@ -128,18 +148,19 @@ def _setup_round(monkeypatch, tmp_path, *, winner_history, new_winner_entry_or_n
 
 def test_evaluate_round_publishes_winner_commitment_when_crown_changes(monkeypatch, tmp_path):
     bt_logging.set_info()
-    new_winner = WinnerEntry("hk-a", "a/codec", _REV_A, 0.25, 100)
+    new_winner = WinnerEntry(_SS58_HOTKEY, "a/codec", _REV_A, 0.25, 100)
     chain, state, args = _setup_round(monkeypatch, tmp_path, winner_history=None, new_winner_entry_or_none=new_winner)
 
     _evaluate_round(args, state, chain, "saltval")
 
     assert len(chain.set_commitment_calls) == 1
+    # The publish must actually fit the chain's Raw0-128 commitment cap with a real-length
+    # hotkey -- the pre-#125 payload only ever passed tests because they used "hk-a".
+    assert len(chain.set_commitment_calls[0].encode()) <= 128
     published = parse_winner_commitment(chain.set_commitment_calls[0])
-    assert published.hotkey == "hk-a"
-    assert published.repo == "a/codec"
-    assert published.rev == _REV_A
+    assert published.hotkey == _SS58_HOTKEY
+    assert published.ratio_ppm == 250_000
     assert published.ratio == 0.25
-    assert published.commit_block == 100
     assert published.scoring_version == SCORING_VERSION
 
 
