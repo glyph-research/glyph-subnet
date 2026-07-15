@@ -24,6 +24,11 @@ class CommitmentState(BaseModel):
     # Block at which the full security scan + artifact hash last actually ran (as opposed to
     # a cheap manifest-only re-check) -- issue #96's periodic re-verification cadence.
     last_full_check_block: int | None = None
+    # Consecutive prechecks where the HF repo/revision was *genuinely gone* (404 -- deleted,
+    # renamed, made private), as opposed to transiently unreachable. Reset to 0 by any
+    # successful precheck or any differently-failing one; crossing
+    # ``REPO_NOT_FOUND_EXCLUDE_STREAK`` triggers one-shot exclusion (issue #128).
+    consecutive_repo_not_found: int = 0
 
     @property
     def key(self) -> str:

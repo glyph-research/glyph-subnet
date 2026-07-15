@@ -59,6 +59,15 @@ COMMIT_PHASE_MAX_AGE_BLOCKS = 300
 # a local caching/performance tradeoff -- not consensus-critical, so it does not need to be
 # identical across validators. ~7200 blocks =~ 24h at ~12s/block.
 PRECHECK_FULL_RECHECK_INTERVAL_BLOCKS = 7200
+# Consecutive genuinely-404 prechecks (RepositoryNotFoundError/RevisionNotFoundError --
+# repo deleted, renamed, or made private; NOT transient network/5xx/rate-limit errors,
+# which never count and reset the streak) before the hotkey is added to
+# ``excluded_hotkeys`` and never rechecked (issue #128). Rounds run roughly every 20-40
+# minutes, so 12 consecutive 404s span ~4-8 hours of wall time -- enough to outlast a
+# multi-hour HF incident that somehow presented as clean 404s the whole way through,
+# while still stopping the wasted per-round refetch within a day. Purely a local
+# fetch-effort bound, not consensus-critical, so it need not match across validators.
+REPO_NOT_FOUND_EXCLUDE_STREAK = 12
 
 # --- Rolling-winner policy -----------------------------------------------------
 # current winner / previous winner. Effective split after the temporal burn is
