@@ -181,10 +181,12 @@ def build_round_metrics(
         metrics[f"{prefix}/roundtrip_ok"] = all(r.roundtrip_ok for r in outcome.results)
         metrics[f"{prefix}/throughput_bps_min"] = score.throughput_bps_min
         metrics[f"{prefix}/beats_baseline"] = bool(score.valid and score.ratio < baseline_ratio)
-        if "fineweb" in breakdown:
-            metrics[f"{prefix}/fineweb_ratio"] = breakdown["fineweb"]
-        if "pile" in breakdown:
-            metrics[f"{prefix}/pile_ratio"] = breakdown["pile"]
+        # Log every scored source generically so corpus renames (e.g. the issue #112
+        # fineweb -> fineweb-edu switch, which silently dropped fineweb_ratio) can't
+        # desync this logger from live_corpus source labels again.
+        for source, source_ratio in breakdown.items():
+            key = source.replace("-", "_")
+            metrics[f"{prefix}/{key}_ratio"] = source_ratio
         if benchmark_ratios:
             metrics[f"{prefix}/enwik9_ratio"] = sum(benchmark_ratios) / len(benchmark_ratios)
     return metrics
