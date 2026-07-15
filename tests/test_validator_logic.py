@@ -579,7 +579,7 @@ def test_run_once_prints_champion_and_concise_set_weights_on_a_quiet_round(monke
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
     monkeypatch.setattr(
         "validator.service._evaluate_round",
-        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments(), chain.metagraph()),
     )
     monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
 
@@ -591,7 +591,7 @@ def test_run_once_prints_champion_and_concise_set_weights_on_a_quiet_round(monke
     run_once(args, wandb_logger=_FakeWandb())
 
     out = caplog.text
-    assert "round: block=999 champion=champ ratio=0.4200 0 challengers" in out
+    assert "round: block=999 champion=champ (uid ?) ratio=0.4200 0 challengers" in out
     assert "set_weights: success=True" in out
     assert "set_weights response:" not in out
 
@@ -607,7 +607,7 @@ def test_run_once_prints_no_champion_when_history_empty(monkeypatch, tmp_path, c
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
     monkeypatch.setattr(
         "validator.service._evaluate_round",
-        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments(), chain.metagraph()),
     )
     monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
 
@@ -637,7 +637,7 @@ def test_run_once_skips_set_weights_when_rate_limited(monkeypatch, tmp_path, cap
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
     monkeypatch.setattr(
         "validator.service._evaluate_round",
-        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments(), chain.metagraph()),
     )
     monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
 
@@ -670,7 +670,7 @@ def test_run_once_forces_burn_when_owner_commitment_says_so(monkeypatch, tmp_pat
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
     monkeypatch.setattr(
         "validator.service._evaluate_round",
-        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments(), chain.metagraph()),
     )
 
     captured = {}
@@ -708,7 +708,7 @@ def test_run_once_does_not_force_burn_without_an_owner_commitment(monkeypatch, t
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
     monkeypatch.setattr(
         "validator.service._evaluate_round",
-        lambda args, state, chain, salt: (999, None, chain.get_all_commitments()),
+        lambda args, state, chain, salt: (999, None, chain.get_all_commitments(), chain.metagraph()),
     )
 
     captured = {}
@@ -748,7 +748,8 @@ def test_run_once_reads_the_override_from_the_round_commitments_without_a_second
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
     # The round's already-fetched dict is what _evaluate_round returns -- empty here.
     monkeypatch.setattr(
-        "validator.service._evaluate_round", lambda args, state, chain, salt: (999, None, {})
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, {}, chain.metagraph()),
     )
 
     captured = {}
@@ -767,6 +768,44 @@ def test_run_once_reads_the_override_from_the_round_commitments_without_a_second
     run_once(args, wandb_logger=_FakeWandb())  # must not raise
 
     assert captured["force_burn"] is False
+
+
+def test_run_once_reuses_the_round_metagraph_without_a_second_fetch(monkeypatch, tmp_path):
+    # issue #126: _evaluate_round now fetches the metagraph (for uid labeling) and returns
+    # it; run_once's weight-setting must reuse that copy, not fetch its own -- same
+    # no-second-round-trip pattern as raw_commitments (issue #113/#114).
+    state = ValidatorState()
+    fake_chain = _FakeChain()
+    calls = {"n": 0}
+    real_metagraph = _FakeChain.metagraph
+
+    def counting_metagraph():
+        calls["n"] += 1
+        return real_metagraph(fake_chain)
+
+    fake_chain.metagraph = counting_metagraph
+
+    monkeypatch.setattr("validator.service.load_state", lambda path: state)
+    monkeypatch.setattr("validator.service.save_state", lambda path, s: None)
+    monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
+    monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
+    monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
+    # The stub stands in for the real _evaluate_round, whose single metagraph() call is the
+    # one fetch the whole round is allowed.
+    monkeypatch.setattr(
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, {}, chain.metagraph()),
+    )
+    monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
+
+    args = type(
+        "Args", (),
+        {"state_dir": str(tmp_path), "salt_file": None, "dry_run": True, "burn_uid": 0, "window_anchor": 0},
+    )()
+
+    run_once(args, wandb_logger=_FakeWandb())
+
+    assert calls["n"] == 1
 
 
 # --- --loop/--once default (issue #79) ------------------------------------------
@@ -865,7 +904,8 @@ def test_run_once_builds_chain_before_wandb_logger_and_passes_identity(monkeypat
     monkeypatch.setattr("validator.service._local_version_key", lambda: 1)
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
     monkeypatch.setattr(
-        "validator.service._evaluate_round", lambda args, state, chain, salt: (999, None, {})
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, {}, chain.metagraph()),
     )
     monkeypatch.setattr("validator.service.decide_weights", lambda *a, **k: ([1.0], False))
 
@@ -898,7 +938,8 @@ def test_run_reign_only_builds_chain_before_wandb_logger_and_passes_identity(mon
     monkeypatch.setattr("validator.service._make_chain", lambda args: fake_chain)
     monkeypatch.setattr("validator.service._assert_version_key_matches", lambda chain: 1)
     monkeypatch.setattr(
-        "validator.service._evaluate_round", lambda args, state, chain, salt: (999, None, {})
+        "validator.service._evaluate_round",
+        lambda args, state, chain, salt: (999, None, {}, chain.metagraph()),
     )
 
     captured = {}

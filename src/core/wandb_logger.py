@@ -185,15 +185,20 @@ def build_round_metrics(
     winner_hotkey: str | None,
     winner_ratio: float | None,
     crown_changed: bool,
+    hotkey_to_uid: dict[str, int] | None = None,
 ) -> dict:
     """Flatten one eval round's outcomes into a wandb-loggable metrics dict.
 
     Pure formatting -- reads already-computed ``EvalOutcome``s, never recomputes or
-    influences scoring.
+    influences scoring. ``hotkey_to_uid`` (the metagraph's mapping, issue #126) labels each
+    hotkey-keyed entry with its UID so following along doesn't require manually
+    cross-referencing the metagraph; ``-1`` means unknown (no mapping supplied, or the
+    hotkey isn't currently registered).
     """
 
     from eval.scoring import source_ratio_breakdown, stream_ratio
 
+    hotkey_to_uid = hotkey_to_uid or {}
     metrics: dict = {
         "round/block": block,
         "round/baseline_ratio": baseline_ratio,
@@ -201,6 +206,7 @@ def build_round_metrics(
         "round/excluded_hotkeys_count": excluded_hotkeys_count,
         "round/commit_phase_seen_count": commit_phase_seen_count,
         "winner/hotkey": winner_hotkey or "",
+        "winner/uid": hotkey_to_uid.get(winner_hotkey, -1) if winner_hotkey else -1,
         "winner/ratio": winner_ratio if winner_ratio is not None else float("nan"),
         "winner/crown_changed": crown_changed,
     }
@@ -209,6 +215,7 @@ def build_round_metrics(
         prefix = f"challenger/{hotkey}"
         breakdown = source_ratio_breakdown(outcome.results)
         benchmark_ratios = [stream_ratio(r) for r in outcome.results if not r.scored]
+        metrics[f"{prefix}/uid"] = hotkey_to_uid.get(hotkey, -1)
         metrics[f"{prefix}/ratio"] = score.ratio
         metrics[f"{prefix}/valid"] = score.valid
         # The real infra/runner failure (e.g. docker pull denied), when the codec never ran

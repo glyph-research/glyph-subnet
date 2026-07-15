@@ -62,6 +62,9 @@ class _FakeChain:
     def get_all_commitments(self) -> dict:
         return self._raw_commitments
 
+    def metagraph(self):
+        return type("Metagraph", (), {"hotkeys": ["hk-a", "incumbent-hk"], "uids": [7, 3]})()
+
     def set_commitment(self, data: str):
         self.set_commitment_calls.append(data)
         return self.set_commitment_response
@@ -167,7 +170,7 @@ def test_evaluate_round_survives_a_publish_failure(monkeypatch, tmp_path, caplog
 
     chain.set_commitment = boom
 
-    block, round_metrics, _raw_commitments = _evaluate_round(args, state, chain, "saltval")
+    block, round_metrics, _raw_commitments, _metagraph = _evaluate_round(args, state, chain, "saltval")
 
     assert round_metrics["winner/crown_changed"] is True
     assert "failed to publish winner commitment" in caplog.text
