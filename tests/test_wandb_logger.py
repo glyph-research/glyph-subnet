@@ -35,7 +35,7 @@ def _stream(source, ratio_num, ratio_den=1000, scored=True):
 
 
 def _outcome(hotkey, ratio):
-    results = [_stream("fineweb", int(ratio * 1000)), _stream("pile", int(ratio * 1000))]
+    results = [_stream("fineweb-edu", int(ratio * 1000)), _stream("pile", int(ratio * 1000))]
     score = CodecScore(valid=True, ratio=ratio, throughput_bps_min=20_000, reasons=[])
     return EvalOutcome(hotkey=hotkey, score=score, results=results)
 
@@ -161,7 +161,7 @@ def test_build_round_metrics_has_expected_keys_for_simulated_round():
         assert f"{prefix}/roundtrip_ok" in metrics
         assert f"{prefix}/throughput_bps_min" in metrics
         assert f"{prefix}/beats_baseline" in metrics
-        assert f"{prefix}/fineweb_ratio" in metrics
+        assert f"{prefix}/fineweb_edu_ratio" in metrics
         assert f"{prefix}/pile_ratio" in metrics
     assert metrics["winner/hotkey"] == "hkA"
     assert metrics["winner/crown_changed"] is True
