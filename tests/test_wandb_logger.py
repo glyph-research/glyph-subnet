@@ -163,8 +163,26 @@ def test_build_round_metrics_has_expected_keys_for_simulated_round():
         assert f"{prefix}/beats_baseline" in metrics
         assert f"{prefix}/fineweb_edu_ratio" in metrics
         assert f"{prefix}/pile_ratio" in metrics
+        assert metrics[f"{prefix}/runner_error"] == ""  # no infra failure this round
     assert metrics["winner/hotkey"] == "hkA"
     assert metrics["winner/crown_changed"] is True
+
+
+def test_build_round_metrics_surfaces_the_runner_error_when_the_codec_never_ran():
+    # issue #127: an infra failure (docker pull denied) must be visible in the dashboard as
+    # the actual error, distinct from a genuine round-trip failure.
+    outcome = EvalOutcome(
+        hotkey="hkA",
+        score=CodecScore(valid=False, ratio=0.0, throughput_bps_min=0.0, reasons=["round-trip failed"]),
+        results=[],
+        error="docker pull denied: repository does not exist",
+    )
+    metrics = build_round_metrics(
+        block=1, baseline_ratio=0.6, num_challengers=1, outcomes={"hkA": outcome},
+        excluded_hotkeys_count=0, commit_phase_seen_count=0, winner_hotkey=None,
+        winner_ratio=None, crown_changed=False,
+    )
+    assert metrics["challenger/hkA/runner_error"] == "docker pull denied: repository does not exist"
 
 
 def test_build_weights_metrics_has_expected_keys():
@@ -190,21 +208,66 @@ def test_log_forwards_metrics_to_wandb(fake_wandb):
     fake_wandb.log.assert_called_once_with(metrics)
 
 
-def test_init_failure_disables_logging_without_raising(fake_wandb):
+def test_init_failure_does_not_raise_and_recovers_on_next_log(fake_wandb):
+    # issue #127: a failed initial _start_run must not permanently disable logging -- the
+    # next log() call retries the run start from scratch and, once it succeeds, logs.
     fake_wandb.init.side_effect = RuntimeError("network down")
     logger = WandbLogger(enabled=True)  # must not raise
+    assert logger.enabled is True
+
+    fake_wandb.init.side_effect = None  # outage over
+    logger.log({"a": 1})
+    fake_wandb.log.assert_called_once_with({"a": 1})
+
+
+def test_single_log_failure_recovers_with_a_fresh_run_on_next_call(fake_wandb):
+    # issue #127 (observed live): one transient error (HandleAbandonedError during a pm2
+    # restart) used to disable logging for up to 24h. Now it costs only that call: the dead
+    # run handle is dropped and the next log() starts a fresh run and logs normally.
+    logger = WandbLogger(enabled=True, restart_interval_hours=0)
+    fake_wandb.log.side_effect = RuntimeError("HandleAbandonedError()")
+    logger.log({"a": 1})  # must not raise
+    assert logger.enabled is True
+
+    fake_wandb.log.side_effect = None
+    logger.log({"b": 2})
+    assert fake_wandb.init.call_count == 2  # fresh run replaced the dropped handle
+    fake_wandb.log.assert_called_with({"b": 2})
+
+
+def test_persistent_failures_disable_logging_after_the_streak_budget(fake_wandb):
+    # "wandb is fundamentally broken" is still detected: _MAX_CONSECUTIVE_FAILURES failures
+    # in a row (each already retried with a fresh run) fully disable logging.
+    logger = WandbLogger(enabled=True)
+    fake_wandb.log.side_effect = RuntimeError("connection reset")
+    fake_wandb.init.side_effect = RuntimeError("connection reset")
+    for i in range(WandbLogger._MAX_CONSECUTIVE_FAILURES):
+        assert logger.enabled is True
+        logger.log({"n": i})  # must never raise
     assert logger.enabled is False
-    logger.log({"a": 1})  # still must not raise, and stays a no-op
+
+    fake_wandb.init.side_effect = None
+    fake_wandb.log.side_effect = None
+    fake_wandb.log.reset_mock()
+    logger.log({"b": 2})  # now a no-op; must not raise or call wandb.log again
     fake_wandb.log.assert_not_called()
 
 
-def test_log_failure_disables_logging_without_raising(fake_wandb):
-    logger = WandbLogger(enabled=True)
-    fake_wandb.log.side_effect = RuntimeError("connection reset")
-    logger.log({"a": 1})  # must not raise
-    assert logger.enabled is False
-    logger.log({"b": 2})  # now a no-op; must not raise or call wandb.log again
-    fake_wandb.log.assert_called_once()
+def test_a_success_resets_the_consecutive_failure_streak(fake_wandb):
+    logger = WandbLogger(enabled=True, restart_interval_hours=0)
+    budget = WandbLogger._MAX_CONSECUTIVE_FAILURES
+
+    # budget-1 failures, then a success, then budget-1 more failures: never disabled,
+    # because the streak (not a lifetime total) is what's counted.
+    fake_wandb.log.side_effect = RuntimeError("blip")
+    for _ in range(budget - 1):
+        logger.log({"a": 1})
+    fake_wandb.log.side_effect = None
+    logger.log({"ok": 1})
+    fake_wandb.log.side_effect = RuntimeError("blip")
+    for _ in range(budget - 1):
+        logger.log({"a": 1})
+    assert logger.enabled is True
 
 
 def test_finish_is_noop_when_disabled_or_no_run(fake_wandb):

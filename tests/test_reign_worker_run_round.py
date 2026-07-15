@@ -21,11 +21,12 @@ def _commitment(hotkey, repo, revision, block):
     )
 
 
-def _outcome(hotkey, *, valid, ratio):
+def _outcome(hotkey, *, valid, ratio, error=None):
     return EvalOutcome(
         hotkey=hotkey,
         score=CodecScore(valid=valid, ratio=ratio, throughput_bps_min=99_999.0, reasons=[] if valid else ["broke"]),
         results=[],
+        error=error,
     )
 
 
@@ -137,3 +138,58 @@ def test_run_round_logs_every_candidate_result_not_only_the_winner(monkeypatch, 
     assert "candidate winner: ratio=0.1000 valid" in out
     assert "candidate loser: invalid" in out
     assert "broke" in out  # the actual reason, not just "invalid"
+
+
+def test_invalid_candidate_summary_includes_the_runner_error_when_the_codec_never_ran(monkeypatch, caplog):
+    # issue #127 (observed live): a docker pull failure was summarized as "round-trip failed
+    # on streams: [...]", implying the codec produced wrong output when it never ran at all.
+    # The summary line -- where the candidate's fate is decided -- must carry the real error,
+    # not force the operator to scroll back to an earlier per-stream warning.
+    bt_logging.set_info()
+    state = ValidatorState()
+    pull_denied = _commitment("pulldenied", "gone/codec", "rev999999", block=3)
+    state.commitments[pull_denied.key] = pull_denied
+    monkeypatch.setattr(
+        "reign_worker.service.paired_eval",
+        lambda *a, **k: {
+            "pulldenied": _outcome(
+                "pulldenied", valid=False, ratio=999.0,
+                error="docker: pull access denied for gone/codec, repository does not exist",
+            ),
+        },
+    )
+
+    run_round(
+        state, runner=object(), challengers=[pull_denied], provider=object(), stream_specs=[],
+        caps=CAPS, floor_bps=1.0, budget_secs=60.0, margin=0.05, block=100,
+        eligible_hotkeys={"pulldenied"},
+    )
+
+    out = caplog.text
+    assert "candidate pulldenied: invalid" in out
+    assert "runner error: docker: pull access denied" in out
+
+
+def test_incumbent_reeval_failure_warning_includes_the_runner_error(monkeypatch, caplog):
+    bt_logging.set_info()
+    state = ValidatorState()
+    incumbent_commitment = _commitment("incumbent", "inc/codec", "rev123456", block=1)
+    state.commitments[incumbent_commitment.key] = incumbent_commitment
+    state.winner_history = [
+        WinnerEntry(hotkey="incumbent", repo="inc/codec", revision="rev123456", ratio=0.5, commit_block=1)
+    ]
+    monkeypatch.setattr(
+        "reign_worker.service.paired_eval",
+        lambda *a, **k: {
+            "incumbent": _outcome("incumbent", valid=False, ratio=999.0, error="docker daemon unreachable"),
+        },
+    )
+
+    run_round(
+        state, runner=object(), challengers=[], provider=object(), stream_specs=[],
+        caps=CAPS, floor_bps=1.0, budget_secs=60.0, margin=0.05, block=100,
+        eligible_hotkeys={"incumbent"},
+    )
+
+    assert "failed re-eval" in caplog.text
+    assert "runner error: docker daemon unreachable" in caplog.text

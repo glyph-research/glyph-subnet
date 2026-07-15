@@ -21,6 +21,15 @@ import traceback
 class WandbLogger:
     """No-op unless enabled; every public method is best-effort and never raises."""
 
+    # Consecutive-failure budget before logging fully disables itself (issue #127): one
+    # transient network blip or wandb-internal hiccup (observed live: HandleAbandonedError
+    # from a run torn down during a pm2 restart) should cost that single call, not blind
+    # observability until the next scheduled restart (default 24h). Each failed call drops
+    # the run handle so the next call retries with a fresh _start_run(); only a streak of
+    # failures -- every one of which already got that fresh-run retry -- is treated as
+    # "wandb is fundamentally broken, stop trying".
+    _MAX_CONSECUTIVE_FAILURES = 3
+
     def __init__(
         self,
         *,
@@ -41,24 +50,43 @@ class WandbLogger:
         self._restart_interval_secs = max(restart_interval_hours, 0.0) * 3600.0
         self._run = None
         self._run_started_at = 0.0
+        self._consecutive_failures = 0
         if self.enabled:
             self._safe(self._start_run)
 
     # --- internals -----------------------------------------------------------------------
 
     def _safe(self, fn, *args, **kwargs):
-        """Run ``fn`` best-effort. Any exception disables further logging but never propagates
-        -- a wandb outage degrades to no-op observability, not a broken validator round."""
+        """Run ``fn`` best-effort. An exception never propagates -- a wandb outage degrades
+        to no-op observability, not a broken validator round. A single failure only skips
+        that call (the dead run handle is dropped so the next call starts fresh); logging
+        fully disables only after ``_MAX_CONSECUTIVE_FAILURES`` failures in a row."""
 
         if not self.enabled:
             return None
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - wandb must never crash/delay a round
-            print(f"[wandb] disabling logging after error: {exc!r}")
-            traceback.print_exc()
-            self.enabled = False
+            self._consecutive_failures += 1
+            # The run may be torn down/abandoned; drop it so the next call attempts a
+            # fresh _start_run() instead of re-poking a dead handle.
+            self._run = None
+            if self._consecutive_failures >= self._MAX_CONSECUTIVE_FAILURES:
+                print(
+                    f"[wandb] disabling logging after {self._consecutive_failures} "
+                    f"consecutive errors: {exc!r}"
+                )
+                traceback.print_exc()
+                self.enabled = False
+            else:
+                print(
+                    f"[wandb] call failed ({self._consecutive_failures}/"
+                    f"{self._MAX_CONSECUTIVE_FAILURES} consecutive), retrying with a "
+                    f"fresh run on the next call: {exc!r}"
+                )
             return None
+        self._consecutive_failures = 0
+        return result
 
     def _start_run(self) -> None:
         import wandb
@@ -101,7 +129,12 @@ class WandbLogger:
     def _log_impl(self, metrics: dict) -> None:
         import wandb
 
-        self._maybe_restart()
+        if self._run is None:
+            # No live run: either the previous call failed (handle dropped, issue #127) or
+            # the initial _start_run in __init__ failed -- retry from scratch here.
+            self._start_run()
+        else:
+            self._maybe_restart()
         if self._run is not None:
             wandb.log(metrics)
 
@@ -178,6 +211,10 @@ def build_round_metrics(
         benchmark_ratios = [stream_ratio(r) for r in outcome.results if not r.scored]
         metrics[f"{prefix}/ratio"] = score.ratio
         metrics[f"{prefix}/valid"] = score.valid
+        # The real infra/runner failure (e.g. docker pull denied), when the codec never ran
+        # at all -- distinguishes "host couldn't run it" from "codec produced wrong output"
+        # in the dashboard just like in the log summary (issue #127).
+        metrics[f"{prefix}/runner_error"] = outcome.error or ""
         metrics[f"{prefix}/roundtrip_ok"] = all(r.roundtrip_ok for r in outcome.results)
         metrics[f"{prefix}/throughput_bps_min"] = score.throughput_bps_min
         metrics[f"{prefix}/beats_baseline"] = bool(score.valid and score.ratio < baseline_ratio)
