@@ -98,7 +98,12 @@ def run_round(
         if outcome.score.valid:
             bt_logging.info(f"candidate {hotkey}: ratio={outcome.score.ratio:.4f} valid")
         else:
-            bt_logging.warning(f"candidate {hotkey}: invalid ({outcome.score.reasons})")
+            # outcome.error carries the actual RunnerError when the codec never ran at all
+            # (e.g. a docker pull denied) -- without it, this summary reads as "the codec
+            # produced wrong output" and the real cause is buried in an earlier per-stream
+            # warning (issue #127).
+            detail = f"; runner error: {outcome.error}" if outcome.error else ""
+            bt_logging.warning(f"candidate {hotkey}: invalid ({outcome.score.reasons}{detail})")
         commitment = next((c for c in state.commitments.values() if c.hotkey == hotkey and c.valid), None)
         if commitment is None:
             continue
@@ -132,7 +137,11 @@ def run_round(
             # any) up to index 0, so it's naturally treated as the incumbent next round --
             # "promotes later" needs no special-casing here, current_ratio already stays None
             # so a valid challenger THIS round still vacant-crown-promotes immediately.
-            bt_logging.warning(f"incumbent {incumbent_commitment.hotkey} failed re-eval: {inc_outcome.score.reasons}")
+            inc_detail = f"; runner error: {inc_outcome.error}" if inc_outcome.error else ""
+            bt_logging.warning(
+                f"incumbent {incumbent_commitment.hotkey} failed re-eval: "
+                f"{inc_outcome.score.reasons}{inc_detail}"
+            )
             state.winner_history.pop(0)
 
     ranked = sorted(
