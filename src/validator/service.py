@@ -593,10 +593,7 @@ def _publish_winner_commitment(chain: BittensorChain, champion: WinnerEntry) -> 
 
     winner = WinnerCommitment(
         hotkey=champion.hotkey,
-        repo=champion.repo,
-        rev=champion.revision,
-        ratio=champion.ratio,
-        commit_block=champion.commit_block,
+        ratio_ppm=round(champion.ratio * 1_000_000),
         scoring_version=SCORING_VERSION,
     )
     try:
