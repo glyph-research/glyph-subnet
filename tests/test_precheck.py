@@ -293,6 +293,55 @@ def test_precheck_codec_downloads_with_stable_local_dir(tmp_path):
     )
 
 
+# --- definitive-404 vs transient fetch failure (issue #128) ----------------------------
+
+
+def _hf_not_found(error_cls, message):
+    import httpx
+
+    response = httpx.Response(404, request=httpx.Request("GET", "https://huggingface.co/api/x"))
+    return error_cls(message, response=response)
+
+
+def test_precheck_codec_flags_repository_not_found_as_repo_not_found():
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    with patch("huggingface_hub.HfApi") as mock_api:
+        mock_api.return_value.repo_info.side_effect = _hf_not_found(
+            RepositoryNotFoundError, "404 Client Error: Repository Not Found"
+        )
+        result = precheck_codec("gone/repo", "deadbeef1234")
+
+    assert result.ok is False
+    assert result.repo_not_found is True
+    assert any("repo unavailable" in e for e in result.errors)
+
+
+def test_precheck_codec_flags_revision_not_found_as_repo_not_found():
+    from huggingface_hub.errors import RevisionNotFoundError
+
+    with patch("huggingface_hub.HfApi") as mock_api:
+        mock_api.return_value.repo_info.side_effect = _hf_not_found(
+            RevisionNotFoundError, "404 Client Error: Revision Not Found"
+        )
+        result = precheck_codec("org/repo", "deadbeef1234")
+
+    assert result.ok is False
+    assert result.repo_not_found is True
+
+
+def test_precheck_codec_does_not_flag_a_transient_failure_as_repo_not_found():
+    # A network timeout / DNS hiccup / HF 5xx must stay "worth retrying next round" -- only
+    # a definitive does-not-exist answer may ever feed the issue-#128 exclusion streak.
+    with patch("huggingface_hub.HfApi") as mock_api:
+        mock_api.return_value.repo_info.side_effect = ConnectionError("connection timed out")
+        result = precheck_codec("org/repo", "deadbeef1234")
+
+    assert result.ok is False
+    assert result.repo_not_found is False
+    assert any("repo unavailable" in e for e in result.errors)
+
+
 # --- symlink escape in artifact hashing (issue #95) ------------------------------------
 
 

@@ -142,6 +142,107 @@ def test_apply_precheck_logs_valid_and_invalid_per_hotkey(monkeypatch, caplog):
     assert f"precheck: hotkey-b b/codec@{_REV_B} invalid: too big" in out
 
 
+# --- permanently-404 repos: exclude after repeated confirmation (issue #128) ----
+
+
+_NOT_FOUND = PrecheckResult(
+    repo="gone/codec", revision=_REV_A, ok=False,
+    errors=["repo unavailable: 404 Client Error"], repo_not_found=True,
+)
+_TRANSIENT = PrecheckResult(
+    repo="gone/codec", revision=_REV_A, ok=False,
+    errors=["repo unavailable: connection timed out"], repo_not_found=False,
+)
+_OK = PrecheckResult(
+    repo="gone/codec", revision=_REV_A, ok=True, artifact_hash="h", artifact_bytes=10,
+)
+
+
+def _scripted_precheck(monkeypatch, results):
+    """Each _apply_precheck call pops the next scripted PrecheckResult; records call count."""
+
+    calls = []
+
+    def fake_precheck(repo, revision, *, max_artifact_bytes, download=True):
+        calls.append(repo)
+        return results.pop(0)
+
+    monkeypatch.setattr("validator.service.precheck_codec", fake_precheck)
+    return calls
+
+
+def _run_rounds(state, parsed, n, start_block=10):
+    for i in range(n):
+        _apply_precheck(state, parsed, max_artifact_bytes=100, block=start_block + i)
+
+
+def test_repo_not_found_streak_increments_only_on_definitive_404(monkeypatch):
+    from core.constants import REPO_NOT_FOUND_EXCLUDE_STREAK
+
+    state = ValidatorState()
+    parsed = [ParsedCommitment("hotkey-a", CodecCommitment(repo="gone/codec", rev=_REV_A), "raw")]
+    key = f"hotkey-a:gone/codec@{_REV_A}"
+
+    _scripted_precheck(monkeypatch, [_NOT_FOUND, _NOT_FOUND, _TRANSIENT])
+    _run_rounds(state, parsed, 2)
+    assert state.commitments[key].consecutive_repo_not_found == 2
+
+    # A transient (non-404) failure resets the streak -- it never counts toward exclusion.
+    _run_rounds(state, parsed, 1, start_block=12)
+    assert state.commitments[key].consecutive_repo_not_found == 0
+    assert "hotkey-a" not in state.excluded_hotkeys
+    assert REPO_NOT_FOUND_EXCLUDE_STREAK > 2  # the scripted rounds stayed under threshold
+
+
+def test_repo_not_found_streak_resets_on_a_successful_precheck(monkeypatch):
+    state = ValidatorState()
+    parsed = [ParsedCommitment("hotkey-a", CodecCommitment(repo="gone/codec", rev=_REV_A), "raw")]
+    key = f"hotkey-a:gone/codec@{_REV_A}"
+
+    _scripted_precheck(monkeypatch, [_NOT_FOUND, _NOT_FOUND, _OK, _NOT_FOUND])
+    _run_rounds(state, parsed, 4)
+
+    # The recovery zeroed the streak, so the later 404 starts over at 1.
+    assert state.commitments[key].consecutive_repo_not_found == 1
+    assert "hotkey-a" not in state.excluded_hotkeys
+
+
+def test_crossing_the_404_streak_threshold_excludes_the_hotkey_and_stops_rechecking(monkeypatch, caplog):
+    from core.constants import REPO_NOT_FOUND_EXCLUDE_STREAK
+
+    bt_logging.set_info()
+    state = ValidatorState()
+    parsed = [ParsedCommitment("hotkey-a", CodecCommitment(repo="gone/codec", rev=_REV_A), "raw")]
+
+    calls = _scripted_precheck(monkeypatch, [_NOT_FOUND] * REPO_NOT_FOUND_EXCLUDE_STREAK)
+    _run_rounds(state, parsed, REPO_NOT_FOUND_EXCLUDE_STREAK - 1)
+    assert "hotkey-a" not in state.excluded_hotkeys  # under threshold: keep retrying
+
+    _run_rounds(state, parsed, 1, start_block=10 + REPO_NOT_FOUND_EXCLUDE_STREAK)
+    assert "hotkey-a" in state.excluded_hotkeys
+    assert "permanently unavailable" in caplog.text
+
+    # Once excluded, later rounds skip the hotkey entirely -- no more wasted fetches.
+    _run_rounds(state, parsed, 3, start_block=100)
+    assert len(calls) == REPO_NOT_FOUND_EXCLUDE_STREAK
+
+
+def test_repo_not_found_streak_survives_a_state_roundtrip(monkeypatch, tmp_path):
+    # The streak must persist across validator restarts (it spans hours of rounds), so it
+    # lives on CommitmentState and must survive save_state/load_state like any other field.
+    from core.state import load_state, save_state
+
+    state = ValidatorState()
+    parsed = [ParsedCommitment("hotkey-a", CodecCommitment(repo="gone/codec", rev=_REV_A), "raw")]
+    key = f"hotkey-a:gone/codec@{_REV_A}"
+
+    _scripted_precheck(monkeypatch, [_NOT_FOUND, _NOT_FOUND])
+    _run_rounds(state, parsed, 2)
+    path = tmp_path / "state.json"
+    save_state(path, state)
+    assert load_state(path).commitments[key].consecutive_repo_not_found == 2
+
+
 # --- precheck full re-check cadence: not skipped forever (issue #96) ------------
 
 

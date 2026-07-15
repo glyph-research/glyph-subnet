@@ -40,6 +40,7 @@ from core.constants import (
     EVAL_STREAM_BYTES,
     EVAL_STREAMS,
     PRECHECK_FULL_RECHECK_INTERVAL_BLOCKS,
+    REPO_NOT_FOUND_EXCLUDE_STREAK,
     REFERENCE_SKU,
     SCORING_VERSION,
     THROUGHPUT_FLOOR_BPS,
@@ -376,6 +377,19 @@ def _apply_precheck(
             bt_logging.info(f"precheck: {codec_desc} valid")
         else:
             bt_logging.warning(f"precheck: {codec_desc} invalid: {'; '.join(result.errors)}")
+        # issue #128: count only definitive 404s (repo deleted/renamed/private) toward the
+        # exclusion streak; any success or differently-failing precheck (transient network/
+        # 5xx/rate-limit) resets it, so an honest miner is never blacklisted over an outage.
+        prior_streak = existing.consecutive_repo_not_found if existing else 0
+        repo_not_found_streak = prior_streak + 1 if getattr(result, "repo_not_found", False) else 0
+        if repo_not_found_streak >= REPO_NOT_FOUND_EXCLUDE_STREAK:
+            state.excluded_hotkeys.add(parsed.hotkey)
+            bt_logging.warning(
+                f"precheck: {codec_desc} repo 404'd on {repo_not_found_streak} consecutive "
+                f"prechecks (threshold {REPO_NOT_FOUND_EXCLUDE_STREAK}, spanning several "
+                f"hours of rounds) -- treating as permanently unavailable and excluding "
+                f"the hotkey; it will not be rechecked"
+            )
         entries[key] = CommitmentState(
             hotkey=parsed.hotkey,
             repo=parsed.commitment.repo,
@@ -389,6 +403,7 @@ def _apply_precheck(
             disqualification_reason=None if result.ok else "; ".join(result.errors),
             local_path=local_dir,
             last_full_check_block=block if full_check else last_full_check,
+            consecutive_repo_not_found=repo_not_found_streak,
         )
 
     # Duplicate-artifact ownership: earliest commit_block wins, hotkey only as the final
