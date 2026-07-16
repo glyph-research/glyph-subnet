@@ -53,6 +53,12 @@ from core.wandb_logger import WandbLogger, build_round_metrics, build_weights_me
 from core.weights import WinnerEntry, compact_history, promote_winner, should_promote
 from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
+from eval.live_bench import (
+    LivePrefetcher,
+    LiveSnapshotStore,
+    SnapshotAppendedProvider,
+    live_benchmark_spec,
+)
 from eval.live_corpus import resolve_live_corpus
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
 from eval.scoring import source_ratio_breakdown, stream_ratio, zstd_baseline_ratio
@@ -630,6 +636,59 @@ def _startup_wandb_identity_name(args) -> str | None:
         return None
 
 
+def _append_live_benchmark_stream(args, provider, specs):
+    """Append the latest complete live snapshot as a benchmark-only stream (issue #139).
+
+    Read-only at round start: never fetches, only picks up what the between-rounds
+    prefetch already completed. No snapshot yet (or no state dir, e.g. offline tests) ->
+    the round proceeds without a live stream; a stale-but-complete snapshot is preferred
+    over none. Returns the (possibly wrapped) provider and spec list.
+    """
+
+    state_dir = getattr(args, "state_dir", None)
+    if not state_dir:
+        return provider, specs
+    try:
+        store = LiveSnapshotStore(Path(state_dir) / "live_data")
+        latest = store.latest()
+        if latest is None:
+            bt_logging.warning(
+                "live benchmark: no complete snapshot yet; skipping the live stream this round"
+            )
+            return provider, specs
+        path, snapshot_block = latest
+        snapshot = path.read_bytes()
+        spec = live_benchmark_spec(provider, snapshot)
+        bt_logging.info(
+            f"live benchmark: using snapshot from block {snapshot_block} "
+            f"({len(snapshot):,} bytes) as benchmark-only stream {spec.stream_id}"
+        )
+        return SnapshotAppendedProvider(provider, snapshot), [*specs, spec]
+    except Exception as exc:  # noqa: BLE001 - display-only; must never fail the round
+        bt_logging.warning(f"live benchmark: skipping live stream: {exc}")
+        return provider, specs
+
+
+_live_prefetcher: LivePrefetcher | None = None
+
+
+def _start_live_prefetch(args, chain: BittensorChain) -> None:
+    """Kick off the between-rounds live-data fetch (issue #139) -- strictly best-effort,
+    returns immediately; any failure here degrades to a skipped/stale live stream, never a
+    blocked or delayed round."""
+
+    global _live_prefetcher
+    state_dir = getattr(args, "state_dir", None)
+    if not state_dir:
+        return
+    try:
+        if _live_prefetcher is None:
+            _live_prefetcher = LivePrefetcher(LiveSnapshotStore(Path(state_dir) / "live_data"))
+        _live_prefetcher.start(chain.current_block())
+    except Exception as exc:  # noqa: BLE001
+        bt_logging.warning(f"live benchmark: prefetch not started: {exc}")
+
+
 def _evaluate_round(
     args, state: ValidatorState, chain: BittensorChain, salt: str
 ) -> tuple[int, dict | None, dict[str, str], "object"]:
@@ -700,6 +759,7 @@ def _evaluate_round(
         # (issue #108) -- a free-tier read token is enough, no special dataset permissions.
         provider = resolve_live_corpus(str(seed), token=os.environ.get("HF_TOKEN"))
         specs = _select_specs(args, provider, seed)
+        provider, specs = _append_live_benchmark_stream(args, provider, specs)
         scored_specs = _scored_specs(specs)
         baseline = zstd_baseline_ratio(
             [provider.materialize(s) for s in scored_specs],
@@ -1011,6 +1071,10 @@ def main() -> None:
             # rather than degrading to the reveal-observation block (exploit vector #9).
             if poll_chain is None:
                 poll_chain = _make_chain(args)
+            # The between-rounds window is where the next round's live benchmark snapshot
+            # gets fetched (issue #139) -- non-blocking, so the commit-poll sleep below
+            # still starts immediately.
+            _start_live_prefetch(args, poll_chain)
             _sleep_with_commit_polls(args, poll_chain)
     finally:
         wandb_logger.finish()
