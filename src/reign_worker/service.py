@@ -123,6 +123,14 @@ def run_round(
         )
 
     current_ratio = None
+    if incumbent is not None and incumbent_commitment is None:
+        # The incumbent exists but couldn't be evaluated this round -- its commitment is
+        # currently invalid, in practice a transiently unreachable repo (issue #135; a
+        # definitively-gone incumbent was already dropped from winner_history by the
+        # caller's retained_hotkeys compaction). Keep the crown and hold challengers to the
+        # margin against its last recorded ratio instead of treating the crown as vacant,
+        # which would let a challenger take it without the epsilon beat.
+        current_ratio = incumbent.ratio
     if incumbent_commitment is not None and incumbent_commitment.hotkey in outcomes:
         inc_outcome = outcomes[incumbent_commitment.hotkey]
         if inc_outcome.score.valid:
