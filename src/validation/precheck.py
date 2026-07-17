@@ -143,6 +143,11 @@ class PrecheckResult:
     # failures. Lets the validator distinguish "genuinely gone, stop retrying eventually"
     # from "worth retrying next round" (issue #128).
     repo_not_found: bool = False
+    # True when the failure happened at the HF fetch itself (either flavor above), as
+    # opposed to a content problem with a successfully fetched artifact (manifest/security/
+    # size/duplicate). A fetch failure says nothing bad about the codec -- the crown must
+    # not change hands over one (issue #135).
+    repo_unreachable: bool = False
 
     def raise_for_status(self) -> None:
         if not self.ok:
@@ -437,9 +442,11 @@ def precheck_codec(
         # A definitive "does not exist" answer from HF (covers deleted/renamed/made-private
         # repos, and GatedRepoError via subclassing), unlike the transient failures below.
         result.repo_not_found = True
+        result.repo_unreachable = True
         result.errors.append(f"repo unavailable: {exc}")
         return result
     except Exception as exc:
+        result.repo_unreachable = True
         result.errors.append(f"repo unavailable: {exc}")
         return result
 

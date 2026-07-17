@@ -193,3 +193,61 @@ def test_incumbent_reeval_failure_warning_includes_the_runner_error(monkeypatch,
 
     assert "failed re-eval" in caplog.text
     assert "runner error: docker daemon unreachable" in caplog.text
+
+
+def test_unevaluated_incumbent_still_defends_with_its_last_recorded_ratio(monkeypatch):
+    # issue #135: the incumbent's commitment is invalid this round (transiently unreachable
+    # repo), so it can't be re-evaluated -- but the crown is not vacant. A challenger must
+    # still beat the incumbent's last recorded ratio by the full margin.
+    state = ValidatorState()
+    challenger = _commitment("challenger", "chal/codec", "rev654321", block=2)
+    state.commitments[challenger.key] = challenger
+    unreachable_incumbent = CommitmentState(
+        hotkey="incumbent", repo="inc/codec", revision="rev123456", block=1,
+        artifact_hash="inc-hash", valid=False, transiently_unreachable=True,
+    )
+    state.commitments[unreachable_incumbent.key] = unreachable_incumbent
+    state.winner_history = [
+        WinnerEntry(hotkey="incumbent", repo="inc/codec", revision="rev123456", ratio=0.5, commit_block=1)
+    ]
+    # 0.49 is better than 0.5 but NOT by the 5% margin (needs <= 0.475).
+    monkeypatch.setattr(
+        "reign_worker.service.paired_eval",
+        lambda *a, **k: {"challenger": _outcome("challenger", valid=True, ratio=0.49)},
+    )
+
+    run_round(
+        state, runner=object(), challengers=[challenger], provider=object(), stream_specs=[],
+        caps=CAPS, floor_bps=1.0, budget_secs=60.0, margin=0.05, block=100,
+        eligible_hotkeys={"incumbent", "challenger"},
+    )
+
+    assert [w.hotkey for w in state.winner_history] == ["incumbent"]  # crown defended
+
+
+def test_unevaluated_incumbent_is_dethroned_by_a_full_margin_beat(monkeypatch):
+    # Same setup, but the challenger genuinely clears the epsilon against the last recorded
+    # ratio -- promotion proceeds and the unreachable incumbent rolls to the previous slot.
+    state = ValidatorState()
+    challenger = _commitment("challenger", "chal/codec", "rev654321", block=2)
+    state.commitments[challenger.key] = challenger
+    unreachable_incumbent = CommitmentState(
+        hotkey="incumbent", repo="inc/codec", revision="rev123456", block=1,
+        artifact_hash="inc-hash", valid=False, transiently_unreachable=True,
+    )
+    state.commitments[unreachable_incumbent.key] = unreachable_incumbent
+    state.winner_history = [
+        WinnerEntry(hotkey="incumbent", repo="inc/codec", revision="rev123456", ratio=0.5, commit_block=1)
+    ]
+    monkeypatch.setattr(
+        "reign_worker.service.paired_eval",
+        lambda *a, **k: {"challenger": _outcome("challenger", valid=True, ratio=0.47)},
+    )
+
+    run_round(
+        state, runner=object(), challengers=[challenger], provider=object(), stream_specs=[],
+        caps=CAPS, floor_bps=1.0, budget_secs=60.0, margin=0.05, block=100,
+        eligible_hotkeys={"incumbent", "challenger"},
+    )
+
+    assert [w.hotkey for w in state.winner_history] == ["challenger", "incumbent"]
