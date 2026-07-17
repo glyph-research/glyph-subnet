@@ -250,15 +250,27 @@ def build_weights_metrics(
     is_burn_tempo: bool,
     uids: list[int],
     weights: list[float],
+    conviction: dict | None = None,
 ) -> dict:
     """Flatten a weight-setting decision into a wandb-loggable metrics dict (log only --
-    computed and applied identically whether or not this is ever called)."""
+    computed and applied identically whether or not this is ever called).
+
+    ``conviction`` is the per-winner Miner Conviction report (issue #141): earned/staked/
+    required_lock/compliant per winner hotkey, so any gating is explainable after the fact.
+    """
 
     nonzero = [(uid, round(w, 4)) for uid, w in zip(uids, weights) if w > 0]
-    return {
+    metrics = {
         "weights/block": block,
         "weights/tempo": tempo,
         "weights/is_burn_tempo": is_burn_tempo,
         "weights/nonzero_count": len(nonzero),
         "weights/nonzero": str(nonzero),
     }
+    for hotkey, entry in (conviction or {}).items():
+        prefix = f"conviction/{hotkey}"
+        metrics[f"{prefix}/earned"] = entry["earned"]
+        metrics[f"{prefix}/staked"] = entry["staked"]
+        metrics[f"{prefix}/required_lock"] = entry["required_lock"]
+        metrics[f"{prefix}/compliant"] = entry["compliant"]
+    return metrics

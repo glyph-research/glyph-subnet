@@ -48,6 +48,7 @@ def decide_weights(
     anchor: int = WINDOW_ANCHOR_BLOCK,
     burn_uid: int = BURN_UID,
     force_burn: bool = False,
+    gated_hotkeys: set[str] | None = None,
 ) -> tuple[list[float], bool]:
     """Compute the weights for the current tempo, applying the temporal burn schedule.
 
@@ -58,11 +59,17 @@ def decide_weights(
     (see ``resolve_force_burn``): when True, burn unconditionally regardless of
     ``BURN_ENABLED``/the schedule -- an emergency, owner-controlled kill switch, additive
     only (can force a burn tempo, never suppress one).
+
+    ``gated_hotkeys`` (Miner Conviction, issue #141) is the caller's already-computed set
+    of winners below their required stake lock this tempo; their share burns (see
+    ``compute_weights``).
     """
 
     seed = derive_burn_seed(last_round_outputs)
     burn = force_burn or (BURN_ENABLED and is_burn_tempo(block, tempo, seed, anchor))
-    weights = compute_weights(hotkeys, history, is_burn_tempo=burn, burn_uid=burn_uid)
+    weights = compute_weights(
+        hotkeys, history, is_burn_tempo=burn, burn_uid=burn_uid, gated_hotkeys=gated_hotkeys
+    )
     return weights, burn
 
 
@@ -149,6 +156,15 @@ def run(args: argparse.Namespace) -> None:
             "(owner emergency override: on-chain force_burn=true) -- burning 100% this tempo"
         )
 
+    # Miner Conviction (issue #141): top up the persisted ledger in memory (this process
+    # never writes state -- the validator/reign worker persists it) and gate any winner
+    # below its required stake lock. Best-effort, same posture as the validator path.
+    from validator.service import _conviction_report_for_winners, _update_conviction_ledger
+
+    _update_conviction_ledger(state, chain, block, tempo)
+    conviction = _conviction_report_for_winners(state, metagraph, block)
+    gated = {hotkey for hotkey, entry in conviction.items() if not entry["compliant"]}
+
     weights, burn = decide_weights(
         hotkeys,
         state.winner_history,
@@ -158,6 +174,7 @@ def run(args: argparse.Namespace) -> None:
         anchor=anchor,
         burn_uid=args.burn_uid,
         force_burn=force_burn,
+        gated_hotkeys=gated,
     )
     nonzero = [(uids[i], round(w, 4)) for i, w in enumerate(weights) if w > 0]
     bt_logging.info(f"block={block} tempo={tempo} burn_tempo={burn} weights={nonzero}")

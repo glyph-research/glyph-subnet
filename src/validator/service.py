@@ -45,8 +45,10 @@ from core.constants import (
     SCORING_VERSION,
     THROUGHPUT_FLOOR_BPS,
     WINDOW_ANCHOR_BLOCK,
+    WINNER_LIMIT,
 )
 from core.log_config import add_logging_args
+from core.conviction import conviction_report, ledger_catchup
 from core.state import CommitmentState, ValidatorState, load_state, save_state
 from core.version import assert_weights_version_matches, local_version_key
 from core.wandb_logger import WandbLogger, build_round_metrics, build_weights_metrics, make_wandb_logger
@@ -594,6 +596,68 @@ def _make_chain(args) -> BittensorChain:
     )
 
 
+def _update_conviction_ledger(state: ValidatorState, chain: BittensorChain, block: int, tempo: int) -> None:
+    """Advance the persisted earnings ledger to ``block`` (Miner Conviction, issue #141).
+
+    One increment code path (``ledger_catchup``); grid blocks within the live node's
+    pruning horizon come from it, anything older (validator downtime, fresh start)
+    backfills from the archive endpoint. Best-effort: a failure leaves the ledger at the
+    last fully-applied grid block -- gating then runs on slightly-stale totals for a tempo
+    rather than blocking weight-setting.
+    """
+
+    def emissions_at(grid_block: int) -> dict[str, float]:
+        if block - grid_block <= 250:
+            return chain.emissions_by_hotkey(grid_block)
+        return chain.archive_emissions_by_hotkey(grid_block)
+
+    try:
+        applied = ledger_catchup(
+            state.conviction_ledger, current_block=block, tempo=tempo, emissions_at=emissions_at
+        )
+        if applied:
+            bt_logging.info(
+                f"conviction: ledger advanced {applied} tempo(s) to block "
+                f"{state.conviction_ledger.last_block}"
+            )
+    except Exception as exc:  # noqa: BLE001 - best-effort; never block weight-setting
+        bt_logging.warning(
+            f"conviction: ledger catchup stopped at block "
+            f"{state.conviction_ledger.last_block}, will resume next tempo: {exc}"
+        )
+
+
+def _conviction_report_for_winners(state: ValidatorState, metagraph, block: int) -> dict[str, dict]:
+    """Compliance snapshot for the current winner slots, logged every weight-setting."""
+
+    winners = [w.hotkey for w in state.winner_history[:WINNER_LIMIT]]
+    # The lock is alpha-only by design: on dTAO metagraphs S is the consensus stake weight
+    # (alpha + tao-weighted root stake), so a winner could otherwise satisfy part of the
+    # lock with root TAO. Prefer the pure per-hotkey alpha; S only as a fallback.
+    stakes = getattr(metagraph, "alpha_stake", None)
+    if stakes is None:
+        stakes = getattr(metagraph, "S", None)
+    staked = (
+        {hotkey: float(s) for hotkey, s in zip(metagraph.hotkeys, stakes)}
+        if stakes is not None
+        else {}
+    )
+    report = conviction_report(state.conviction_ledger, winners, staked, block=block)
+    for hotkey, entry in report.items():
+        line = (
+            f"conviction: {hotkey} earned={entry['earned']:.1f} staked={entry['staked']:.1f} "
+            f"required_lock={entry['required_lock']:.1f} compliant={entry['compliant']}"
+        )
+        if entry["compliant"]:
+            bt_logging.info(line)
+        else:
+            bt_logging.warning(
+                f"{line} -- winner is below its required stake lock; its share burns this "
+                f"tempo and restores automatically once restaked (issue #141)"
+            )
+    return report
+
+
 def _publish_winner_commitment(chain: BittensorChain, champion: WinnerEntry) -> None:
     """Best-effort, observability-only publish of the new champion on this validator's own
     commitment slot (issue #103) -- never read back into this validator's own scoring/
@@ -912,12 +976,23 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
                 "(owner emergency override: on-chain force_burn=true) -- burning 100% this tempo"
             )
 
+        # Miner Conviction (issue #141): advance the earnings ledger, then gate any winner
+        # whose staked alpha is below its required lock -- its share burns this tempo.
+        _update_conviction_ledger(state, chain, block, tempo)
+        conviction = _conviction_report_for_winners(state, metagraph, block)
+        gated = {hotkey for hotkey, entry in conviction.items() if not entry["compliant"]}
+
         weights, burn = decide_weights(
             hotkeys, state.winner_history, block=block, tempo=tempo,
             last_round_outputs=state.last_round_outputs, anchor=anchor, burn_uid=args.burn_uid,
-            force_burn=force_burn,
+            force_burn=force_burn, gated_hotkeys=gated,
         )
-        wandb_logger.log(build_weights_metrics(block=block, tempo=tempo, is_burn_tempo=burn, uids=uids, weights=weights))
+        wandb_logger.log(
+            build_weights_metrics(
+                block=block, tempo=tempo, is_burn_tempo=burn, uids=uids, weights=weights,
+                conviction=conviction,
+            )
+        )
         save_state(state_path, state)
 
         nonzero = [(uids[i], round(w, 4)) for i, w in enumerate(weights) if w > 0]
@@ -963,6 +1038,10 @@ def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = 
         _block, round_metrics, _raw_commitments, _metagraph = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
             wandb_logger.log(round_metrics)
+        # Keep the conviction ledger warm in the split deployment too (issue #141): the
+        # standalone weight-setter reads state but never writes it, so the reign worker is
+        # the split deployment's ledger persister.
+        _update_conviction_ledger(state, chain, _block, chain.tempo())
         save_state(state_path, state)
         bt_logging.info(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in state.winner_history]}")
     finally:

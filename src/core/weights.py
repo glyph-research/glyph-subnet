@@ -117,12 +117,19 @@ def compute_weights(
     *,
     is_burn_tempo: bool,
     burn_uid: int = BURN_UID,
+    gated_hotkeys: set[str] | None = None,
 ) -> list[float]:
     """Final validator weights for a single tempo.
 
     On a burn tempo all weight goes to ``burn_uid``. On a normal tempo
     weight follows the rolling 70/30 winners; if there is no eligible winner yet the
     emission is burned rather than spread arbitrarily.
+
+    ``gated_hotkeys`` (Miner Conviction, issue #141): winners whose staked alpha is below
+    their required lock this tempo. A gated slot's share moves to the burn sink -- never to
+    the other winner, which would pay A for B's non-compliance and create an incentive to
+    keep a rival gated. Reversible by construction: the slot itself is untouched, so a
+    restaked winner earns again at the next weight-setting.
     """
 
     if not 0 <= burn_uid < len(hotkeys):
@@ -142,7 +149,13 @@ def compute_weights(
     for index in range(len(hotkeys)):
         weights[index] = 0.0 if index == burn_uid else miner_weights[index]
     total = sum(weights)
-    if total > 0:
-        return [weight / total for weight in weights]
-    weights[burn_uid] = 1.0
+    if total <= 0:
+        weights[burn_uid] = 1.0
+        return weights
+    weights = [weight / total for weight in weights]
+    if gated_hotkeys:
+        for index, hotkey in enumerate(hotkeys):
+            if hotkey in gated_hotkeys and index != burn_uid and weights[index] > 0:
+                weights[burn_uid] += weights[index]
+                weights[index] = 0.0
     return weights

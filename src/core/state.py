@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from core.conviction import ConvictionLedger
 from core.weights import WinnerEntry
 
 
@@ -81,6 +82,10 @@ class ValidatorState(BaseModel):
     commit_phase_seen: dict[str, dict[str, int]] = Field(default_factory=dict)
     # Block this validator anchored its burn-window origin to (persisted for stability).
     window_anchor_block: int | None = None
+    # Miner Conviction earnings ledger (issue #141) -- cumulative per-hotkey alpha,
+    # accumulated on the fixed CONVICTION_TRACKING_START_BLOCK grid. Permanent per hotkey:
+    # dethrone-and-return never resets it.
+    conviction_ledger: ConvictionLedger = Field(default_factory=ConvictionLedger)
 
     def eligible_hotkeys(self) -> set[str]:
         return {item.hotkey for item in self.commitments.values() if item.valid}
