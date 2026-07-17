@@ -70,7 +70,9 @@ design** (`DockerRunner` checks the GPU model via `nvidia-smi` and refuses to ru
 else). See [docs/VALIDATING.md](docs/VALIDATING.md) for the full requirement and CPU-only opt-out.
 
 Every validator builds its own copy of the evaluation corpus live from HuggingFace
-(FineWeb-Edu + Pile, 2x/1x scored mix, plus enwik9 as a benchmark-only display window),
+(FineWeb-Edu + Pile, 2x/1x scored mix, plus two benchmark-only display windows: enwik9 and
+a per-round live-data snapshot of recently-changed Wikipedia text, fetched in the
+between-rounds window — text no committed model can have memorized, issue #139),
 keyed by the round's on-chain beacon and a seed-derived dataset shard so the reachable
 sampling range is the whole dataset, not a fixed slice (issue #112) — no owner-run oracle
 process, no shared corpus file to host or keep in sync (issue #71); see

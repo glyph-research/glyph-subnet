@@ -214,7 +214,13 @@ def build_round_metrics(
         score = outcome.score
         prefix = f"challenger/{hotkey}"
         breakdown = source_ratio_breakdown(outcome.results)
-        benchmark_ratios = [stream_ratio(r) for r in outcome.results if not r.scored]
+        # Benchmark-only streams reported per source (issue #139): a single averaged
+        # "enwik9_ratio" bucket would silently blend in the live stream's very different
+        # numbers -- the whole point of the live stream is seeing that gap.
+        benchmark_by_source: dict[str, list[float]] = {}
+        for r in outcome.results:
+            if not r.scored:
+                benchmark_by_source.setdefault(r.source or "benchmark", []).append(stream_ratio(r))
         metrics[f"{prefix}/uid"] = hotkey_to_uid.get(hotkey, -1)
         metrics[f"{prefix}/ratio"] = score.ratio
         metrics[f"{prefix}/valid"] = score.valid
@@ -231,8 +237,9 @@ def build_round_metrics(
         for source, source_ratio in breakdown.items():
             key = source.replace("-", "_")
             metrics[f"{prefix}/{key}_ratio"] = source_ratio
-        if benchmark_ratios:
-            metrics[f"{prefix}/enwik9_ratio"] = sum(benchmark_ratios) / len(benchmark_ratios)
+        for source, ratios in benchmark_by_source.items():
+            key = source.replace("-", "_")
+            metrics[f"{prefix}/{key}_ratio"] = sum(ratios) / len(ratios)
     return metrics
 
 
