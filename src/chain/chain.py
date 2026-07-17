@@ -28,6 +28,9 @@ class BittensorChain:
         self.config = config
         self.bt = bt
         self.subtensor = bt.Subtensor(network=config.network)
+        # Lazily-created archive connection for historical state beyond the live node's
+        # pruning horizon (conviction-ledger backfill, issue #141).
+        self._archive_subtensor = None
         wallet_kwargs = {"name": config.wallet_name, "hotkey": config.hotkey_name}
         if config.wallet_path:
             wallet_kwargs["path"] = config.wallet_path
@@ -56,6 +59,28 @@ class BittensorChain:
 
     def metagraph(self):
         return self.subtensor.metagraph(netuid=self.config.netuid)
+
+    def emissions_by_hotkey(self, block: int) -> dict[str, float]:
+        """Per-hotkey alpha emitted for the tempo ending at ``block`` (live node).
+
+        ``metagraph.emission`` is denominated in alpha per tempo (verified live on netuid
+        117: storage ``Emission`` in rao / 1e9). The live node only serves recent state;
+        older blocks must go through ``archive_emissions_by_hotkey``.
+        """
+
+        mg = self.subtensor.metagraph(netuid=self.config.netuid, block=block)
+        return {hotkey: float(e) for hotkey, e in zip(mg.hotkeys, mg.emission)}
+
+    def archive_emissions_by_hotkey(self, block: int) -> dict[str, float]:
+        """Same as ``emissions_by_hotkey`` but via the archive endpoint -- the
+        conviction-ledger backfill path for blocks past the live node's pruning horizon."""
+
+        from core.constants import ARCHIVE_CHAIN_ENDPOINT
+
+        if self._archive_subtensor is None:
+            self._archive_subtensor = self.bt.Subtensor(network=ARCHIVE_CHAIN_ENDPOINT)
+        mg = self._archive_subtensor.metagraph(netuid=self.config.netuid, block=block)
+        return {hotkey: float(e) for hotkey, e in zip(mg.hotkeys, mg.emission)}
 
     def get_all_commitments(self) -> dict[str, str]:
         return self.subtensor.get_all_commitments(netuid=self.config.netuid)

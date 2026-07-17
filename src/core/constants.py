@@ -72,6 +72,26 @@ PRECHECK_FULL_RECHECK_INTERVAL_BLOCKS = 7200
 # fetch-effort bound, not consensus-critical, so it need not match across validators.
 REPO_NOT_FOUND_EXCLUDE_STREAK = 12
 
+# --- Miner Conviction (issue #141) ----------------------------------------------
+# Winners must keep (most of) their cumulative alpha earnings staked to their hotkey to
+# receive incentive; the free allowance is max(10% x earned, 1000 alpha). See
+# core/conviction.py for the mechanism.
+CONVICTION_FREE_ALPHA = 1000.0
+CONVICTION_FREE_FRACTION = 0.10
+# Earnings ledgers accumulate from this block -- the tempo at which the current champion
+# (UID 122, putty77/glyph-qwen14) took the crown on 2026-07-16 (verified via archive
+# binary search: its incentive first became nonzero in (8631680, 8631711]). A single
+# protocol-wide origin, so every validator's ledger is identical regardless of when it
+# started or how long it was down (gaps backfill from the archive node on the same grid).
+CONVICTION_TRACKING_START_BLOCK = 8_631_680
+# Enforcement flips on at this block for every validator simultaneously; before it,
+# validators track earnings (warm ledgers) but never gate. Currently equal to the tracking
+# start, i.e. enforcement is live as soon as this code deploys, with the ledger backfilled
+# deterministically from the crown block. Push forward before release for an announced flip.
+CONVICTION_ACTIVATION_BLOCK = 8_631_680
+# Deterministic backfill source for ledger gaps (validator downtime / fresh start).
+ARCHIVE_CHAIN_ENDPOINT = "wss://archive.chain.opentensor.ai:443"
+
 # --- Rolling-winner policy -----------------------------------------------------
 # current winner / previous winner. Effective split after the temporal burn is
 # 52.5% / 22.5% / 25% burned (see burn_schedule).
