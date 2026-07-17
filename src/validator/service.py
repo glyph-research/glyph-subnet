@@ -621,7 +621,12 @@ def _conviction_report_for_winners(state: ValidatorState, metagraph, block: int)
     """Compliance snapshot for the current winner slots, logged every weight-setting."""
 
     winners = [w.hotkey for w in state.winner_history[:WINNER_LIMIT]]
-    stakes = getattr(metagraph, "S", None)
+    # The lock is alpha-only by design: on dTAO metagraphs S is the consensus stake weight
+    # (alpha + tao-weighted root stake), so a winner could otherwise satisfy part of the
+    # lock with root TAO. Prefer the pure per-hotkey alpha; S only as a fallback.
+    stakes = getattr(metagraph, "alpha_stake", None)
+    if stakes is None:
+        stakes = getattr(metagraph, "S", None)
     staked = (
         {hotkey: float(s) for hotkey, s in zip(metagraph.hotkeys, stakes)}
         if stakes is not None
