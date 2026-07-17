@@ -38,7 +38,7 @@ LIVE_FETCH_DEADLINE_SECS = 15 * 60.0
 LIVE_RETENTION_BYTES = 1 * 2**30
 
 _API = "https://en.wikipedia.org/w/api.php"
-_UA = "glyph-validator/1.0 (live compression benchmark; contact poleandjerry@gmail.com)"
+_UA = "glyph-validator/1.0 (live compression benchmark; https://github.com/glyph-research/glyph-subnet)"
 
 
 def _api_get(params: dict) -> dict:
