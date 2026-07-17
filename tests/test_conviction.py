@@ -335,5 +335,6 @@ def test_run_once_does_not_gate_before_activation(monkeypatch, tmp_path):
 
 def test_scoring_version_is_untouched_by_conviction():
     # Conviction gates weights only; it is not a scoring-rule change and must not have
-    # bumped SCORING_VERSION (persisted scores/exclusions stay valid).
-    assert SCORING_VERSION == 2
+    # bumped SCORING_VERSION (persisted scores/exclusions stay valid). 3 is issue #136's
+    # commit-order-gauntlet bump, which landed independently of conviction.
+    assert SCORING_VERSION == 3
