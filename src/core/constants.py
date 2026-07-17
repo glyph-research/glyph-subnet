@@ -124,7 +124,11 @@ MAX_CHALLENGERS_PER_ROUND = 32
 # v2 (issue #112): shard-randomized corpus sampling, fineweb -> fineweb-edu (2x/1x mix),
 # retired pile shard 0 (burned range), flat-average scored_ratio. Invalidates every score
 # computed under the exploitable prefix-bounded sampler -- the exploiting champion included.
-SCORING_VERSION = 2
+# v3 (issue #136): contested rounds became a sequential gauntlet in commit order instead of
+# best-of-round -- who wins a multi-challenger round changes, so scores and one-shot
+# exclusions decided under the old ordering must not carry across the transition (validators
+# that evaluated the same round under different policies would otherwise disagree forever).
+SCORING_VERSION = 3
 
 # --- Per-source evaluation (issue #10; remixed by issue #112) -------------------
 # Score each miner on three 4 MiB windows: two random fineweb-edu windows and one pile

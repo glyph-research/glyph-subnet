@@ -30,6 +30,11 @@ class CommitmentState(BaseModel):
     # successful precheck or any differently-failing one; crossing
     # ``REPO_NOT_FOUND_EXCLUDE_STREAK`` triggers one-shot exclusion (issue #128).
     consecutive_repo_not_found: int = 0
+    # True when this round's invalidity is only an HF fetch failure that is not (yet)
+    # confirmed permanent -- a 5xx/timeout/DNS blip, or a 404 still under the #128 streak
+    # threshold. Such a commitment must not cost its hotkey the crown (issue #135: a
+    # 2-minute HF outage permanently dethroned the live champion).
+    transiently_unreachable: bool = False
 
     @property
     def key(self) -> str:
@@ -84,6 +89,22 @@ class ValidatorState(BaseModel):
 
     def eligible_hotkeys(self) -> set[str]:
         return {item.hotkey for item in self.commitments.values() if item.valid}
+
+    def retained_hotkeys(self) -> set[str]:
+        """Hotkeys whose ``winner_history`` entries must survive this round (issue #135).
+
+        Everything currently valid, plus commitments that are invalid only because their
+        repo is transiently unreachable -- a champion must lose the crown only to a genuine
+        re-eval failure, a confirmed-permanent 404 (the #128 streak -> ``excluded_hotkeys``),
+        or a content disqualification; never to an HF outage.
+        """
+
+        return {
+            item.hotkey
+            for item in self.commitments.values()
+            if (item.valid or item.transiently_unreachable)
+            and item.hotkey not in self.excluded_hotkeys
+        }
 
 
 def _invalidate_stale_scores(state: ValidatorState) -> None:

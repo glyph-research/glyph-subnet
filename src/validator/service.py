@@ -52,9 +52,15 @@ from core.conviction import conviction_report, ledger_catchup
 from core.state import CommitmentState, ValidatorState, load_state, save_state
 from core.version import assert_weights_version_matches, local_version_key
 from core.wandb_logger import WandbLogger, build_round_metrics, build_weights_metrics, make_wandb_logger
-from core.weights import WinnerEntry, compact_history, promote_winner, should_promote
+from core.weights import WinnerEntry, compact_history, promote_winner, rank_key, should_promote
 from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
+from eval.live_bench import (
+    LivePrefetcher,
+    LiveSnapshotStore,
+    SnapshotAppendedProvider,
+    live_benchmark_spec,
+)
 from eval.live_corpus import resolve_live_corpus
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
 from eval.scoring import source_ratio_breakdown, stream_ratio, zstd_baseline_ratio
@@ -406,6 +412,10 @@ def _apply_precheck(
             local_path=local_dir,
             last_full_check_block=block if full_check else last_full_check,
             consecutive_repo_not_found=repo_not_found_streak,
+            # A fetch failure not (yet) confirmed permanent -- includes 404s still under
+            # the #128 streak -- must not cost the hotkey its crown (issue #135).
+            transiently_unreachable=getattr(result, "repo_unreachable", False)
+            and repo_not_found_streak < REPO_NOT_FOUND_EXCLUDE_STREAK,
         )
 
     # Duplicate-artifact ownership: earliest commit_block wins, hotkey only as the final
@@ -694,6 +704,89 @@ def _startup_wandb_identity_name(args) -> str | None:
         return None
 
 
+def _append_live_benchmark_stream(args, provider, specs):
+    """Append the latest complete live snapshot as a benchmark-only stream (issue #139).
+
+    Read-only at round start: never fetches, only picks up what the between-rounds
+    prefetch already completed. No snapshot yet (or no state dir, e.g. offline tests) ->
+    the round proceeds without a live stream; a stale-but-complete snapshot is preferred
+    over none. Returns the (possibly wrapped) provider and spec list.
+    """
+
+    state_dir = getattr(args, "state_dir", None)
+    if not state_dir:
+        return provider, specs
+    try:
+        store = LiveSnapshotStore(Path(state_dir) / "live_data")
+        latest = store.latest()
+        if latest is None:
+            bt_logging.warning(
+                "live benchmark: no complete snapshot yet; skipping the live stream this round"
+            )
+            return provider, specs
+        path, snapshot_block = latest
+        snapshot = path.read_bytes()
+        spec = live_benchmark_spec(provider, snapshot)
+        bt_logging.info(
+            f"live benchmark: using snapshot from block {snapshot_block} "
+            f"({len(snapshot):,} bytes) as benchmark-only stream {spec.stream_id}"
+        )
+        return SnapshotAppendedProvider(provider, snapshot), [*specs, spec]
+    except Exception as exc:  # noqa: BLE001 - display-only; must never fail the round
+        bt_logging.warning(f"live benchmark: skipping live stream: {exc}")
+        return provider, specs
+
+
+_live_prefetcher: LivePrefetcher | None = None
+
+
+def _start_live_prefetch(args, chain: BittensorChain) -> None:
+    """Kick off the between-rounds live-data fetch (issue #139) -- strictly best-effort,
+    returns immediately; any failure here degrades to a skipped/stale live stream, never a
+    blocked or delayed round."""
+
+    global _live_prefetcher
+    state_dir = getattr(args, "state_dir", None)
+    if not state_dir:
+        return
+    try:
+        if _live_prefetcher is None:
+            _live_prefetcher = LivePrefetcher(LiveSnapshotStore(Path(state_dir) / "live_data"))
+        _live_prefetcher.start(chain.current_block())
+    except Exception as exc:  # noqa: BLE001
+        bt_logging.warning(f"live benchmark: prefetch not started: {exc}")
+
+
+def _recover_vacant_crown(state: ValidatorState) -> None:
+    """Refill an empty ``winner_history`` from persisted scores (issue #135 recovery gap).
+
+    Challenger selection is one-shot (``c.key not in state.scores``), so once every hotkey
+    is already scored a vacant crown can never refill itself -- 100% burn indefinitely.
+    Promote the best already-scored, currently-valid, non-excluded hotkey. In practice this
+    re-crowns an ex-champion whose repo came back after an outage or whose pop later proved
+    over-eager; one-shot losers stay out via ``excluded_hotkeys``, and stale-version scores
+    never qualify.
+    """
+
+    candidates = [
+        score
+        for key, score in state.scores.items()
+        if score.valid
+        and score.scoring_version == SCORING_VERSION
+        and score.hotkey not in state.excluded_hotkeys
+        and (commitment := state.commitments.get(key)) is not None
+        and commitment.valid
+    ]
+    if not candidates:
+        return
+    best = min(candidates, key=lambda score: rank_key(score.as_winner()))
+    bt_logging.warning(
+        f"vacant crown: re-promoting best already-scored hotkey {best.hotkey} "
+        f"(ratio={best.ratio:.4f}) instead of burning indefinitely"
+    )
+    state.winner_history = promote_winner(state.winner_history, best.as_winner())
+
+
 def _evaluate_round(
     args, state: ValidatorState, chain: BittensorChain, salt: str
 ) -> tuple[int, dict | None, dict[str, str], "object"]:
@@ -744,8 +837,16 @@ def _evaluate_round(
         state, parsed, args.max_artifact_bytes, block=block,
         local_artifacts=_parse_local_artifacts(args),
     )
-    eligible = state.eligible_hotkeys()
-    state.winner_history = compact_history(state.winner_history, eligible_hotkeys=eligible)
+    # History retention uses retained_hotkeys, not eligible_hotkeys (issue #135): during
+    # the 2026-07-16 HF outage, a 504 on the champion's precheck made it ineligible for one
+    # round and this compaction permanently dethroned it into an indefinite 100% burn. A
+    # crown entry now survives transient unreachability and is dropped only when the hotkey
+    # is definitively out (confirmed-404 exclusion, content disqualification, or the #67
+    # failed-re-eval pop inside run_round).
+    retained = state.retained_hotkeys()
+    state.winner_history = compact_history(state.winner_history, eligible_hotkeys=retained)
+    if not state.winner_history:
+        _recover_vacant_crown(state)
 
     challengers = [
         c
@@ -764,6 +865,7 @@ def _evaluate_round(
         # (issue #108) -- a free-tier read token is enough, no special dataset permissions.
         provider = resolve_live_corpus(str(seed), token=os.environ.get("HF_TOKEN"))
         specs = _select_specs(args, provider, seed)
+        provider, specs = _append_live_benchmark_stream(args, provider, specs)
         scored_specs = _scored_specs(specs)
         baseline = zstd_baseline_ratio(
             [provider.materialize(s) for s in scored_specs],
@@ -786,7 +888,7 @@ def _evaluate_round(
         outcomes = run_round(
             state, runner, challengers, provider, specs,
             caps=caps, floor_bps=args.floor_bps, budget_secs=args.compress_budget_secs,
-            margin=args.win_margin, block=block, eligible_hotkeys=eligible, baseline_ratio=baseline,
+            margin=args.win_margin, block=block, eligible_hotkeys=retained, baseline_ratio=baseline,
         )
         champion_after = state.winner_history[0] if state.winner_history else None
         crown_changed = bool(champion_after) and champion_after.hotkey != champion_before
@@ -1090,6 +1192,10 @@ def main() -> None:
             # rather than degrading to the reveal-observation block (exploit vector #9).
             if poll_chain is None:
                 poll_chain = _make_chain(args)
+            # The between-rounds window is where the next round's live benchmark snapshot
+            # gets fetched (issue #139) -- non-blocking, so the commit-poll sleep below
+            # still starts immediately.
+            _start_live_prefetch(args, poll_chain)
             _sleep_with_commit_polls(args, poll_chain)
     finally:
         wandb_logger.finish()

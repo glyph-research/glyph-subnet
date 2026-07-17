@@ -16,7 +16,7 @@ from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
 from core.artifact import local_snapshot_dir
 from core.constants import SCORING_VERSION
 from core.state import CommitmentState, ScoreState, ValidatorState
-from core.weights import WinnerEntry, promote_winner, rank_key, should_promote
+from core.weights import WinnerEntry, commit_order_key, promote_winner, should_promote
 
 
 def find_winner_commitment(state: ValidatorState, winner: WinnerEntry) -> CommitmentState | None:
@@ -123,6 +123,14 @@ def run_round(
         )
 
     current_ratio = None
+    if incumbent is not None and incumbent_commitment is None:
+        # The incumbent exists but couldn't be evaluated this round -- its commitment is
+        # currently invalid, in practice a transiently unreachable repo (issue #135; a
+        # definitively-gone incumbent was already dropped from winner_history by the
+        # caller's retained_hotkeys compaction). Keep the crown and hold challengers to the
+        # margin against its last recorded ratio instead of treating the crown as vacant,
+        # which would let a challenger take it without the epsilon beat.
+        current_ratio = incumbent.ratio
     if incumbent_commitment is not None and incumbent_commitment.hotkey in outcomes:
         inc_outcome = outcomes[incumbent_commitment.hotkey]
         if inc_outcome.score.valid:
@@ -144,19 +152,25 @@ def run_round(
             )
             state.winner_history.pop(0)
 
-    ranked = sorted(
+    # Sequential gauntlet in commit order (issue #136, owner-specified): the earliest
+    # commit challenges the incumbent first; each later challenger must dethrone the
+    # CURRENT (possibly just-crowned) winner by the full margin, because current_ratio is
+    # updated after every promotion below. Best-ratio-first ordering here would instead
+    # crown the round's strongest model outright ("best of round") -- letting a copier's
+    # later-committed marginal tweak steal the whole round.
+    gauntlet = sorted(
         (c for c in challengers if outcomes.get(c.hotkey) and outcomes[c.hotkey].score.valid),
-        key=lambda c: rank_key(state.scores[c.key].as_winner()),
+        key=lambda c: commit_order_key(state.scores[c.key].as_winner()),
     )
     winner_outputs = None
     for challenger in challengers:
         outcome = outcomes.get(challenger.hotkey)
         if outcome and outcome.score.valid:
-            continue  # ranked promotion handles valid ones below
+            continue  # the gauntlet handles valid ones below
         # invalid challenger -> one-shot exclusion
         state.excluded_hotkeys.add(challenger.hotkey)
 
-    for challenger in ranked:
+    for challenger in gauntlet:
         challenger_ratio = state.scores[challenger.key].ratio
         beats_baseline = baseline_ratio is None or challenger_ratio < baseline_ratio
         if should_promote(challenger_ratio, current_ratio, margin) and beats_baseline:
