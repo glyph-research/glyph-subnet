@@ -27,9 +27,25 @@ class WinnerEntry:
 
 
 def rank_key(entry: WinnerEntry) -> tuple[float, int]:
-    """Sort key for choosing among challengers: best (lowest) ratio, then earliest commit."""
+    """Sort key for picking the best among already-scored entries (e.g. the vacant-crown
+    recovery): best (lowest) ratio, then earliest commit.
+
+    NOT the challenge order -- issue #136 made the round a sequential gauntlet in commit
+    order (``commit_order_key``); ranking challengers best-ratio-first is exactly the
+    best-of-round semantics that replaced.
+    """
 
     return (entry.ratio, entry.commit_block)
+
+
+def commit_order_key(entry: WinnerEntry) -> tuple[int, str]:
+    """Sequential-gauntlet challenge order (issue #136, owner-specified): earliest commit
+    challenges first, hotkey as the deterministic tie-break for identical blocks --
+    consistent with the duplicate-artifact ownership rule (issue #58). An earlier commit
+    that legitimately dethrones the incumbent is then protected by the full margin against
+    everything committed after it, so a copier's same-round marginal tweak wins nothing."""
+
+    return (entry.commit_block, entry.hotkey)
 
 
 def compact_history(
