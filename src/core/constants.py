@@ -130,6 +130,24 @@ MAX_CHALLENGERS_PER_ROUND = 32
 # that evaluated the same round under different policies would otherwise disagree forever).
 SCORING_VERSION = 3
 
+# Score-preserving version transitions (issue #143). An entry here declares "this bump is
+# score-compatible: ordering/policy only, ratio semantics unchanged" -- older-version scores
+# evaluated BEFORE the listed block (and the exclusions decided alongside them) are
+# retained and directly comparable, so the bump does not force a full-board re-eval
+# (observed live 2026-07-17: the v3 deploy wiped 17 scores + 15 exclusions and turned the
+# next round into hours of re-evaluation / a crash-loop on a busy GPU, for a bump that
+# never touched ratio semantics).
+#
+# GUARDRAIL: a bump that changes any scoring surface -- corpus sources/sampling, the
+# aggregation formula, validity gates, BASELINE_LEVEL -- MUST NOT get an entry here.
+# Absence of an entry keeps issue #104's wipe-all behavior, which is the correct (and only
+# safe) transition when old and new ratios don't mean the same thing.
+SCORING_VERSION_START_BLOCKS: dict[int, int] = {
+    # v2 -> v3 changed only contested-round promotion ordering (commit-order gauntlet,
+    # issue #136); scoring surfaces are byte-identical to v2. Block = implementation time.
+    3: 8_645_052,
+}
+
 # --- Per-source evaluation (issue #10; remixed by issue #112) -------------------
 # Score each miner on three 4 MiB windows: two random fineweb-edu windows and one pile
 # window, each stream weighted equally in the final score (flat average -- see

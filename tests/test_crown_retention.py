@@ -147,9 +147,12 @@ def test_vacant_crown_never_refills_from_excluded_or_stale_scores(monkeypatch):
     _evaluate_round(_args(), state, _chain(), "salt")
     assert state.winner_history == []
 
-    # Stale scoring version: not comparable, never re-crowned from it.
+    # Stale scoring version: not comparable, never re-crowned from it. v1 -> v2 changed
+    # scoring surfaces (no SCORING_VERSION_START_BLOCKS entry, issue #143), so a v1 score
+    # is genuinely incomparable -- unlike a v2 score retained across the ordering-only v3
+    # bump, which recovery may use (see test_scoring_version.py).
     state.excluded_hotkeys.clear()
-    state.scores[_KEY].scoring_version = SCORING_VERSION - 1
+    state.scores[_KEY].scoring_version = 1
     _scripted_precheck(monkeypatch, [_OK])
     _evaluate_round(_args(), state, _chain(), "salt")
     assert state.winner_history == []
