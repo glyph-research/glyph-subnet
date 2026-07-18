@@ -134,9 +134,9 @@ SCORING_VERSION = 3
 # score-compatible: ordering/policy only, ratio semantics unchanged" -- older-version scores
 # evaluated BEFORE the listed block (and the exclusions decided alongside them) are
 # retained and directly comparable, so the bump does not force a full-board re-eval
-# (observed live 2026-07-17: the v3 deploy wiped 17 scores + 15 exclusions and turned the
-# next round into hours of re-evaluation / a crash-loop on a busy GPU, for a bump that
-# never touched ratio semantics).
+# (without an entry, a policy-only bump like v3 would wipe every score and exclusion and
+# turn the next round into hours of re-evaluation, for a bump that never touched ratio
+# semantics).
 #
 # GUARDRAIL: a bump that changes any scoring surface -- corpus sources/sampling, the
 # aggregation formula, validity gates, BASELINE_LEVEL -- MUST NOT get an entry here.
