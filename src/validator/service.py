@@ -49,7 +49,13 @@ from core.constants import (
 )
 from core.log_config import add_logging_args
 from core.conviction import conviction_report, ledger_catchup
-from core.state import CommitmentState, ValidatorState, load_state, save_state
+from core.state import (
+    CommitmentState,
+    ValidatorState,
+    load_state,
+    save_state,
+    score_is_comparable,
+)
 from core.version import assert_weights_version_matches, local_version_key
 from core.wandb_logger import WandbLogger, build_round_metrics, build_weights_metrics, make_wandb_logger
 from core.weights import WinnerEntry, compact_history, promote_winner, rank_key, should_promote
@@ -765,14 +771,15 @@ def _recover_vacant_crown(state: ValidatorState) -> None:
     Promote the best already-scored, currently-valid, non-excluded hotkey. In practice this
     re-crowns an ex-champion whose repo came back after an outage or whose pop later proved
     over-eager; one-shot losers stay out via ``excluded_hotkeys``, and stale-version scores
-    never qualify.
+    never qualify (a score retained across a score-compatible transition, issue #143,
+    counts as current -- its ratio means the same thing).
     """
 
     candidates = [
         score
         for key, score in state.scores.items()
         if score.valid
-        and score.scoring_version == SCORING_VERSION
+        and score_is_comparable(score)
         and score.hotkey not in state.excluded_hotkeys
         and (commitment := state.commitments.get(key)) is not None
         and commitment.valid

@@ -118,16 +118,61 @@ def _invalidate_stale_scores(state: ValidatorState) -> None:
     hotkey's score is enough on its own to re-admit it to the challenger filter
     (``c.key not in state.scores``); the reigning incumbent is unaffected either way since
     it's already unconditionally re-evaluated every round regardless of this cache.
+
+    Exception (issue #143): a bump listed in ``SCORING_VERSION_START_BLOCKS`` is
+    score-compatible -- ratio semantics unchanged, only round policy/ordering moved -- so
+    older-version scores evaluated *before* that transition stay retained and directly
+    comparable (see ``score_is_comparable``), and the exclusions decided alongside them
+    survive too. Exclusions are cleared only on a genuine surface wipe, which is precisely
+    what re-admitting the whole board is for.
     """
 
-    from core.constants import SCORING_VERSION
-
-    stale_keys = [key for key, score in state.scores.items() if score.scoring_version != SCORING_VERSION]
+    stale_keys = []
+    surface_wipe = False
+    for key, score in state.scores.items():
+        if score_is_comparable(score):
+            continue
+        stale_keys.append(key)
+        if _compatible_transition_start(score.scoring_version) is None:
+            surface_wipe = True  # a genuinely incompatible (surface-changing) transition
     if not stale_keys:
         return
     for key in stale_keys:
         del state.scores[key]
-    state.excluded_hotkeys.clear()
+    if surface_wipe:
+        state.excluded_hotkeys.clear()
+
+
+def _compatible_transition_start(from_version: int) -> int | None:
+    """Earliest start block of the ``from_version -> SCORING_VERSION`` transition, or
+    ``None`` unless EVERY intermediate bump is listed as score-compatible.
+
+    Chained on purpose: a v3 start-block entry must not let a v1 score (recorded before
+    the surface-changing v1->v2 corpus overhaul) ride through -- each step has to declare
+    compatibility for the whole path to be safe.
+    """
+
+    from core.constants import SCORING_VERSION, SCORING_VERSION_START_BLOCKS
+
+    if not 0 <= from_version < SCORING_VERSION:
+        return None
+    blocks = [SCORING_VERSION_START_BLOCKS.get(v) for v in range(from_version + 1, SCORING_VERSION + 1)]
+    if any(block is None for block in blocks):
+        return None
+    return min(blocks)
+
+
+def score_is_comparable(score: ScoreState) -> bool:
+    """True when this persisted score may be compared directly against current-version
+    scores (issue #143): stamped with the current ``SCORING_VERSION``, or retained under a
+    score-compatible transition chain and evaluated before it began."""
+
+    from core.constants import SCORING_VERSION
+
+    if score.scoring_version == SCORING_VERSION:
+        return True
+    start_block = _compatible_transition_start(score.scoring_version)
+    return start_block is not None and (score.evaluated_at_block or 0) < start_block
 
 
 def load_state(path: Path) -> ValidatorState:
