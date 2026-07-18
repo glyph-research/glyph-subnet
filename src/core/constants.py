@@ -85,11 +85,11 @@ CONVICTION_FREE_FRACTION = 0.10
 # started or how long it was down (gaps backfill from the archive node on the same grid).
 CONVICTION_TRACKING_START_BLOCK = 8_631_680
 # Enforcement flips on at this block for every validator simultaneously; before it,
-# validators track earnings (warm ledgers) but never gate. Placeholder roughly two weeks
-# past the tracking start -- the announced Miner Conviction rules promise parameters and
-# the activation block ahead of enforcement, so the owner sets the real value (an
-# announced, future block) before this ever gates anyone.
-CONVICTION_ACTIVATION_BLOCK = 8_740_000
+# validators track earnings (warm ledgers) but never gate. Owner-set below the current
+# block (and the tracking start), so enforcement is live from the moment this code
+# deploys: winners whose staked alpha is below their required lock stop receiving
+# incentive at the next weight-setting until they restake.
+CONVICTION_ACTIVATION_BLOCK = 8_615_836
 # Deterministic backfill source for ledger gaps (validator downtime / fresh start).
 ARCHIVE_CHAIN_ENDPOINT = "wss://archive.chain.opentensor.ai:443"
 
