@@ -139,7 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--blockmachine-key-file",
         default=None,
-        help="Optional file containing a blockmachine.io API key (paid plan) -- makes it "
+        help="Optional file containing a blockmachine.io API key (Standard plan) -- makes it "
         "the preferred archive source for the conviction-ledger backfill (~10x faster than "
         "the public archive node, issue #151). Defaults to the BLOCKMACHINE_API_KEY env "
         "var; leave both unset to use the public archive node.",
