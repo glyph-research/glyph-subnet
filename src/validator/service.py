@@ -136,6 +136,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reference-sku", default=REFERENCE_SKU)
     parser.add_argument("--chutes-key-file", default=None)
+    parser.add_argument(
+        "--blockmachine-key-file",
+        default=None,
+        help="Optional file containing a blockmachine.io API key (paid plan) -- makes it "
+        "the preferred archive source for the conviction-ledger backfill (~10x faster than "
+        "the public archive node, issue #151). Defaults to the BLOCKMACHINE_API_KEY env "
+        "var; leave both unset to use the public archive node.",
+    )
     parser.add_argument("--compress-chute-url", default=None, help="Deployed glyph-compressor chute base URL")
     parser.add_argument("--decompress-chute-url", default=None, help="Deployed glyph-decompressor chute base URL")
     parser.add_argument(
@@ -590,6 +598,17 @@ def _scored_specs(specs):
     return [spec for spec in specs if spec.scored]
 
 
+def resolve_blockmachine_key(args) -> str | None:
+    """Optional blockmachine.io archive key (issue #151): ``--blockmachine-key-file`` wins,
+    else the ``BLOCKMACHINE_API_KEY`` env var (deployment-specific, ``.env.example``).
+    Absent -> the public archive node, today's behavior."""
+
+    path = getattr(args, "blockmachine_key_file", None)
+    if path:
+        return Path(path).read_text().strip() or None
+    return os.environ.get("BLOCKMACHINE_API_KEY") or None
+
+
 def _make_chain(args) -> BittensorChain:
     return BittensorChain(
         ChainConfig(
@@ -598,6 +617,7 @@ def _make_chain(args) -> BittensorChain:
             wallet_name=args.wallet_name,
             hotkey_name=args.hotkey_name,
             wallet_path=args.wallet_path,
+            blockmachine_api_key=resolve_blockmachine_key(args),
         )
     )
 
