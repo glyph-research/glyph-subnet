@@ -14,10 +14,19 @@ king-of-the-hill policy:
   makes copy-cat validation strictly losing. **Currently enabled** network-wide
   (`core.constants.BURN_ENABLED = True`, issue #88) — see
   [docs/reign-and-burn.md](docs/reign-and-burn.md) for the current state and how to disable.
+- **Miner Conviction** (issue #141): a winner slot must keep its cumulative alpha earnings
+  staked to its hotkey — the free (unstaked-allowed) amount is `max(10% of earned, 1000 α)`.
+  A slot below its required lock earns nothing that tempo (its share burns, never
+  reallocated to the other winner) and resumes automatically at the next weight-setting
+  once restaked. Measured in alpha on both sides; the crown itself is never affected.
 
 Score = compression ratio (compressed ÷ raw, lower is better) with a hard **bit-exact
 round-trip** gate. A challenger takes the crown only by beating the incumbent by `ε`
-(default `5%`); ties go to the earliest commit; losers are excluded forever (one shot).
+(default `5%`). When several challengers land in the same round they run as a **sequential
+gauntlet in commit order** (issue #136): the earliest commit challenges first, and each
+later challenger must beat the *current* — possibly just-crowned — winner by the full `ε`,
+so a later-committed marginal tweak of someone else's round can't steal it; identical
+commit blocks tie-break by hotkey; losers are excluded forever (one shot).
 
 See [`docs/`](docs) for guides.
 
@@ -45,7 +54,7 @@ docs/  tests/
 ```bash
 ./scripts/install_deps.sh           # venv + package + pm2
 # or: pip install -e ".[dev]"
-cp .env.example .env                # miners: set HF_TOKEN (write); validators: recommended too (read-only, avoids anonymous HF CDN 403s) -- see docs/VALIDATING.md
+cp .env.example .env                # miners: set HF_TOKEN (write); validators: recommended too (read-only, avoids anonymous HF CDN 403s) + BLOCKMACHINE_API_KEY (Standard plan, fast conviction backfill) -- see docs/VALIDATING.md
 pytest -q
 ```
 
@@ -77,6 +86,13 @@ keyed by the round's on-chain beacon and a seed-derived dataset shard so the rea
 sampling range is the whole dataset, not a fixed slice (issue #112) — no owner-run oracle
 process, no shared corpus file to host or keep in sync (issue #71); see
 [docs/VALIDATING.md](docs/VALIDATING.md#corpus) for the determinism guarantee.
+
+**Recommended: a [blockmachine](https://rpc.blockmachine.io) RPC API key — choose the
+Standard plan.** The Miner Conviction ledger (issue #141) backfills one historical
+metagraph per tempo from an archive source; with `BLOCKMACHINE_API_KEY` set in `.env`
+(issue #151, the install script asks for it) a fresh backfill takes ~2–3 minutes instead
+of 40+ on the public archive node. Optional and purely a local speed preference — without
+a key, or on any key failure, the validator automatically uses the public archive node.
 
 `./scripts/install_deps.sh` already builds the `glyph-runner-default:latest` image (zstandard-enabled),
 so no separate `docker build` step is needed here:

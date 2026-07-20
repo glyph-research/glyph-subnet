@@ -19,7 +19,7 @@ class ChainConfig:
     wallet_name: str
     hotkey_name: str
     wallet_path: str | None = None
-    # Optional blockmachine.io API key (paid plan): makes it the preferred archive source
+    # Optional blockmachine.io API key (Standard plan): makes it the preferred archive source
     # for historical queries (issue #151). Absent -> public archive node only.
     blockmachine_api_key: str | None = None
 
@@ -76,7 +76,7 @@ class BittensorChain:
 
     def _archive_endpoints(self) -> list[str]:
         """Ordered archive candidates for historical queries (issue #151): blockmachine
-        (authenticated, ~1-3s per metagraph-at-block, paid plan) first when a key is
+        (authenticated, ~1-3s per metagraph-at-block, Standard plan) first when a key is
         configured, then the public archive node (~20-30s and frequent overloads).
         Historical chain state is objective, so the endpoint choice is a purely
         operator-local preference, never consensus-relevant.

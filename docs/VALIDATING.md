@@ -33,7 +33,7 @@ set `HF_TOKEN` in `.env` (a free-tier read token, no special dataset permissions
 create one at https://huggingface.co/settings/tokens) to avoid it. See `.env.example`.
 
 Also optional: a blockmachine.io archive API key (`BLOCKMACHINE_API_KEY` in `.env`, or
-`--blockmachine-key-file`; the install script asks for it). It is a paid plan and purely a
+`--blockmachine-key-file`; the install script asks for it). Choose the **Standard** plan; it is purely a
 local speed preference -- the Miner Conviction ledger backfill (issue #141) runs one
 archive metagraph query per tempo, and blockmachine answers in ~1-3s vs ~20-30s (with
 frequent overloads) on the public archive node, so a fresh backfill drops from ~40+ minutes
