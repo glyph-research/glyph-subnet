@@ -82,6 +82,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wallet-path", "--wallet.path", dest="wallet_path", default=None)
     parser.add_argument("--state-dir", default="./state")
     parser.add_argument("--burn-uid", type=int, default=BURN_UID)
+    parser.add_argument(
+        "--blockmachine-key-file",
+        default=None,
+        help="Optional file containing a blockmachine.io API key (paid plan) -- preferred "
+        "archive source for the conviction-ledger backfill (issue #151). Defaults to the "
+        "BLOCKMACHINE_API_KEY env var; unset -> public archive node.",
+    )
     parser.add_argument("--window-anchor", type=int, default=WINDOW_ANCHOR_BLOCK)
     parser.add_argument(
         "--loop", action="store_true",
@@ -103,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
 def run(args: argparse.Namespace) -> None:
     from chain.chain import BittensorChain, ChainConfig
 
+    from validator.service import resolve_blockmachine_key
+
     state = load_state(Path(args.state_dir) / "validator_state.json")
     chain = BittensorChain(
         ChainConfig(
@@ -111,6 +120,7 @@ def run(args: argparse.Namespace) -> None:
             wallet_name=args.wallet_name,
             hotkey_name=args.hotkey_name,
             wallet_path=args.wallet_path,
+            blockmachine_api_key=resolve_blockmachine_key(args),
         )
     )
     version_key = local_version_key()

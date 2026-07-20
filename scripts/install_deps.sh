@@ -33,6 +33,18 @@ else
     echo "[glyph] docker not found; miners can skip this. Validators need Docker + this image."
 fi
 
+# Optional blockmachine.io archive key (issue #151): paid plan, speeds the conviction-ledger
+# backfill ~10x over the public archive node. Prompt only interactively and only when the
+# key isn't already configured; skipping keeps the public archive node.
+if [ -t 0 ] && [ -f .env ] && ! grep -q "^BLOCKMACHINE_API_KEY=" .env; then
+    printf "[glyph] Optional: blockmachine.io archive API key (paid plan; ~10x faster conviction-ledger backfill; empty to skip): "
+    read -r bm_key
+    if [ -n "$bm_key" ]; then
+        echo "BLOCKMACHINE_API_KEY=$bm_key" >> .env
+        echo "[glyph] BLOCKMACHINE_API_KEY written to .env"
+    fi
+fi
+
 echo "[glyph] done. Next:"
-echo "  cp .env.example .env   # set CHUTES_API_KEY"
+echo "  cp .env.example .env   # set CHUTES_API_KEY (and optionally BLOCKMACHINE_API_KEY)"
 echo "  pytest -q"

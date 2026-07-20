@@ -91,7 +91,16 @@ CONVICTION_TRACKING_START_BLOCK = 8_631_680
 # incentive at the next weight-setting until they restake.
 CONVICTION_ACTIVATION_BLOCK = 8_615_836
 # Deterministic backfill source for ledger gaps (validator downtime / fresh start).
+# Historical chain state is objective -- any honest archive returns identical data -- so
+# which endpoint an operator uses is purely a local preference, never consensus-relevant.
 ARCHIVE_CHAIN_ENDPOINT = "wss://archive.chain.opentensor.ai:443"
+# Faster paid alternative (issue #151): with a blockmachine API key configured
+# (BLOCKMACHINE_API_KEY env / --blockmachine-key-file, deployment-specific like
+# CHUTE_USERNAME), archive queries go here first at ~1-3s per metagraph-at-block vs
+# ~20-30s (and frequent overloads) on the public node. The key rides the query string
+# (?authorization=<key>) because bt.Subtensor websockets cannot set an Authorization
+# header; see chain.BittensorChain._archive_endpoints for the auth pitfalls.
+BLOCKMACHINE_RPC_ENDPOINT = "wss://rpc.blockmachine.io"
 
 # --- Rolling-winner policy -----------------------------------------------------
 # current winner / previous winner. Effective split after the temporal burn is
