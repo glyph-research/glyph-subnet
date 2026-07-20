@@ -8,8 +8,10 @@ runs as one same-worker job via a ``CodecRunner``.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from bittensor.utils.btlogging import logging as bt_logging
 
@@ -58,6 +60,39 @@ def _prepare_stream(runner: CodecRunner, provider: CorpusProvider, spec: StreamS
     return StreamInput(spec.stream_id, data=data, expected_sha256=expected_sha256)
 
 
+def _manifest_image(artifact: ArtifactRef) -> str | None:
+    """Best-effort read of the codec manifest's pinned ``image`` reference, if any.
+
+    Display-only (issue #126): must never raise -- a missing/unreadable/malformed
+    manifest.json simply means no image line is logged; evaluation is unaffected either way
+    (the runner does its own authoritative manifest handling).
+    """
+
+    local = getattr(artifact, "local_path", None)
+    if not local:
+        return None
+    try:
+        image = json.loads((Path(local) / "manifest.json").read_text()).get("image")
+    except Exception:
+        return None
+    return image if isinstance(image, str) and image else None
+
+
+def _codec_reference_links(artifact: ArtifactRef) -> str:
+    """Human-facing pointers to the codec about to run (issue #126): the HF repo at its
+    pinned revision always, plus the container image -- with a Docker Hub link when the
+    reference is a Docker Hub one (two path components, no registry host)."""
+
+    links = f"https://huggingface.co/{artifact.repo}/tree/{artifact.rev}"
+    image = _manifest_image(artifact)
+    if image:
+        links += f" image={image}"
+        parts = image.split("@", 1)[0].split("/")
+        if len(parts) == 2 and "." not in parts[0]:
+            links += f" (https://hub.docker.com/r/{parts[0]}/{parts[1]})"
+    return links
+
+
 def evaluate_artifact(
     runner: CodecRunner,
     hotkey: str,
@@ -69,6 +104,9 @@ def evaluate_artifact(
     floor_bps: float,
     budget_secs: float,
 ) -> EvalOutcome:
+    # One identifying line before any per-stream output (issue #126): what codec this is
+    # and where to inspect it, instead of only ever logging the hotkey.
+    bt_logging.info(f"evaluating {hotkey}: codec {_codec_reference_links(artifact)}")
     results: list[StreamResult] = []
     total = len(stream_specs)
     for index, spec in enumerate(stream_specs, start=1):

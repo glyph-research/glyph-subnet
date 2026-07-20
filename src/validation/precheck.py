@@ -138,6 +138,16 @@ class PrecheckResult:
     artifact_bytes: int | None = None
     name: str | None = None
     license: str | None = None
+    # True only when HF answered definitively that the repo/revision does not exist
+    # (deleted, renamed, made private) -- never for transient network/5xx/rate-limit
+    # failures. Lets the validator distinguish "genuinely gone, stop retrying eventually"
+    # from "worth retrying next round" (issue #128).
+    repo_not_found: bool = False
+    # True when the failure happened at the HF fetch itself (either flavor above), as
+    # opposed to a content problem with a successfully fetched artifact (manifest/security/
+    # size/duplicate). A fetch failure says nothing bad about the codec -- the crown must
+    # not change hands over one (issue #135).
+    repo_unreachable: bool = False
 
     def raise_for_status(self) -> None:
         if not self.ok:
@@ -422,12 +432,21 @@ def precheck_codec(
     """
 
     from huggingface_hub import HfApi, hf_hub_download, snapshot_download
+    from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundError
 
     result = PrecheckResult(repo=repo, revision=revision, ok=False)
 
     try:
         HfApi().repo_info(repo_id=repo, revision=revision)
+    except (RepositoryNotFoundError, RevisionNotFoundError) as exc:
+        # A definitive "does not exist" answer from HF (covers deleted/renamed/made-private
+        # repos, and GatedRepoError via subclassing), unlike the transient failures below.
+        result.repo_not_found = True
+        result.repo_unreachable = True
+        result.errors.append(f"repo unavailable: {exc}")
+        return result
     except Exception as exc:
+        result.repo_unreachable = True
         result.errors.append(f"repo unavailable: {exc}")
         return result
 

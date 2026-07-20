@@ -40,18 +40,33 @@ from core.constants import (
     EVAL_STREAM_BYTES,
     EVAL_STREAMS,
     PRECHECK_FULL_RECHECK_INTERVAL_BLOCKS,
+    REPO_NOT_FOUND_EXCLUDE_STREAK,
     REFERENCE_SKU,
     SCORING_VERSION,
     THROUGHPUT_FLOOR_BPS,
     WINDOW_ANCHOR_BLOCK,
+    WINNER_LIMIT,
 )
 from core.log_config import add_logging_args
-from core.state import CommitmentState, ValidatorState, load_state, save_state
+from core.conviction import conviction_report, ledger_catchup
+from core.state import (
+    CommitmentState,
+    ValidatorState,
+    load_state,
+    save_state,
+    score_is_comparable,
+)
 from core.version import assert_weights_version_matches, local_version_key
 from core.wandb_logger import WandbLogger, build_round_metrics, build_weights_metrics, make_wandb_logger
-from core.weights import WinnerEntry, compact_history, promote_winner, should_promote
+from core.weights import WinnerEntry, compact_history, promote_winner, rank_key, should_promote
 from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
+from eval.live_bench import (
+    LivePrefetcher,
+    LiveSnapshotStore,
+    SnapshotAppendedProvider,
+    live_benchmark_spec,
+)
 from eval.live_corpus import resolve_live_corpus
 from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
 from eval.scoring import source_ratio_breakdown, stream_ratio, zstd_baseline_ratio
@@ -121,6 +136,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reference-sku", default=REFERENCE_SKU)
     parser.add_argument("--chutes-key-file", default=None)
+    parser.add_argument(
+        "--blockmachine-key-file",
+        default=None,
+        help="Optional file containing a blockmachine.io API key (Standard plan) -- makes it "
+        "the preferred archive source for the conviction-ledger backfill (~10x faster than "
+        "the public archive node, issue #151). Defaults to the BLOCKMACHINE_API_KEY env "
+        "var; leave both unset to use the public archive node.",
+    )
     parser.add_argument("--compress-chute-url", default=None, help="Deployed glyph-compressor chute base URL")
     parser.add_argument("--decompress-chute-url", default=None, help="Deployed glyph-decompressor chute base URL")
     parser.add_argument(
@@ -376,6 +399,19 @@ def _apply_precheck(
             bt_logging.info(f"precheck: {codec_desc} valid")
         else:
             bt_logging.warning(f"precheck: {codec_desc} invalid: {'; '.join(result.errors)}")
+        # issue #128: count only definitive 404s (repo deleted/renamed/private) toward the
+        # exclusion streak; any success or differently-failing precheck (transient network/
+        # 5xx/rate-limit) resets it, so an honest miner is never blacklisted over an outage.
+        prior_streak = existing.consecutive_repo_not_found if existing else 0
+        repo_not_found_streak = prior_streak + 1 if getattr(result, "repo_not_found", False) else 0
+        if repo_not_found_streak >= REPO_NOT_FOUND_EXCLUDE_STREAK:
+            state.excluded_hotkeys.add(parsed.hotkey)
+            bt_logging.warning(
+                f"precheck: {codec_desc} repo 404'd on {repo_not_found_streak} consecutive "
+                f"prechecks (threshold {REPO_NOT_FOUND_EXCLUDE_STREAK}, spanning several "
+                f"hours of rounds) -- treating as permanently unavailable and excluding "
+                f"the hotkey; it will not be rechecked"
+            )
         entries[key] = CommitmentState(
             hotkey=parsed.hotkey,
             repo=parsed.commitment.repo,
@@ -389,6 +425,11 @@ def _apply_precheck(
             disqualification_reason=None if result.ok else "; ".join(result.errors),
             local_path=local_dir,
             last_full_check_block=block if full_check else last_full_check,
+            consecutive_repo_not_found=repo_not_found_streak,
+            # A fetch failure not (yet) confirmed permanent -- includes 404s still under
+            # the #128 streak -- must not cost the hotkey its crown (issue #135).
+            transiently_unreachable=getattr(result, "repo_unreachable", False)
+            and repo_not_found_streak < REPO_NOT_FOUND_EXCLUDE_STREAK,
         )
 
     # Duplicate-artifact ownership: earliest commit_block wins, hotkey only as the final
@@ -557,6 +598,17 @@ def _scored_specs(specs):
     return [spec for spec in specs if spec.scored]
 
 
+def resolve_blockmachine_key(args) -> str | None:
+    """Optional blockmachine.io archive key (issue #151): ``--blockmachine-key-file`` wins,
+    else the ``BLOCKMACHINE_API_KEY`` env var (deployment-specific, ``.env.example``).
+    Absent -> the public archive node, today's behavior."""
+
+    path = getattr(args, "blockmachine_key_file", None)
+    if path:
+        return Path(path).read_text().strip() or None
+    return os.environ.get("BLOCKMACHINE_API_KEY") or None
+
+
 def _make_chain(args) -> BittensorChain:
     return BittensorChain(
         ChainConfig(
@@ -565,8 +617,71 @@ def _make_chain(args) -> BittensorChain:
             wallet_name=args.wallet_name,
             hotkey_name=args.hotkey_name,
             wallet_path=args.wallet_path,
+            blockmachine_api_key=resolve_blockmachine_key(args),
         )
     )
+
+
+def _update_conviction_ledger(state: ValidatorState, chain: BittensorChain, block: int, tempo: int) -> None:
+    """Advance the persisted earnings ledger to ``block`` (Miner Conviction, issue #141).
+
+    One increment code path (``ledger_catchup``); grid blocks within the live node's
+    pruning horizon come from it, anything older (validator downtime, fresh start)
+    backfills from the archive endpoint. Best-effort: a failure leaves the ledger at the
+    last fully-applied grid block -- gating then runs on slightly-stale totals for a tempo
+    rather than blocking weight-setting.
+    """
+
+    def emissions_at(grid_block: int) -> dict[str, float]:
+        if block - grid_block <= 250:
+            return chain.emissions_by_hotkey(grid_block)
+        return chain.archive_emissions_by_hotkey(grid_block)
+
+    try:
+        applied = ledger_catchup(
+            state.conviction_ledger, current_block=block, tempo=tempo, emissions_at=emissions_at
+        )
+        if applied:
+            bt_logging.info(
+                f"conviction: ledger advanced {applied} tempo(s) to block "
+                f"{state.conviction_ledger.last_block}"
+            )
+    except Exception as exc:  # noqa: BLE001 - best-effort; never block weight-setting
+        bt_logging.warning(
+            f"conviction: ledger catchup stopped at block "
+            f"{state.conviction_ledger.last_block}, will resume next tempo: {exc}"
+        )
+
+
+def _conviction_report_for_winners(state: ValidatorState, metagraph, block: int) -> dict[str, dict]:
+    """Compliance snapshot for the current winner slots, logged every weight-setting."""
+
+    winners = [w.hotkey for w in state.winner_history[:WINNER_LIMIT]]
+    # The lock is alpha-only by design: on dTAO metagraphs S is the consensus stake weight
+    # (alpha + tao-weighted root stake), so a winner could otherwise satisfy part of the
+    # lock with root TAO. Prefer the pure per-hotkey alpha; S only as a fallback.
+    stakes = getattr(metagraph, "alpha_stake", None)
+    if stakes is None:
+        stakes = getattr(metagraph, "S", None)
+    staked = (
+        {hotkey: float(s) for hotkey, s in zip(metagraph.hotkeys, stakes)}
+        if stakes is not None
+        else {}
+    )
+    report = conviction_report(state.conviction_ledger, winners, staked, block=block)
+    for hotkey, entry in report.items():
+        line = (
+            f"conviction: {hotkey} earned={entry['earned']:.1f} staked={entry['staked']:.1f} "
+            f"required_lock={entry['required_lock']:.1f} compliant={entry['compliant']}"
+        )
+        if entry["compliant"]:
+            bt_logging.info(line)
+        else:
+            bt_logging.warning(
+                f"{line} -- winner is below its required stake lock; its share burns this "
+                f"tempo and restores automatically once restaked (issue #141)"
+            )
+    return report
 
 
 def _publish_winner_commitment(chain: BittensorChain, champion: WinnerEntry) -> None:
@@ -578,10 +693,7 @@ def _publish_winner_commitment(chain: BittensorChain, champion: WinnerEntry) -> 
 
     winner = WinnerCommitment(
         hotkey=champion.hotkey,
-        repo=champion.repo,
-        rev=champion.revision,
-        ratio=champion.ratio,
-        commit_block=champion.commit_block,
+        ratio_ppm=round(champion.ratio * 1_000_000),
         scoring_version=SCORING_VERSION,
     )
     try:
@@ -618,18 +730,106 @@ def _startup_wandb_identity_name(args) -> str | None:
         return None
 
 
+def _append_live_benchmark_stream(args, provider, specs):
+    """Append the latest complete live snapshot as a benchmark-only stream (issue #139).
+
+    Read-only at round start: never fetches, only picks up what the between-rounds
+    prefetch already completed. No snapshot yet (or no state dir, e.g. offline tests) ->
+    the round proceeds without a live stream; a stale-but-complete snapshot is preferred
+    over none. Returns the (possibly wrapped) provider and spec list.
+    """
+
+    state_dir = getattr(args, "state_dir", None)
+    if not state_dir:
+        return provider, specs
+    try:
+        store = LiveSnapshotStore(Path(state_dir) / "live_data")
+        latest = store.latest()
+        if latest is None:
+            bt_logging.warning(
+                "live benchmark: no complete snapshot yet; skipping the live stream this round"
+            )
+            return provider, specs
+        path, snapshot_block = latest
+        snapshot = path.read_bytes()
+        spec = live_benchmark_spec(provider, snapshot)
+        bt_logging.info(
+            f"live benchmark: using snapshot from block {snapshot_block} "
+            f"({len(snapshot):,} bytes) as benchmark-only stream {spec.stream_id}"
+        )
+        return SnapshotAppendedProvider(provider, snapshot), [*specs, spec]
+    except Exception as exc:  # noqa: BLE001 - display-only; must never fail the round
+        bt_logging.warning(f"live benchmark: skipping live stream: {exc}")
+        return provider, specs
+
+
+_live_prefetcher: LivePrefetcher | None = None
+
+
+def _start_live_prefetch(args, chain: BittensorChain) -> None:
+    """Kick off the between-rounds live-data fetch (issue #139) -- strictly best-effort,
+    returns immediately; any failure here degrades to a skipped/stale live stream, never a
+    blocked or delayed round."""
+
+    global _live_prefetcher
+    state_dir = getattr(args, "state_dir", None)
+    if not state_dir:
+        return
+    try:
+        if _live_prefetcher is None:
+            _live_prefetcher = LivePrefetcher(LiveSnapshotStore(Path(state_dir) / "live_data"))
+        _live_prefetcher.start(chain.current_block())
+    except Exception as exc:  # noqa: BLE001
+        bt_logging.warning(f"live benchmark: prefetch not started: {exc}")
+
+
+def _recover_vacant_crown(state: ValidatorState) -> None:
+    """Refill an empty ``winner_history`` from persisted scores (issue #135 recovery gap).
+
+    Challenger selection is one-shot (``c.key not in state.scores``), so once every hotkey
+    is already scored a vacant crown can never refill itself -- 100% burn indefinitely.
+    Promote the best already-scored, currently-valid, non-excluded hotkey. In practice this
+    re-crowns an ex-champion whose repo came back after an outage or whose pop later proved
+    over-eager; one-shot losers stay out via ``excluded_hotkeys``, and stale-version scores
+    never qualify (a score retained across a score-compatible transition, issue #143,
+    counts as current -- its ratio means the same thing).
+    """
+
+    candidates = [
+        score
+        for key, score in state.scores.items()
+        if score.valid
+        and score_is_comparable(score)
+        and score.hotkey not in state.excluded_hotkeys
+        and (commitment := state.commitments.get(key)) is not None
+        and commitment.valid
+    ]
+    if not candidates:
+        return
+    best = min(candidates, key=lambda score: rank_key(score.as_winner()))
+    bt_logging.warning(
+        f"vacant crown: re-promoting best already-scored hotkey {best.hotkey} "
+        f"(ratio={best.ratio:.4f}) instead of burning indefinitely"
+    )
+    state.winner_history = promote_winner(state.winner_history, best.as_winner())
+
+
 def _evaluate_round(
     args, state: ValidatorState, chain: BittensorChain, salt: str
-) -> tuple[int, dict | None, dict[str, str]]:
+) -> tuple[int, dict | None, dict[str, str], "object"]:
     """Precheck commitments and, if there are new challengers, run one reign round.
 
-    Returns ``(block, round_metrics, raw_commitments)``; ``round_metrics`` is ``None`` when no
-    challengers ran this round (nothing new to report). ``round_metrics`` is a plain dict
-    built by ``core.wandb_logger.build_round_metrics`` purely from what this round already
-    decided -- reporting it changes nothing about scoring/promotion (issue #41).
-    ``raw_commitments`` is the commitment dict this round already fetched for precheck,
-    passed back so ``run_once``'s burn-override check (issue #113) doesn't need a second,
-    redundant ``get_all_commitments()`` round-trip moments later.
+    Returns ``(block, round_metrics, raw_commitments, metagraph)``; ``round_metrics`` is
+    ``None`` when no challengers ran this round (nothing new to report). ``round_metrics``
+    is a plain dict built by ``core.wandb_logger.build_round_metrics`` purely from what this
+    round already decided -- reporting it changes nothing about scoring/promotion (issue
+    #41). ``raw_commitments`` is the commitment dict this round already fetched for
+    precheck, passed back so ``run_once``'s burn-override check (issue #113) doesn't need a
+    second, redundant ``get_all_commitments()`` round-trip moments later. ``metagraph`` is
+    fetched here (same de-dup pattern, issue #126) both to label round metrics/logs with
+    UIDs alongside hotkeys and for ``run_once``'s weight-setting to reuse -- this also
+    deliberately gives ``run_reign_only`` (which never fetched one before) UID labeling in
+    its round metrics.
     """
 
     if getattr(args, "corpus_dir", None):
@@ -645,6 +845,8 @@ def _evaluate_round(
     if state.window_anchor_block is None:
         state.window_anchor_block = args.window_anchor or block
     raw_commitments = chain.get_all_commitments()
+    metagraph = chain.metagraph()
+    hotkey_to_uid = {hk: int(uid) for hk, uid in zip(metagraph.hotkeys, metagraph.uids)}
     # Record commit-phase digests as we see them so a later reveal can tie-break off the
     # commit-phase block (exploit vector #9). Observing this requires polling during the
     # commit/reveal window; a validator that only catches the reveal degrades to the
@@ -662,8 +864,16 @@ def _evaluate_round(
         state, parsed, args.max_artifact_bytes, block=block,
         local_artifacts=_parse_local_artifacts(args),
     )
-    eligible = state.eligible_hotkeys()
-    state.winner_history = compact_history(state.winner_history, eligible_hotkeys=eligible)
+    # History retention uses retained_hotkeys, not eligible_hotkeys (issue #135): during
+    # the 2026-07-16 HF outage, a 504 on the champion's precheck made it ineligible for one
+    # round and this compaction permanently dethroned it into an indefinite 100% burn. A
+    # crown entry now survives transient unreachability and is dropped only when the hotkey
+    # is definitively out (confirmed-404 exclusion, content disqualification, or the #67
+    # failed-re-eval pop inside run_round).
+    retained = state.retained_hotkeys()
+    state.winner_history = compact_history(state.winner_history, eligible_hotkeys=retained)
+    if not state.winner_history:
+        _recover_vacant_crown(state)
 
     challengers = [
         c
@@ -682,6 +892,7 @@ def _evaluate_round(
         # (issue #108) -- a free-tier read token is enough, no special dataset permissions.
         provider = resolve_live_corpus(str(seed), token=os.environ.get("HF_TOKEN"))
         specs = _select_specs(args, provider, seed)
+        provider, specs = _append_live_benchmark_stream(args, provider, specs)
         scored_specs = _scored_specs(specs)
         baseline = zstd_baseline_ratio(
             [provider.materialize(s) for s in scored_specs],
@@ -691,15 +902,20 @@ def _evaluate_round(
         runner = _make_runner(args)
         caps = ResourceCaps(wall_clock_secs=args.compress_budget_secs, artifact_bytes=args.max_artifact_bytes)
         champion_before = state.winner_history[0].hotkey if state.winner_history else None
-        challenger_hotkeys = [c.hotkey for c in challengers]
+        # uid alongside hotkey (issue #126): following the log otherwise requires manually
+        # cross-referencing the metagraph.
+        def _with_uid(hotkey: str) -> str:
+            return f"{hotkey} (uid {hotkey_to_uid.get(hotkey, '?')})"
+
+        challenger_descs = [_with_uid(c.hotkey) for c in challengers]
         bt_logging.info(
-            f"round: evaluating incumbent={champion_before or 'none'}, "
-            f"{len(challengers)} challenger(s): {challenger_hotkeys} (baseline zstd ratio={baseline:.4f})"
+            f"round: evaluating incumbent={_with_uid(champion_before) if champion_before else 'none'}, "
+            f"{len(challengers)} challenger(s): {challenger_descs} (baseline zstd ratio={baseline:.4f})"
         )
         outcomes = run_round(
             state, runner, challengers, provider, specs,
             caps=caps, floor_bps=args.floor_bps, budget_secs=args.compress_budget_secs,
-            margin=args.win_margin, block=block, eligible_hotkeys=eligible, baseline_ratio=baseline,
+            margin=args.win_margin, block=block, eligible_hotkeys=retained, baseline_ratio=baseline,
         )
         champion_after = state.winner_history[0] if state.winner_history else None
         crown_changed = bool(champion_after) and champion_after.hotkey != champion_before
@@ -715,8 +931,9 @@ def _evaluate_round(
             winner_hotkey=champion_after.hotkey if champion_after else None,
             winner_ratio=champion_after.ratio if champion_after else None,
             crown_changed=crown_changed,
+            hotkey_to_uid=hotkey_to_uid,
         )
-    return block, round_metrics, raw_commitments
+    return block, round_metrics, raw_commitments, metagraph
 
 
 # Production paths (require chain access)
@@ -749,21 +966,26 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         if not chain.commit_reveal_enabled():
             bt_logging.warning("commit-reveal is not enabled on this subnet; anti-copy weights are weaker")
 
-        block, round_metrics, raw_commitments = _evaluate_round(args, state, chain, salt)
+        block, round_metrics, raw_commitments, metagraph = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
             wandb_logger.log(round_metrics)
+        # Reuse the metagraph _evaluate_round already fetched (issue #126) -- same
+        # no-second-round-trip pattern as raw_commitments (issue #113).
+        hotkeys = list(metagraph.hotkeys)
+        uids = [int(uid) for uid in metagraph.uids]
+        hotkey_to_uid = dict(zip(hotkeys, uids))
         champion = state.winner_history[0] if state.winner_history else None
-        champion_desc = f"{champion.hotkey} ratio={champion.ratio:.4f}" if champion else "none"
+        champion_desc = (
+            f"{champion.hotkey} (uid {hotkey_to_uid.get(champion.hotkey, '?')}) ratio={champion.ratio:.4f}"
+            if champion
+            else "none"
+        )
         challengers_desc = (
             f"{round_metrics['round/num_challengers']} challenger(s)" if round_metrics else "0 challengers"
         )
         bt_logging.info(f"round: block={block} champion={champion_desc} {challengers_desc}")
         tempo = chain.tempo()
         anchor = state.window_anchor_block
-
-        metagraph = chain.metagraph()
-        hotkeys = list(metagraph.hotkeys)
-        uids = [int(uid) for uid in metagraph.uids]
 
         # Owner emergency burn override (issue #113), read from the commitment dict
         # _evaluate_round already fetched for precheck -- no second chain round-trip.
@@ -781,12 +1003,23 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
                 "(owner emergency override: on-chain force_burn=true) -- burning 100% this tempo"
             )
 
+        # Miner Conviction (issue #141): advance the earnings ledger, then gate any winner
+        # whose staked alpha is below its required lock -- its share burns this tempo.
+        _update_conviction_ledger(state, chain, block, tempo)
+        conviction = _conviction_report_for_winners(state, metagraph, block)
+        gated = {hotkey for hotkey, entry in conviction.items() if not entry["compliant"]}
+
         weights, burn = decide_weights(
             hotkeys, state.winner_history, block=block, tempo=tempo,
             last_round_outputs=state.last_round_outputs, anchor=anchor, burn_uid=args.burn_uid,
-            force_burn=force_burn,
+            force_burn=force_burn, gated_hotkeys=gated,
         )
-        wandb_logger.log(build_weights_metrics(block=block, tempo=tempo, is_burn_tempo=burn, uids=uids, weights=weights))
+        wandb_logger.log(
+            build_weights_metrics(
+                block=block, tempo=tempo, is_burn_tempo=burn, uids=uids, weights=weights,
+                conviction=conviction,
+            )
+        )
         save_state(state_path, state)
 
         nonzero = [(uids[i], round(w, 4)) for i, w in enumerate(weights) if w > 0]
@@ -829,9 +1062,13 @@ def run_reign_only(args: argparse.Namespace, wandb_logger: WandbLogger | None = 
             # on-chain weights_version updates -- skip the cycle, don't kill the process.
             bt_logging.warning(f"weights_version mismatch, waiting for on-chain update: {exc}")
             return
-        _block, round_metrics, _raw_commitments = _evaluate_round(args, state, chain, salt)
+        _block, round_metrics, _raw_commitments, _metagraph = _evaluate_round(args, state, chain, salt)
         if round_metrics is not None:
             wandb_logger.log(round_metrics)
+        # Keep the conviction ledger warm in the split deployment too (issue #141): the
+        # standalone weight-setter reads state but never writes it, so the reign worker is
+        # the split deployment's ledger persister.
+        _update_conviction_ledger(state, chain, _block, chain.tempo())
         save_state(state_path, state)
         bt_logging.info(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in state.winner_history]}")
     finally:
@@ -982,6 +1219,10 @@ def main() -> None:
             # rather than degrading to the reveal-observation block (exploit vector #9).
             if poll_chain is None:
                 poll_chain = _make_chain(args)
+            # The between-rounds window is where the next round's live benchmark snapshot
+            # gets fetched (issue #139) -- non-blocking, so the commit-poll sleep below
+            # still starts immediately.
+            _start_live_prefetch(args, poll_chain)
             _sleep_with_commit_polls(args, poll_chain)
     finally:
         wandb_logger.finish()

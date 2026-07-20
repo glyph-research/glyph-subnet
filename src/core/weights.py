@@ -27,9 +27,25 @@ class WinnerEntry:
 
 
 def rank_key(entry: WinnerEntry) -> tuple[float, int]:
-    """Sort key for choosing among challengers: best (lowest) ratio, then earliest commit."""
+    """Sort key for picking the best among already-scored entries (e.g. the vacant-crown
+    recovery): best (lowest) ratio, then earliest commit.
+
+    NOT the challenge order -- issue #136 made the round a sequential gauntlet in commit
+    order (``commit_order_key``); ranking challengers best-ratio-first is exactly the
+    best-of-round semantics that replaced.
+    """
 
     return (entry.ratio, entry.commit_block)
+
+
+def commit_order_key(entry: WinnerEntry) -> tuple[int, str]:
+    """Sequential-gauntlet challenge order (issue #136, owner-specified): earliest commit
+    challenges first, hotkey as the deterministic tie-break for identical blocks --
+    consistent with the duplicate-artifact ownership rule (issue #58). An earlier commit
+    that legitimately dethrones the incumbent is then protected by the full margin against
+    everything committed after it, so a copier's same-round marginal tweak wins nothing."""
+
+    return (entry.commit_block, entry.hotkey)
 
 
 def compact_history(
@@ -101,12 +117,19 @@ def compute_weights(
     *,
     is_burn_tempo: bool,
     burn_uid: int = BURN_UID,
+    gated_hotkeys: set[str] | None = None,
 ) -> list[float]:
     """Final validator weights for a single tempo.
 
     On a burn tempo all weight goes to ``burn_uid``. On a normal tempo
     weight follows the rolling 70/30 winners; if there is no eligible winner yet the
     emission is burned rather than spread arbitrarily.
+
+    ``gated_hotkeys`` (Miner Conviction, issue #141): winners whose staked alpha is below
+    their required lock this tempo. A gated slot's share moves to the burn sink -- never to
+    the other winner, which would pay A for B's non-compliance and create an incentive to
+    keep a rival gated. Reversible by construction: the slot itself is untouched, so a
+    restaked winner earns again at the next weight-setting.
     """
 
     if not 0 <= burn_uid < len(hotkeys):
@@ -126,7 +149,13 @@ def compute_weights(
     for index in range(len(hotkeys)):
         weights[index] = 0.0 if index == burn_uid else miner_weights[index]
     total = sum(weights)
-    if total > 0:
-        return [weight / total for weight in weights]
-    weights[burn_uid] = 1.0
+    if total <= 0:
+        weights[burn_uid] = 1.0
+        return weights
+    weights = [weight / total for weight in weights]
+    if gated_hotkeys:
+        for index, hotkey in enumerate(hotkeys):
+            if hotkey in gated_hotkeys and index != burn_uid and weights[index] > 0:
+                weights[burn_uid] += weights[index]
+                weights[index] = 0.0
     return weights

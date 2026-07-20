@@ -21,6 +21,15 @@ import traceback
 class WandbLogger:
     """No-op unless enabled; every public method is best-effort and never raises."""
 
+    # Consecutive-failure budget before logging fully disables itself (issue #127): one
+    # transient network blip or wandb-internal hiccup (observed live: HandleAbandonedError
+    # from a run torn down during a pm2 restart) should cost that single call, not blind
+    # observability until the next scheduled restart (default 24h). Each failed call drops
+    # the run handle so the next call retries with a fresh _start_run(); only a streak of
+    # failures -- every one of which already got that fresh-run retry -- is treated as
+    # "wandb is fundamentally broken, stop trying".
+    _MAX_CONSECUTIVE_FAILURES = 3
+
     def __init__(
         self,
         *,
@@ -41,24 +50,43 @@ class WandbLogger:
         self._restart_interval_secs = max(restart_interval_hours, 0.0) * 3600.0
         self._run = None
         self._run_started_at = 0.0
+        self._consecutive_failures = 0
         if self.enabled:
             self._safe(self._start_run)
 
     # --- internals -----------------------------------------------------------------------
 
     def _safe(self, fn, *args, **kwargs):
-        """Run ``fn`` best-effort. Any exception disables further logging but never propagates
-        -- a wandb outage degrades to no-op observability, not a broken validator round."""
+        """Run ``fn`` best-effort. An exception never propagates -- a wandb outage degrades
+        to no-op observability, not a broken validator round. A single failure only skips
+        that call (the dead run handle is dropped so the next call starts fresh); logging
+        fully disables only after ``_MAX_CONSECUTIVE_FAILURES`` failures in a row."""
 
         if not self.enabled:
             return None
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - wandb must never crash/delay a round
-            print(f"[wandb] disabling logging after error: {exc!r}")
-            traceback.print_exc()
-            self.enabled = False
+            self._consecutive_failures += 1
+            # The run may be torn down/abandoned; drop it so the next call attempts a
+            # fresh _start_run() instead of re-poking a dead handle.
+            self._run = None
+            if self._consecutive_failures >= self._MAX_CONSECUTIVE_FAILURES:
+                print(
+                    f"[wandb] disabling logging after {self._consecutive_failures} "
+                    f"consecutive errors: {exc!r}"
+                )
+                traceback.print_exc()
+                self.enabled = False
+            else:
+                print(
+                    f"[wandb] call failed ({self._consecutive_failures}/"
+                    f"{self._MAX_CONSECUTIVE_FAILURES} consecutive), retrying with a "
+                    f"fresh run on the next call: {exc!r}"
+                )
             return None
+        self._consecutive_failures = 0
+        return result
 
     def _start_run(self) -> None:
         import wandb
@@ -101,7 +129,12 @@ class WandbLogger:
     def _log_impl(self, metrics: dict) -> None:
         import wandb
 
-        self._maybe_restart()
+        if self._run is None:
+            # No live run: either the previous call failed (handle dropped, issue #127) or
+            # the initial _start_run in __init__ failed -- retry from scratch here.
+            self._start_run()
+        else:
+            self._maybe_restart()
         if self._run is not None:
             wandb.log(metrics)
 
@@ -152,15 +185,20 @@ def build_round_metrics(
     winner_hotkey: str | None,
     winner_ratio: float | None,
     crown_changed: bool,
+    hotkey_to_uid: dict[str, int] | None = None,
 ) -> dict:
     """Flatten one eval round's outcomes into a wandb-loggable metrics dict.
 
     Pure formatting -- reads already-computed ``EvalOutcome``s, never recomputes or
-    influences scoring.
+    influences scoring. ``hotkey_to_uid`` (the metagraph's mapping, issue #126) labels each
+    hotkey-keyed entry with its UID so following along doesn't require manually
+    cross-referencing the metagraph; ``-1`` means unknown (no mapping supplied, or the
+    hotkey isn't currently registered).
     """
 
     from eval.scoring import source_ratio_breakdown, stream_ratio
 
+    hotkey_to_uid = hotkey_to_uid or {}
     metrics: dict = {
         "round/block": block,
         "round/baseline_ratio": baseline_ratio,
@@ -168,6 +206,7 @@ def build_round_metrics(
         "round/excluded_hotkeys_count": excluded_hotkeys_count,
         "round/commit_phase_seen_count": commit_phase_seen_count,
         "winner/hotkey": winner_hotkey or "",
+        "winner/uid": hotkey_to_uid.get(winner_hotkey, -1) if winner_hotkey else -1,
         "winner/ratio": winner_ratio if winner_ratio is not None else float("nan"),
         "winner/crown_changed": crown_changed,
     }
@@ -175,18 +214,32 @@ def build_round_metrics(
         score = outcome.score
         prefix = f"challenger/{hotkey}"
         breakdown = source_ratio_breakdown(outcome.results)
-        benchmark_ratios = [stream_ratio(r) for r in outcome.results if not r.scored]
+        # Benchmark-only streams reported per source (issue #139): a single averaged
+        # "enwik9_ratio" bucket would silently blend in the live stream's very different
+        # numbers -- the whole point of the live stream is seeing that gap.
+        benchmark_by_source: dict[str, list[float]] = {}
+        for r in outcome.results:
+            if not r.scored:
+                benchmark_by_source.setdefault(r.source or "benchmark", []).append(stream_ratio(r))
+        metrics[f"{prefix}/uid"] = hotkey_to_uid.get(hotkey, -1)
         metrics[f"{prefix}/ratio"] = score.ratio
         metrics[f"{prefix}/valid"] = score.valid
+        # The real infra/runner failure (e.g. docker pull denied), when the codec never ran
+        # at all -- distinguishes "host couldn't run it" from "codec produced wrong output"
+        # in the dashboard just like in the log summary (issue #127).
+        metrics[f"{prefix}/runner_error"] = outcome.error or ""
         metrics[f"{prefix}/roundtrip_ok"] = all(r.roundtrip_ok for r in outcome.results)
         metrics[f"{prefix}/throughput_bps_min"] = score.throughput_bps_min
         metrics[f"{prefix}/beats_baseline"] = bool(score.valid and score.ratio < baseline_ratio)
-        if "fineweb" in breakdown:
-            metrics[f"{prefix}/fineweb_ratio"] = breakdown["fineweb"]
-        if "pile" in breakdown:
-            metrics[f"{prefix}/pile_ratio"] = breakdown["pile"]
-        if benchmark_ratios:
-            metrics[f"{prefix}/enwik9_ratio"] = sum(benchmark_ratios) / len(benchmark_ratios)
+        # Log every scored source generically so corpus renames (e.g. the issue #112
+        # fineweb -> fineweb-edu switch, which silently dropped fineweb_ratio) can't
+        # desync this logger from live_corpus source labels again.
+        for source, source_ratio in breakdown.items():
+            key = source.replace("-", "_")
+            metrics[f"{prefix}/{key}_ratio"] = source_ratio
+        for source, ratios in benchmark_by_source.items():
+            key = source.replace("-", "_")
+            metrics[f"{prefix}/{key}_ratio"] = sum(ratios) / len(ratios)
     return metrics
 
 
@@ -197,15 +250,27 @@ def build_weights_metrics(
     is_burn_tempo: bool,
     uids: list[int],
     weights: list[float],
+    conviction: dict | None = None,
 ) -> dict:
     """Flatten a weight-setting decision into a wandb-loggable metrics dict (log only --
-    computed and applied identically whether or not this is ever called)."""
+    computed and applied identically whether or not this is ever called).
+
+    ``conviction`` is the per-winner Miner Conviction report (issue #141): earned/staked/
+    required_lock/compliant per winner hotkey, so any gating is explainable after the fact.
+    """
 
     nonzero = [(uid, round(w, 4)) for uid, w in zip(uids, weights) if w > 0]
-    return {
+    metrics = {
         "weights/block": block,
         "weights/tempo": tempo,
         "weights/is_burn_tempo": is_burn_tempo,
         "weights/nonzero_count": len(nonzero),
         "weights/nonzero": str(nonzero),
     }
+    for hotkey, entry in (conviction or {}).items():
+        prefix = f"conviction/{hotkey}"
+        metrics[f"{prefix}/earned"] = entry["earned"]
+        metrics[f"{prefix}/staked"] = entry["staked"]
+        metrics[f"{prefix}/required_lock"] = entry["required_lock"]
+        metrics[f"{prefix}/compliant"] = entry["compliant"]
+    return metrics

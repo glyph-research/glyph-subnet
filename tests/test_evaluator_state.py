@@ -133,3 +133,84 @@ def test_state_round_trip(tmp_path):
     assert reloaded.winner_history[0].commit_block == 100
     assert reloaded.last_round_outputs[0] == ("s0", 123, "abc")
     assert reloaded.excluded_hotkeys == {"hk_loser"}
+
+
+# --- codec reference links logged at eval start (issue #126) ----------------------------
+
+
+def test_evaluate_artifact_logs_the_repo_link_once_before_the_first_stream(caplog):
+    bt_logging.set_info()
+    provider = StaticLocalProvider(CORPUS)
+    specs = sample_source_streams(42, 0, provider.total_bytes, stream_bytes=4096, streams=2)
+    artifact = ArtifactRef("glyph/ref", "local", local_path=str(REFERENCE_CODEC))
+
+    evaluate_artifact(
+        LocalSubprocessRunner(), "hk_ref", artifact, provider, specs,
+        caps=ResourceCaps(), floor_bps=FLOOR, budget_secs=BUDGET,
+    )
+
+    out = caplog.text
+    assert out.count("https://huggingface.co/glyph/ref/tree/local") == 1
+    # identifying line comes before any per-stream output
+    assert out.index("https://huggingface.co/glyph/ref") < out.index("stream source-0 (1/2)")
+    assert "hub.docker.com" not in out  # reference codec pins no custom image
+
+
+def test_evaluate_artifact_logs_the_docker_hub_link_for_a_hub_hosted_custom_image(tmp_path, caplog):
+    bt_logging.set_info()
+    _broken_codec(tmp_path)
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    manifest["image"] = "someuser/somecodec@sha256:" + "a" * 64
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    provider = StaticLocalProvider(CORPUS)
+    specs = sample_source_streams(42, 0, provider.total_bytes, stream_bytes=4096, streams=1)
+
+    evaluate_artifact(
+        LocalSubprocessRunner(), "hk_img", ArtifactRef("t/broken", "local", local_path=str(tmp_path)),
+        provider, specs, caps=ResourceCaps(), floor_bps=FLOOR, budget_secs=BUDGET,
+    )
+
+    out = caplog.text
+    assert "image=someuser/somecodec@sha256:" in out
+    assert "https://hub.docker.com/r/someuser/somecodec" in out
+
+
+def test_evaluate_artifact_logs_no_docker_hub_link_for_a_registry_hosted_image(tmp_path, caplog):
+    # A ghcr.io/... (or any explicit-registry) reference is not a Docker Hub image; a
+    # hub.docker.com link would point at the wrong place. The raw pinned ref still shows.
+    bt_logging.set_info()
+    _broken_codec(tmp_path)
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    manifest["image"] = "ghcr.io/user/mycodec@sha256:" + "b" * 64
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    provider = StaticLocalProvider(CORPUS)
+    specs = sample_source_streams(42, 0, provider.total_bytes, stream_bytes=4096, streams=1)
+
+    evaluate_artifact(
+        LocalSubprocessRunner(), "hk_img", ArtifactRef("t/broken", "local", local_path=str(tmp_path)),
+        provider, specs, caps=ResourceCaps(), floor_bps=FLOOR, budget_secs=BUDGET,
+    )
+
+    out = caplog.text
+    assert "image=ghcr.io/user/mycodec@sha256:" in out
+    assert "hub.docker.com" not in out
+
+
+def test_evaluate_artifact_link_logging_never_raises_without_a_manifest(tmp_path, caplog):
+    # Display-only (issue #126): no local_path at all, or a local dir without a readable
+    # manifest.json, must never raise -- the repo link still logs, evaluation is unaffected.
+    bt_logging.set_info()
+    provider = StaticLocalProvider(CORPUS)
+
+    evaluate_artifact(  # no local_path on the ref (e.g. a remote-fetching runner)
+        LocalSubprocessRunner(), "hk_remote", ArtifactRef("a/b", "deadbeef"),
+        provider, [], caps=ResourceCaps(), floor_bps=FLOOR, budget_secs=BUDGET,
+    )
+    evaluate_artifact(  # local_path present but no manifest.json in it
+        LocalSubprocessRunner(), "hk_nomanifest", ArtifactRef("c/d", "cafebabe", local_path=str(tmp_path)),
+        provider, [], caps=ResourceCaps(), floor_bps=FLOOR, budget_secs=BUDGET,
+    )
+
+    out = caplog.text
+    assert "https://huggingface.co/a/b/tree/deadbeef" in out
+    assert "https://huggingface.co/c/d/tree/cafebabe" in out

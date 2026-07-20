@@ -31,7 +31,10 @@ REVEAL_PHASE_PREFIX = "g1r|"
 # every round; this exists purely as a cheap, auditable crown-change trail for
 # tooling/dashboards and a bootstrapping cross-check signal.
 WINNER_COMMITMENT_PREFIX = "g1w|"
-WINNER_COMMITMENT_VERSION = 1
+# v2 (issue #125): compact pipe form replacing the JSON payload, which exceeded Bittensor's
+# 128-byte commitment cap on every real hotkey and so never successfully published. The bump
+# guarantees any stray v1 payload can't be misparsed as the new shape.
+WINNER_COMMITMENT_VERSION = 2
 # On-chain, owner-controlled emergency burn override (issue #113): the subnet owner (whichever
 # hotkey currently occupies BURN_UID on the live metagraph) can publish {v, force_burn} on its
 # own commitment slot; force_burn=true makes every validator burn 100% every tempo regardless
@@ -59,6 +62,45 @@ COMMIT_PHASE_MAX_AGE_BLOCKS = 300
 # a local caching/performance tradeoff -- not consensus-critical, so it does not need to be
 # identical across validators. ~7200 blocks =~ 24h at ~12s/block.
 PRECHECK_FULL_RECHECK_INTERVAL_BLOCKS = 7200
+# Consecutive genuinely-404 prechecks (RepositoryNotFoundError/RevisionNotFoundError --
+# repo deleted, renamed, or made private; NOT transient network/5xx/rate-limit errors,
+# which never count and reset the streak) before the hotkey is added to
+# ``excluded_hotkeys`` and never rechecked (issue #128). Rounds run roughly every 20-40
+# minutes, so 12 consecutive 404s span ~4-8 hours of wall time -- enough to outlast a
+# multi-hour HF incident that somehow presented as clean 404s the whole way through,
+# while still stopping the wasted per-round refetch within a day. Purely a local
+# fetch-effort bound, not consensus-critical, so it need not match across validators.
+REPO_NOT_FOUND_EXCLUDE_STREAK = 12
+
+# --- Miner Conviction (issue #141) ----------------------------------------------
+# Winners must keep (most of) their cumulative alpha earnings staked to their hotkey to
+# receive incentive; the free allowance is max(10% x earned, 1000 alpha). See
+# core/conviction.py for the mechanism.
+CONVICTION_FREE_ALPHA = 1000.0
+CONVICTION_FREE_FRACTION = 0.10
+# Earnings ledgers accumulate from this block -- the tempo at which the current champion
+# (UID 122, putty77/glyph-qwen14) took the crown on 2026-07-16 (verified via archive
+# binary search: its incentive first became nonzero in (8631680, 8631711]). A single
+# protocol-wide origin, so every validator's ledger is identical regardless of when it
+# started or how long it was down (gaps backfill from the archive node on the same grid).
+CONVICTION_TRACKING_START_BLOCK = 8_631_680
+# Enforcement flips on at this block for every validator simultaneously; before it,
+# validators track earnings (warm ledgers) but never gate. Owner-set below the current
+# block (and the tracking start), so enforcement is live from the moment this code
+# deploys: winners whose staked alpha is below their required lock stop receiving
+# incentive at the next weight-setting until they restake.
+CONVICTION_ACTIVATION_BLOCK = 8_615_836
+# Deterministic backfill source for ledger gaps (validator downtime / fresh start).
+# Historical chain state is objective -- any honest archive returns identical data -- so
+# which endpoint an operator uses is purely a local preference, never consensus-relevant.
+ARCHIVE_CHAIN_ENDPOINT = "wss://archive.chain.opentensor.ai:443"
+# Faster paid alternative (issue #151): with a blockmachine API key configured
+# (BLOCKMACHINE_API_KEY env / --blockmachine-key-file, deployment-specific like
+# CHUTE_USERNAME), archive queries go here first at ~1-3s per metagraph-at-block vs
+# ~20-30s (and frequent overloads) on the public node. The key rides the query string
+# (?authorization=<key>) because bt.Subtensor websockets cannot set an Authorization
+# header; see chain.BittensorChain._archive_endpoints for the auth pitfalls.
+BLOCKMACHINE_RPC_ENDPOINT = "wss://rpc.blockmachine.io"
 
 # --- Rolling-winner policy -----------------------------------------------------
 # current winner / previous winner. Effective split after the temporal burn is
@@ -91,7 +133,29 @@ MAX_CHALLENGERS_PER_ROUND = 32
 # v2 (issue #112): shard-randomized corpus sampling, fineweb -> fineweb-edu (2x/1x mix),
 # retired pile shard 0 (burned range), flat-average scored_ratio. Invalidates every score
 # computed under the exploitable prefix-bounded sampler -- the exploiting champion included.
-SCORING_VERSION = 2
+# v3 (issue #136): contested rounds became a sequential gauntlet in commit order instead of
+# best-of-round -- who wins a multi-challenger round changes, so scores and one-shot
+# exclusions decided under the old ordering must not carry across the transition (validators
+# that evaluated the same round under different policies would otherwise disagree forever).
+SCORING_VERSION = 3
+
+# Score-preserving version transitions (issue #143). An entry here declares "this bump is
+# score-compatible: ordering/policy only, ratio semantics unchanged" -- older-version scores
+# evaluated BEFORE the listed block (and the exclusions decided alongside them) are
+# retained and directly comparable, so the bump does not force a full-board re-eval
+# (without an entry, a policy-only bump like v3 would wipe every score and exclusion and
+# turn the next round into hours of re-evaluation, for a bump that never touched ratio
+# semantics).
+#
+# GUARDRAIL: a bump that changes any scoring surface -- corpus sources/sampling, the
+# aggregation formula, validity gates, BASELINE_LEVEL -- MUST NOT get an entry here.
+# Absence of an entry keeps issue #104's wipe-all behavior, which is the correct (and only
+# safe) transition when old and new ratios don't mean the same thing.
+SCORING_VERSION_START_BLOCKS: dict[int, int] = {
+    # v2 -> v3 changed only contested-round promotion ordering (commit-order gauntlet,
+    # issue #136); scoring surfaces are byte-identical to v2. Block = implementation time.
+    3: 8_645_052,
+}
 
 # --- Per-source evaluation (issue #10; remixed by issue #112) -------------------
 # Score each miner on three 4 MiB windows: two random fineweb-edu windows and one pile
