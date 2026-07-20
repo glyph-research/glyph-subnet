@@ -338,3 +338,54 @@ def test_scoring_version_is_untouched_by_conviction():
     # bumped SCORING_VERSION (persisted scores/exclusions stay valid). 3 is issue #136's
     # commit-order-gauntlet bump, which landed independently of conviction.
     assert SCORING_VERSION == 3
+
+
+# --- backfill progress logging (issue #154) ----------------------------------------------
+
+
+def _progress_chain(*, key=None, emissions=None):
+    class _Chain:
+        config = type("Config", (), {"blockmachine_api_key": key})()
+
+        def emissions_by_hotkey(self, block):
+            return emissions or {}
+
+        def archive_emissions_by_hotkey(self, block):
+            return emissions or {}
+
+    return _Chain()
+
+
+def _run_catchup(state, chain, *, samples, caplog):
+    from bittensor.utils.btlogging import logging as bt_logging
+    from validator.service import _update_conviction_ledger
+
+    bt_logging.set_info()
+    state.conviction_ledger.last_block = START
+    _update_conviction_ledger(state, chain, START + samples * TEMPO, TEMPO)
+    return caplog.text
+
+
+def test_backfill_announces_source_and_logs_each_20_percent(caplog):
+    out = _run_catchup(ValidatorState(), _progress_chain(), samples=90, caplog=caplog)
+
+    assert out.count("backfilling ledger") == 1  # exactly one start line
+    assert f"from block {START:,} to {START + 90 * TEMPO:,} (90 tempo samples) via public archive node" in out
+    for pct, done in ((20, 18), (40, 36), (60, 54), (80, 72), (100, 90)):
+        assert f"backfill {pct}% ({done}/90 samples, at block {START + done * TEMPO:,}," in out
+    assert out.count("backfill ") == 5  # five progress lines, no more
+
+
+def test_backfill_start_line_names_blockmachine_and_never_the_key(caplog):
+    out = _run_catchup(ValidatorState(), _progress_chain(key="sekrit-key"), samples=10, caplog=caplog)
+
+    assert "via blockmachine RPC" in out
+    assert "sekrit-key" not in out
+
+
+def test_steady_state_single_sample_catchup_stays_quiet(caplog):
+    out = _run_catchup(ValidatorState(), _progress_chain(), samples=1, caplog=caplog)
+
+    assert "backfilling ledger" not in out
+    assert "backfill " not in out.replace("backfilling", "")
+    assert "ledger advanced 1 tempo(s)" in out  # the existing completion line is enough

@@ -77,6 +77,7 @@ def ledger_catchup(
     current_block: int,
     tempo: int,
     emissions_at,
+    on_applied=None,
 ) -> int:
     """Advance ``ledger`` to ``current_block``, one tempo-grid sample at a time.
 
@@ -85,14 +86,20 @@ def ledger_catchup(
     backfilling a gap or a fresh start. Returns the number of grid blocks accumulated.
     A raised exception leaves the ledger at the last fully-applied grid block, so the next
     catchup resumes exactly where this one stopped.
+
+    ``on_applied(done, total, grid_block)`` (optional) fires after each fully-applied grid
+    sample -- the caller's hook for progress logging (issue #154); this function itself
+    stays log-agnostic.
     """
 
     blocks = ledger_grid(ledger.last_block, current_block, tempo)
-    for block in blocks:
+    for index, block in enumerate(blocks, start=1):
         for hotkey, alpha in emissions_at(block).items():
             if alpha > 0:
                 ledger.earned[hotkey] = ledger.earned.get(hotkey, 0.0) + float(alpha)
         ledger.last_block = block
+        if on_applied is not None:
+            on_applied(index, len(blocks), block)
     return len(blocks)
 
 

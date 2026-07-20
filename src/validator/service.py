@@ -31,6 +31,7 @@ from core.constants import (
     COMMIT_PHASE_MAX_AGE_BLOCKS,
     COMMIT_POLL_INTERVAL_SECS,
     COMPRESS_BUDGET_SECS,
+    CONVICTION_TRACKING_START_BLOCK,
     DEFAULT_MAX_ARTIFACT_BYTES,
     DEFAULT_NETUID,
     DEFAULT_WIN_MARGIN,
@@ -48,7 +49,7 @@ from core.constants import (
     WINNER_LIMIT,
 )
 from core.log_config import add_logging_args
-from core.conviction import conviction_report, ledger_catchup
+from core.conviction import conviction_report, ledger_catchup, ledger_grid
 from core.state import (
     CommitmentState,
     ValidatorState,
@@ -638,8 +639,33 @@ def _update_conviction_ledger(state: ValidatorState, chain: BittensorChain, bloc
         return chain.archive_emissions_by_hotkey(grid_block)
 
     try:
+        # Backfill visibility (issue #154): a fresh sync is 40+ minutes of otherwise total
+        # silence on the public archive node -- announce it (preferred endpoint first, key
+        # never logged; per-query fallbacks already warn via #152) and log each 20% of the
+        # grid. The normal 1-sample steady-state catchup stays quiet.
+        grid = ledger_grid(state.conviction_ledger.last_block, block, tempo)
+        started = time.monotonic()
+        on_applied = None
+        if len(grid) > 1:
+            key = getattr(getattr(chain, "config", None), "blockmachine_api_key", None)
+            source = "blockmachine RPC" if key else "public archive node"
+            from_block = max(state.conviction_ledger.last_block, CONVICTION_TRACKING_START_BLOCK)
+            bt_logging.info(
+                f"conviction: backfilling ledger from block {from_block:,} to {grid[-1]:,} "
+                f"({len(grid)} tempo samples) via {source}"
+            )
+
+            def on_applied(done: int, total: int, grid_block: int) -> None:
+                fifths_now, fifths_before = done * 5 // total, (done - 1) * 5 // total
+                if fifths_now > fifths_before:
+                    bt_logging.info(
+                        f"conviction: backfill {fifths_now * 20}% ({done}/{total} samples, "
+                        f"at block {grid_block:,}, elapsed {int(time.monotonic() - started)}s)"
+                    )
+
         applied = ledger_catchup(
-            state.conviction_ledger, current_block=block, tempo=tempo, emissions_at=emissions_at
+            state.conviction_ledger, current_block=block, tempo=tempo,
+            emissions_at=emissions_at, on_applied=on_applied,
         )
         if applied:
             bt_logging.info(
