@@ -38,10 +38,10 @@ from core.constants import (
 def required_lock(earned: float) -> float:
     """Alpha that must remain staked to the winner's hotkey, given cumulative earnings.
 
-    ``min(0.90 x earned, earned - 1000)`` clamped at >= 0. Equivalently, the free
-    (unstaked-allowed) amount is ``max(10% x earned, 1000 alpha)``: young reigns
-    (< 1000 earned) keep everything liquid, [1000, 10000] keeps exactly 1000 free, and
-    above 10000 the 10% allowance takes over and grows with the reign.
+    ``min(0.80 x earned, earned - 1000)`` clamped at >= 0. Equivalently, the free
+    (unstaked-allowed) amount is ``max(20% x earned, 1000 alpha)``: young reigns
+    (< 1000 earned) keep everything liquid, [1000, 5000] keeps exactly 1000 free, and
+    above 5000 the 20% allowance takes over and grows with the reign.
     """
 
     return max(0.0, min((1.0 - CONVICTION_FREE_FRACTION) * earned, earned - CONVICTION_FREE_ALPHA))
