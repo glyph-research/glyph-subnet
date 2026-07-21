@@ -19,13 +19,13 @@ king-of-the-hill policy:
   (unlocked-allowed) amount is `max(20% of earned, 1000 α)`. A slot below its required
   lock earns nothing that tempo (its share burns, never reallocated to the other winner)
   and resumes automatically at the next weight-setting once enough is locked. Measured in
-  alpha on both sides; the crown itself is never affected. From block `8,740,000`
-  (`CONVICTION_LOCK_CHECK_START_BLOCK`) plain staked-but-unlocked alpha no longer counts:
-  locked mass is chain-enforced unstakeable, so exit follows the lock's decay schedule
-  (or a deliberate perpetual→decaying switch), never a cliff. Either lock mode satisfies
-  the gate — perpetual is the low-maintenance choice; a decaying lock gates again as it
-  decays below the line until re-locked. Until that block, raw staked alpha is the gated
-  quantity (v1 rule).
+  alpha on both sides; the crown itself is never affected. Plain staked-but-unlocked
+  alpha does **not** count (issue #162: enforcement is live — the announced
+  `CONVICTION_LOCK_CHECK_START_BLOCK` is behind the chain head): locked mass is
+  chain-enforced unstakeable, so exit follows the lock's decay schedule (or a deliberate
+  perpetual→decaying switch), never a cliff. Either lock mode satisfies the gate —
+  perpetual is the low-maintenance choice; a decaying lock gates again as it decays below
+  the line until re-locked.
 
 Score = compression ratio (compressed ÷ raw, lower is better) with a hard **bit-exact
 round-trip** gate. A challenger takes the crown only by beating the incumbent by `ε`

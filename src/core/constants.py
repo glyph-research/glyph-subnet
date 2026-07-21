@@ -97,12 +97,13 @@ CONVICTION_ACTIVATION_BLOCK = 8_615_836
 # alpha. Raw stake can be cliff-unstaked at any block -- observed live on 2026-07-21 when
 # the dethroned previous winner unstaked to zero and sold, losing only the 30% tail it no
 # longer valued. Locked mass is chain-enforced unstakeable; the only exits are its decay
-# schedule or a deliberate perpetual->decaying switch, never a cliff. Announced ahead
-# (~10 days from merge) so both winner slots can restake-and-lock; until this block v1's
-# staked-alpha rule applies unchanged, and it stays the per-tempo fallback if a
-# validator's lock query fails (locked <= staked always, so the fallback can never gate a
-# lock-compliant winner and still gates a fully-unstaked one).
-CONVICTION_LOCK_CHECK_START_BLOCK = 8_740_000
+# schedule or a deliberate perpetual->decaying switch, never a cliff. Owner-set at the
+# then-current block (issue #162, same pattern as CONVICTION_ACTIVATION_BLOCK above): the
+# lock requirement was already announced to miners, so enforcement is live from the first
+# weight-setting on this code -- no future switch block. v1's staked-alpha rule stays the
+# per-tempo fallback if a validator's lock query fails (locked <= staked always, so the
+# fallback can never gate a lock-compliant winner and still gates a fully-unstaked one).
+CONVICTION_LOCK_CHECK_START_BLOCK = 8_669_000
 # Deterministic backfill source for ledger gaps (validator downtime / fresh start).
 # Historical chain state is objective -- any honest archive returns identical data -- so
 # which endpoint an operator uses is purely a local preference, never consensus-relevant.
