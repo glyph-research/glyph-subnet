@@ -28,7 +28,7 @@ START = CONVICTION_TRACKING_START_BLOCK
 TEMPO = 360
 
 
-# --- required_lock boundaries (the 1000 / 10000 regimes) --------------------------------
+# --- required_lock boundaries (the 1000 / 5000 regimes) --------------------------------
 
 
 def test_required_lock_regimes_and_exact_boundaries():
@@ -36,10 +36,18 @@ def test_required_lock_regimes_and_exact_boundaries():
     assert required_lock(999) == 0.0  # young reign: everything liquid
     assert required_lock(1000) == 0.0  # exact boundary: still nothing locked
     assert required_lock(1001) == 1.0  # flat 1000-free plateau begins
-    assert required_lock(5000) == 4000.0
-    assert required_lock(10000) == 9000.0  # regimes meet exactly: 0.9*10000 == 10000-1000
-    assert required_lock(20000) == 18000.0  # 10% allowance: 2000 free, growing with reign
-    assert required_lock(100000) == 90000.0
+    assert required_lock(5000) == 4000.0  # regimes meet exactly: 0.8*5000 == 5000-1000
+    assert required_lock(10000) == 8000.0  # 20% allowance: 2000 free, growing with reign
+    assert required_lock(20000) == 16000.0
+    assert required_lock(100000) == 80000.0
+
+
+def test_free_fraction_is_the_owner_set_80_20_split():
+    # Issue #158: owner reduced the lock requirement from 90% to 80% of earned. Pinned so
+    # a silent revert of CONVICTION_FREE_FRACTION fails loudly, not just numerically.
+    from core.constants import CONVICTION_FREE_FRACTION
+
+    assert CONVICTION_FREE_FRACTION == 0.20
 
 
 def test_is_compliant_is_alpha_vs_alpha():
@@ -141,7 +149,7 @@ def test_report_gates_only_after_the_activation_block():
 
 def test_report_covers_both_winner_slots_independently():
     ledger = ConvictionLedger(earned={"champ": 20000.0, "prev": 20000.0})
-    staked = {"champ": 18000.0, "prev": 17999.0}
+    staked = {"champ": 16000.0, "prev": 15999.0}
     report = conviction_report(ledger, ["champ", "prev"], staked, block=CONVICTION_ACTIVATION_BLOCK)
     assert report["champ"]["compliant"] is True
     assert report["prev"]["compliant"] is False

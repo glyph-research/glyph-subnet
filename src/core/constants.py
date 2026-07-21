@@ -74,10 +74,12 @@ REPO_NOT_FOUND_EXCLUDE_STREAK = 12
 
 # --- Miner Conviction (issue #141) ----------------------------------------------
 # Winners must keep (most of) their cumulative alpha earnings staked to their hotkey to
-# receive incentive; the free allowance is max(10% x earned, 1000 alpha). See
+# receive incentive; the free allowance is max(20% x earned, 1000 alpha) (issue #158:
+# owner reduced the lock requirement from 90% to 80% of earned -- a pure relaxation, so
+# it takes effect with the release that carries it, no announced start block). See
 # core/conviction.py for the mechanism.
 CONVICTION_FREE_ALPHA = 1000.0
-CONVICTION_FREE_FRACTION = 0.10
+CONVICTION_FREE_FRACTION = 0.20
 # Earnings ledgers accumulate from this block -- the tempo at which the current champion
 # (UID 122, putty77/glyph-qwen14) took the crown on 2026-07-16 (verified via archive
 # binary search: its incentive first became nonzero in (8631680, 8631711]). A single
