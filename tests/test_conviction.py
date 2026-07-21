@@ -17,7 +17,7 @@ from core.conviction import (
     is_compliant,
     ledger_catchup,
     ledger_grid,
-    required_lock,
+    required_conviction,
 )
 from core.state import ValidatorState, load_state, save_state
 from core.wandb_logger import build_weights_metrics
@@ -28,18 +28,18 @@ START = CONVICTION_TRACKING_START_BLOCK
 TEMPO = 360
 
 
-# --- required_lock boundaries (the 1000 / 5000 regimes) --------------------------------
+# --- required_conviction boundaries (the 1000 / 5000 regimes) --------------------------------
 
 
-def test_required_lock_regimes_and_exact_boundaries():
-    assert required_lock(0) == 0.0
-    assert required_lock(999) == 0.0  # young reign: everything liquid
-    assert required_lock(1000) == 0.0  # exact boundary: still nothing locked
-    assert required_lock(1001) == 1.0  # flat 1000-free plateau begins
-    assert required_lock(5000) == 4000.0  # regimes meet exactly: 0.8*5000 == 5000-1000
-    assert required_lock(10000) == 8000.0  # 20% allowance: 2000 free, growing with reign
-    assert required_lock(20000) == 16000.0
-    assert required_lock(100000) == 80000.0
+def test_required_conviction_regimes_and_exact_boundaries():
+    assert required_conviction(0) == 0.0
+    assert required_conviction(999) == 0.0  # young reign: everything liquid
+    assert required_conviction(1000) == 0.0  # exact boundary: still nothing locked
+    assert required_conviction(1001) == 1.0  # flat 1000-free plateau begins
+    assert required_conviction(5000) == 4000.0  # regimes meet exactly: 0.8*5000 == 5000-1000
+    assert required_conviction(10000) == 8000.0  # 20% allowance: 2000 free, growing with reign
+    assert required_conviction(20000) == 16000.0
+    assert required_conviction(100000) == 80000.0
 
 
 def test_free_fraction_is_the_owner_set_80_20_split():
@@ -141,7 +141,7 @@ def test_report_gates_only_after_the_activation_block():
 
     before = conviction_report(ledger, ["champ"], staked, block=CONVICTION_ACTIVATION_BLOCK - 1)
     assert before["champ"]["compliant"] is True  # tracking only, no gating yet
-    assert before["champ"]["required_lock"] == 4000.0  # ledger already warm and reported
+    assert before["champ"]["required_conviction"] == 4000.0  # ledger already warm and reported
 
     after = conviction_report(ledger, ["champ"], staked, block=CONVICTION_ACTIVATION_BLOCK)
     assert after["champ"]["compliant"] is False
@@ -204,7 +204,7 @@ def test_burn_tempo_and_no_winner_paths_are_unaffected_by_gating():
 
 def test_build_weights_metrics_flattens_the_conviction_report():
     conviction = {
-        "champ": {"earned": 5000.0, "staked": 100.0, "required_lock": 4000.0, "compliant": False},
+        "champ": {"earned": 5000.0, "staked": 100.0, "required_conviction": 4000.0, "compliant": False},
     }
     metrics = build_weights_metrics(
         block=1, tempo=TEMPO, is_burn_tempo=False, uids=[0, 1], weights=[1.0, 0.0],
@@ -212,7 +212,7 @@ def test_build_weights_metrics_flattens_the_conviction_report():
     )
     assert metrics["conviction/champ/earned"] == 5000.0
     assert metrics["conviction/champ/staked"] == 100.0
-    assert metrics["conviction/champ/required_lock"] == 4000.0
+    assert metrics["conviction/champ/required_conviction"] == 4000.0
     assert metrics["conviction/champ/compliant"] is False
     # And without a report the metric shape is exactly the pre-#141 one.
     bare = build_weights_metrics(block=1, tempo=TEMPO, is_burn_tempo=False, uids=[0], weights=[1.0])
@@ -411,7 +411,7 @@ def test_lock_rule_pays_a_locked_winner_and_gates_staked_but_unlocked():
     staked = {"champ": 5000.0, "prev": 5000.0}  # both would satisfy v1's staked rule
     locked = {"champ": 4000.0, "prev": 0.0}  # but only champ actually locked
     report = conviction_report(
-        ledger, ["champ", "prev"], staked, block=LOCK_START, locked_by_hotkey=locked
+        ledger, ["champ", "prev"], staked, block=LOCK_START, conviction_by_hotkey=locked
     )
     assert report["champ"]["compliant"] is True
     # The v1 cliff-exit hole, pinned: fully staked but unlocked no longer satisfies the
@@ -423,11 +423,11 @@ def test_decaying_lock_gates_below_the_line_until_relocked():
     ledger = ConvictionLedger(earned={"champ": 5000.0})
     staked = {"champ": 5000.0}
     decayed = conviction_report(
-        ledger, ["champ"], staked, block=LOCK_START, locked_by_hotkey={"champ": 3999.99}
+        ledger, ["champ"], staked, block=LOCK_START, conviction_by_hotkey={"champ": 3999.99}
     )
     assert decayed["champ"]["compliant"] is False
     relocked = conviction_report(
-        ledger, ["champ"], staked, block=LOCK_START, locked_by_hotkey={"champ": 4000.0}
+        ledger, ["champ"], staked, block=LOCK_START, conviction_by_hotkey={"champ": 4000.0}
     )
     assert relocked["champ"]["compliant"] is True  # per-tempo re-check, reversible as ever
 
@@ -437,10 +437,10 @@ def test_staked_rule_applies_before_the_lock_check_start_block():
     # decides, while the lock is already reported so operators can watch winners lock up.
     ledger = ConvictionLedger(earned={"champ": 5000.0})
     report = conviction_report(
-        ledger, ["champ"], {"champ": 4000.0}, block=LOCK_START - 1, locked_by_hotkey={"champ": 0.0}
+        ledger, ["champ"], {"champ": 4000.0}, block=LOCK_START - 1, conviction_by_hotkey={"champ": 0.0}
     )
     assert report["champ"]["compliant"] is True
-    assert report["champ"]["locked"] == 0.0
+    assert report["champ"]["conviction"] == 0.0
 
 
 def test_lock_read_unavailable_falls_back_to_the_staked_rule():
@@ -449,11 +449,11 @@ def test_lock_read_unavailable_falls_back_to_the_staked_rule():
     ledger = ConvictionLedger(earned={"champ": 5000.0, "prev": 5000.0})
     staked = {"champ": 4000.0, "prev": 0.0}
     report = conviction_report(
-        ledger, ["champ", "prev"], staked, block=LOCK_START, locked_by_hotkey=None
+        ledger, ["champ", "prev"], staked, block=LOCK_START, conviction_by_hotkey=None
     )
     assert report["champ"]["compliant"] is True
     assert report["prev"]["compliant"] is False
-    assert report["champ"]["locked"] is None  # honestly absent, not fabricated as 0
+    assert report["champ"]["conviction"] is None  # honestly absent, not fabricated as 0
 
 
 def test_service_report_reads_locks_from_the_chain_and_survives_a_failed_read():
@@ -471,7 +471,7 @@ def test_service_report_reads_locks_from_the_chain_and_survives_a_failed_read():
             return {hotkey: 4000.0 for hotkey in hotkeys}
 
     report = _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
-    assert report["champ"]["locked"] == 4000.0
+    assert report["champ"]["conviction"] == 4000.0
     assert report["champ"]["compliant"] is True
 
     class _Broken:
@@ -479,19 +479,19 @@ def test_service_report_reads_locks_from_the_chain_and_survives_a_failed_read():
             raise ConnectionError("runtime api unavailable")
 
     fallback = _conviction_report_for_winners(state, metagraph, LOCK_START, _Broken())
-    assert fallback["champ"]["locked"] is None
+    assert fallback["champ"]["conviction"] is None
     assert fallback["champ"]["compliant"] is True  # staked-rule fallback, staked 5000 >= 4000
 
 
-def test_build_weights_metrics_logs_locked_only_when_the_read_was_available():
-    entry = {"earned": 5000.0, "staked": 5000.0, "required_lock": 4000.0, "compliant": True}
+def test_build_weights_metrics_logs_conviction_only_when_the_read_was_available():
+    entry = {"earned": 5000.0, "staked": 5000.0, "required_conviction": 4000.0, "compliant": True}
     with_lock = build_weights_metrics(
         block=1, tempo=TEMPO, is_burn_tempo=False, uids=[0], weights=[1.0],
-        conviction={"champ": dict(entry, locked=4000.0)},
+        conviction={"champ": dict(entry, conviction=4000.0)},
     )
-    assert with_lock["conviction/champ/locked"] == 4000.0
+    assert with_lock["conviction/champ/conviction"] == 4000.0
     without = build_weights_metrics(
         block=1, tempo=TEMPO, is_burn_tempo=False, uids=[0], weights=[1.0],
-        conviction={"champ": dict(entry, locked=None)},
+        conviction={"champ": dict(entry, conviction=None)},
     )
-    assert "conviction/champ/locked" not in without
+    assert "conviction/champ/conviction" not in without
