@@ -8,6 +8,13 @@ to the other winner, which would pay A for B's non-compliance). Reversible, not 
 restaking above the line restores incentive at the next weight-setting, and the crown
 itself is never affected.
 
+Conviction v1.1 (issue #156): from ``CONVICTION_LOCK_CHECK_START_BLOCK`` the gated
+quantity is the hotkey's chain-locked alpha (``btcli lock add``) instead of raw stake,
+closing the cliff-exit v1 left open (stake could be fully unstaked at any block, so a
+dethroned winner lost only future emission by dumping). The formula, both-slot gating,
+burn-not-reallocate, and per-tempo reversibility are all unchanged -- only the measured
+quantity is.
+
 Everything here is pure and unit-tested; consensus safety comes from every validator
 computing the identical ``earned`` ledger: one increment code path (``ledger_catchup``)
 sampling the chain's per-tempo emission on a fixed block grid anchored at
@@ -23,6 +30,7 @@ from core.constants import (
     CONVICTION_ACTIVATION_BLOCK,
     CONVICTION_FREE_ALPHA,
     CONVICTION_FREE_FRACTION,
+    CONVICTION_LOCK_CHECK_START_BLOCK,
     CONVICTION_TRACKING_START_BLOCK,
 )
 
@@ -109,23 +117,37 @@ def conviction_report(
     staked_by_hotkey: dict[str, float],
     *,
     block: int,
+    locked_by_hotkey: dict[str, float] | None = None,
 ) -> dict[str, dict]:
     """Per-winner compliance snapshot for this weight-setting.
 
     Before ``CONVICTION_ACTIVATION_BLOCK`` every winner reports (and is) compliant --
     ledgers warm up, nothing gates. ``compliant=False`` means the caller must move that
     slot's weight to the burn sink this tempo.
+
+    ``locked_by_hotkey`` is the hotkey's decay-adjusted chain-locked alpha (Conviction
+    v1.1, issue #156): from ``CONVICTION_LOCK_CHECK_START_BLOCK`` it replaces raw stake
+    as the gated quantity -- plain stake can be cliff-unstaked at any block, locked mass
+    cannot. ``None`` (caller's lock read unavailable) falls back to the v1 staked rule
+    for this tempo: since locked alpha is a subset of staked alpha, the fallback can
+    never gate a lock-compliant winner, and still gates a fully-unstaked one. Either
+    lock mode satisfies the gate; a decaying lock simply falls below the line as it
+    decays and gates until re-locked.
     """
 
     report: dict[str, dict] = {}
     active = block >= CONVICTION_ACTIVATION_BLOCK
+    lock_rule = block >= CONVICTION_LOCK_CHECK_START_BLOCK and locked_by_hotkey is not None
     for hotkey in winner_hotkeys:
         earned = ledger.earned.get(hotkey, 0.0)
         staked = staked_by_hotkey.get(hotkey, 0.0)
+        locked = locked_by_hotkey.get(hotkey, 0.0) if locked_by_hotkey is not None else None
+        measured = locked if lock_rule else staked
         report[hotkey] = {
             "earned": earned,
             "staked": staked,
+            "locked": locked,
             "required_lock": required_lock(earned),
-            "compliant": (not active) or is_compliant(earned, staked),
+            "compliant": (not active) or is_compliant(earned, measured),
         }
     return report

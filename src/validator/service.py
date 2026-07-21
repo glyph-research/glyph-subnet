@@ -679,7 +679,9 @@ def _update_conviction_ledger(state: ValidatorState, chain: BittensorChain, bloc
         )
 
 
-def _conviction_report_for_winners(state: ValidatorState, metagraph, block: int) -> dict[str, dict]:
+def _conviction_report_for_winners(
+    state: ValidatorState, metagraph, block: int, chain: BittensorChain | None = None
+) -> dict[str, dict]:
     """Compliance snapshot for the current winner slots, logged every weight-setting."""
 
     winners = [w.hotkey for w in state.winner_history[:WINNER_LIMIT]]
@@ -694,18 +696,38 @@ def _conviction_report_for_winners(state: ValidatorState, metagraph, block: int)
         if stakes is not None
         else {}
     )
-    report = conviction_report(state.conviction_ledger, winners, staked, block=block)
+    # Conviction v1.1 (issue #156): read the winners' chain-locked alpha whenever the
+    # chain supports it -- also before CONVICTION_LOCK_CHECK_START_BLOCK, so operators
+    # can watch winners lock up during the grace window. Best-effort: on failure the
+    # report falls back to the v1 staked rule for this tempo (locked <= staked always,
+    # so a lock-compliant winner can never be wrongly gated by the fallback).
+    locked = None
+    read_locked = getattr(chain, "locked_alpha_by_hotkey", None)
+    if winners and read_locked is not None:
+        try:
+            locked = read_locked(winners)
+        except Exception as exc:  # noqa: BLE001 - never block weight-setting
+            bt_logging.warning(
+                f"conviction: lock query failed -- gating on staked alpha this tempo "
+                f"(v1 rule): {exc}"
+            )
+    report = conviction_report(
+        state.conviction_ledger, winners, staked, block=block, locked_by_hotkey=locked
+    )
     for hotkey, entry in report.items():
+        locked_part = f" locked={entry['locked']:.1f}" if entry["locked"] is not None else ""
         line = (
-            f"conviction: {hotkey} earned={entry['earned']:.1f} staked={entry['staked']:.1f} "
-            f"required_lock={entry['required_lock']:.1f} compliant={entry['compliant']}"
+            f"conviction: {hotkey} earned={entry['earned']:.1f} staked={entry['staked']:.1f}"
+            f"{locked_part} required_lock={entry['required_lock']:.1f} "
+            f"compliant={entry['compliant']}"
         )
         if entry["compliant"]:
             bt_logging.info(line)
         else:
             bt_logging.warning(
-                f"{line} -- winner is below its required stake lock; its share burns this "
-                f"tempo and restores automatically once restaked (issue #141)"
+                f"{line} -- winner is below its required lock; its share burns this tempo "
+                f"and restores automatically once enough alpha is locked to the hotkey "
+                f"(`btcli lock add --netuid 117`, issues #141/#156)"
             )
     return report
 
@@ -1032,7 +1054,7 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         # Miner Conviction (issue #141): advance the earnings ledger, then gate any winner
         # whose staked alpha is below its required lock -- its share burns this tempo.
         _update_conviction_ledger(state, chain, block, tempo)
-        conviction = _conviction_report_for_winners(state, metagraph, block)
+        conviction = _conviction_report_for_winners(state, metagraph, block, chain)
         gated = {hotkey for hotkey, entry in conviction.items() if not entry["compliant"]}
 
         weights, burn = decide_weights(

@@ -7,6 +7,7 @@ crown untouched), activation gating, persistence, and observability.
 
 from core.constants import (
     CONVICTION_ACTIVATION_BLOCK,
+    CONVICTION_LOCK_CHECK_START_BLOCK,
     CONVICTION_TRACKING_START_BLOCK,
     SCORING_VERSION,
 )
@@ -389,3 +390,100 @@ def test_steady_state_single_sample_catchup_stays_quiet(caplog):
     assert "backfilling ledger" not in out
     assert "backfill " not in out.replace("backfilling", "")
     assert "ledger advanced 1 tempo(s)" in out  # the existing completion line is enough
+
+
+# --- v1.1: gate on chain-locked alpha, not raw stake (issue #156) ------------------------
+
+
+LOCK_START = CONVICTION_LOCK_CHECK_START_BLOCK
+
+
+def test_lock_rule_pays_a_locked_winner_and_gates_staked_but_unlocked():
+    ledger = ConvictionLedger(earned={"champ": 5000.0, "prev": 5000.0})
+    staked = {"champ": 5000.0, "prev": 5000.0}  # both would satisfy v1's staked rule
+    locked = {"champ": 4000.0, "prev": 0.0}  # but only champ actually locked
+    report = conviction_report(
+        ledger, ["champ", "prev"], staked, block=LOCK_START, locked_by_hotkey=locked
+    )
+    assert report["champ"]["compliant"] is True
+    # The v1 cliff-exit hole, pinned: fully staked but unlocked no longer satisfies the
+    # gate -- stake can be dumped at any block, locked mass cannot.
+    assert report["prev"]["compliant"] is False
+
+
+def test_decaying_lock_gates_below_the_line_until_relocked():
+    ledger = ConvictionLedger(earned={"champ": 5000.0})
+    staked = {"champ": 5000.0}
+    decayed = conviction_report(
+        ledger, ["champ"], staked, block=LOCK_START, locked_by_hotkey={"champ": 3999.99}
+    )
+    assert decayed["champ"]["compliant"] is False
+    relocked = conviction_report(
+        ledger, ["champ"], staked, block=LOCK_START, locked_by_hotkey={"champ": 4000.0}
+    )
+    assert relocked["champ"]["compliant"] is True  # per-tempo re-check, reversible as ever
+
+
+def test_staked_rule_applies_before_the_lock_check_start_block():
+    # Post-activation but pre-switch (the announced grace window): v1's staked rule still
+    # decides, while the lock is already reported so operators can watch winners lock up.
+    ledger = ConvictionLedger(earned={"champ": 5000.0})
+    report = conviction_report(
+        ledger, ["champ"], {"champ": 4000.0}, block=LOCK_START - 1, locked_by_hotkey={"champ": 0.0}
+    )
+    assert report["champ"]["compliant"] is True
+    assert report["champ"]["locked"] == 0.0
+
+
+def test_lock_read_unavailable_falls_back_to_the_staked_rule():
+    # locked <= staked always (locking requires the stake), so the fallback can never gate
+    # a lock-compliant winner -- and it still gates a fully-unstaked dumper.
+    ledger = ConvictionLedger(earned={"champ": 5000.0, "prev": 5000.0})
+    staked = {"champ": 4000.0, "prev": 0.0}
+    report = conviction_report(
+        ledger, ["champ", "prev"], staked, block=LOCK_START, locked_by_hotkey=None
+    )
+    assert report["champ"]["compliant"] is True
+    assert report["prev"]["compliant"] is False
+    assert report["champ"]["locked"] is None  # honestly absent, not fabricated as 0
+
+
+def test_service_report_reads_locks_from_the_chain_and_survives_a_failed_read():
+    from validator.service import _conviction_report_for_winners
+
+    state = ValidatorState()
+    state.winner_history = [
+        WinnerEntry(hotkey="champ", repo="c/r", revision="rev1", ratio=0.4, commit_block=10)
+    ]
+    state.conviction_ledger.earned["champ"] = 5000.0
+    metagraph = type("Metagraph", (), {"hotkeys": ["champ"], "alpha_stake": [5000.0]})()
+
+    class _Chain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            return {hotkey: 4000.0 for hotkey in hotkeys}
+
+    report = _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
+    assert report["champ"]["locked"] == 4000.0
+    assert report["champ"]["compliant"] is True
+
+    class _Broken:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            raise ConnectionError("runtime api unavailable")
+
+    fallback = _conviction_report_for_winners(state, metagraph, LOCK_START, _Broken())
+    assert fallback["champ"]["locked"] is None
+    assert fallback["champ"]["compliant"] is True  # staked-rule fallback, staked 5000 >= 4000
+
+
+def test_build_weights_metrics_logs_locked_only_when_the_read_was_available():
+    entry = {"earned": 5000.0, "staked": 5000.0, "required_lock": 4000.0, "compliant": True}
+    with_lock = build_weights_metrics(
+        block=1, tempo=TEMPO, is_burn_tempo=False, uids=[0], weights=[1.0],
+        conviction={"champ": dict(entry, locked=4000.0)},
+    )
+    assert with_lock["conviction/champ/locked"] == 4000.0
+    without = build_weights_metrics(
+        block=1, tempo=TEMPO, is_burn_tempo=False, uids=[0], weights=[1.0],
+        conviction={"champ": dict(entry, locked=None)},
+    )
+    assert "conviction/champ/locked" not in without
