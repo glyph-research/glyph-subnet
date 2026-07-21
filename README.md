@@ -14,11 +14,18 @@ king-of-the-hill policy:
   makes copy-cat validation strictly losing. **Currently enabled** network-wide
   (`core.constants.BURN_ENABLED = True`, issue #88) — see
   [docs/reign-and-burn.md](docs/reign-and-burn.md) for the current state and how to disable.
-- **Miner Conviction** (issue #141): a winner slot must keep its cumulative alpha earnings
-  staked to its hotkey — the free (unstaked-allowed) amount is `max(10% of earned, 1000 α)`.
-  A slot below its required lock earns nothing that tempo (its share burns, never
-  reallocated to the other winner) and resumes automatically at the next weight-setting
-  once restaked. Measured in alpha on both sides; the crown itself is never affected.
+- **Miner Conviction** (issues #141/#156): a winner slot must keep its cumulative alpha
+  earnings **chain-locked** to its hotkey (`btcli lock add --netuid 117 ...`) — the free
+  (unlocked-allowed) amount is `max(10% of earned, 1000 α)`. A slot below its required
+  lock earns nothing that tempo (its share burns, never reallocated to the other winner)
+  and resumes automatically at the next weight-setting once enough is locked. Measured in
+  alpha on both sides; the crown itself is never affected. From block `8,740,000`
+  (`CONVICTION_LOCK_CHECK_START_BLOCK`) plain staked-but-unlocked alpha no longer counts:
+  locked mass is chain-enforced unstakeable, so exit follows the lock's decay schedule
+  (or a deliberate perpetual→decaying switch), never a cliff. Either lock mode satisfies
+  the gate — perpetual is the low-maintenance choice; a decaying lock gates again as it
+  decays below the line until re-locked. Until that block, raw staked alpha is the gated
+  quantity (v1 rule).
 
 Score = compression ratio (compressed ÷ raw, lower is better) with a hard **bit-exact
 round-trip** gate. A challenger takes the crown only by beating the incumbent by `ε`

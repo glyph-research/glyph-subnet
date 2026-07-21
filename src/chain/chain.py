@@ -74,6 +74,23 @@ class BittensorChain:
         mg = self.subtensor.metagraph(netuid=self.config.netuid, block=block)
         return {hotkey: float(e) for hotkey, e in zip(mg.hotkeys, mg.emission)}
 
+    def locked_alpha_by_hotkey(self, hotkeys: list[str]) -> dict[str, float]:
+        """Decay-adjusted alpha locked on each hotkey (``btcli lock add`` /
+        ``SubtensorModule.lock_stake``) -- Conviction v1.1's gated quantity (issue #156).
+
+        ``StakeInfoRuntimeApi.get_hotkey_conviction`` is the hotkey-side aggregate across
+        all locking coldkeys (consistent with v1's any-coldkey stake rule), so no coldkey
+        enumeration is needed. It returns the decayed lock mass in rao (verified live on
+        netuid 117: exactly equal to the lock's stored ``locked_mass``), deterministic at
+        a given block, so every validator measures the same value. Only ever called for
+        the (at most two) winner slots per weight-setting.
+        """
+
+        return {
+            hotkey: float(self.subtensor.get_hotkey_conviction(hotkey, self.config.netuid)) / 1e9
+            for hotkey in hotkeys
+        }
+
     def _archive_endpoints(self) -> list[str]:
         """Ordered archive candidates for historical queries (issue #151): blockmachine
         (authenticated, ~1-3s per metagraph-at-block, Standard plan) first when a key is

@@ -239,3 +239,24 @@ def test_resolve_blockmachine_key_prefers_key_file_over_env(tmp_path, monkeypatc
     monkeypatch.delenv("BLOCKMACHINE_API_KEY", raising=False)
     args = type("Args", (), {"blockmachine_key_file": None})()
     assert resolve_blockmachine_key(args) is None
+
+
+# --- Conviction v1.1: hotkey-side locked-alpha read (issue #156) -------------------------
+
+
+def test_locked_alpha_by_hotkey_aggregates_per_hotkey_and_converts_rao_to_alpha():
+    chain = object.__new__(BittensorChain)
+    chain.config = type("Config", (), {"netuid": 117})()
+
+    class _Subtensor:
+        def get_hotkey_conviction(self, hotkey, netuid):
+            assert netuid == 117
+            # Runtime API returns the decayed lock mass in rao (verified live: exactly
+            # the lock's stored locked_mass); hk-b has never locked -> 0.0.
+            return {"hk-a": 27_681_451_239_434.0, "hk-b": 0.0}[hotkey]
+
+    chain.subtensor = _Subtensor()
+    assert chain.locked_alpha_by_hotkey(["hk-a", "hk-b"]) == {
+        "hk-a": 27_681.451239434,
+        "hk-b": 0.0,
+    }
