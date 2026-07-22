@@ -256,7 +256,7 @@ def build_weights_metrics(
     computed and applied identically whether or not this is ever called).
 
     ``conviction`` is the per-winner Miner Conviction report (issue #141): earned/staked/
-    locked/required_lock/compliant per winner hotkey, so any gating is explainable after
+    conviction/required_conviction/compliant per winner hotkey, so any gating is explainable after
     the fact. ``locked`` (Conviction v1.1, issue #156) is logged only when the chain-lock
     read was available that tempo.
     """
@@ -273,8 +273,8 @@ def build_weights_metrics(
         prefix = f"conviction/{hotkey}"
         metrics[f"{prefix}/earned"] = entry["earned"]
         metrics[f"{prefix}/staked"] = entry["staked"]
-        if entry.get("locked") is not None:
-            metrics[f"{prefix}/locked"] = entry["locked"]
-        metrics[f"{prefix}/required_lock"] = entry["required_lock"]
+        if entry.get("conviction") is not None:
+            metrics[f"{prefix}/conviction"] = entry["conviction"]
+        metrics[f"{prefix}/required_conviction"] = entry["required_conviction"]
         metrics[f"{prefix}/compliant"] = entry["compliant"]
     return metrics

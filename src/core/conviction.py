@@ -2,7 +2,7 @@
 
 41% of daily alpha flows to the two winner slots, and nothing else stops a long-reigning
 champion from market-selling the whole position at once (king-dump-and-exit). The gate:
-a winner hotkey whose total staked alpha falls below ``required_lock(earned)`` receives no
+a winner hotkey whose total staked alpha falls below ``required_conviction(earned)`` receives no
 incentive that tempo -- its share goes to the burn sink (owner-confirmed: never reallocated
 to the other winner, which would pay A for B's non-compliance). Reversible, not a verdict:
 restaking above the line restores incentive at the next weight-setting, and the crown
@@ -35,7 +35,7 @@ from core.constants import (
 )
 
 
-def required_lock(earned: float) -> float:
+def required_conviction(earned: float) -> float:
     """Alpha that must remain staked to the winner's hotkey, given cumulative earnings.
 
     ``min(0.80 x earned, earned - 1000)`` clamped at >= 0. Equivalently, the free
@@ -50,7 +50,7 @@ def required_lock(earned: float) -> float:
 def is_compliant(earned: float, staked: float) -> bool:
     """Alpha units on both sides -- price movement alone can never gate a compliant miner."""
 
-    return staked >= required_lock(earned)
+    return staked >= required_conviction(earned)
 
 
 class ConvictionLedger(BaseModel):
@@ -117,7 +117,7 @@ def conviction_report(
     staked_by_hotkey: dict[str, float],
     *,
     block: int,
-    locked_by_hotkey: dict[str, float] | None = None,
+    conviction_by_hotkey: dict[str, float] | None = None,
 ) -> dict[str, dict]:
     """Per-winner compliance snapshot for this weight-setting.
 
@@ -125,7 +125,7 @@ def conviction_report(
     ledgers warm up, nothing gates. ``compliant=False`` means the caller must move that
     slot's weight to the burn sink this tempo.
 
-    ``locked_by_hotkey`` is the hotkey's decay-adjusted chain-locked alpha (Conviction
+    ``conviction_by_hotkey`` is the hotkey's decay-adjusted chain-locked alpha (its conviction, in Bittensor's own naming) (Conviction
     v1.1, issue #156): from ``CONVICTION_LOCK_CHECK_START_BLOCK`` it replaces raw stake
     as the gated quantity -- plain stake can be cliff-unstaked at any block, locked mass
     cannot. ``None`` (caller's lock read unavailable) falls back to the v1 staked rule
@@ -137,17 +137,17 @@ def conviction_report(
 
     report: dict[str, dict] = {}
     active = block >= CONVICTION_ACTIVATION_BLOCK
-    lock_rule = block >= CONVICTION_LOCK_CHECK_START_BLOCK and locked_by_hotkey is not None
+    lock_rule = block >= CONVICTION_LOCK_CHECK_START_BLOCK and conviction_by_hotkey is not None
     for hotkey in winner_hotkeys:
         earned = ledger.earned.get(hotkey, 0.0)
         staked = staked_by_hotkey.get(hotkey, 0.0)
-        locked = locked_by_hotkey.get(hotkey, 0.0) if locked_by_hotkey is not None else None
-        measured = locked if lock_rule else staked
+        conviction = conviction_by_hotkey.get(hotkey, 0.0) if conviction_by_hotkey is not None else None
+        measured = conviction if lock_rule else staked
         report[hotkey] = {
             "earned": earned,
             "staked": staked,
-            "locked": locked,
-            "required_lock": required_lock(earned),
+            "conviction": conviction,
+            "required_conviction": required_conviction(earned),
             "compliant": (not active) or is_compliant(earned, measured),
         }
     return report

@@ -712,22 +712,24 @@ def _conviction_report_for_winners(
                 f"(v1 rule): {exc}"
             )
     report = conviction_report(
-        state.conviction_ledger, winners, staked, block=block, locked_by_hotkey=locked
+        state.conviction_ledger, winners, staked, block=block, conviction_by_hotkey=locked
     )
     for hotkey, entry in report.items():
-        locked_part = f" locked={entry['locked']:.1f}" if entry["locked"] is not None else ""
+        conviction_part = (
+            f" conviction={entry['conviction']:.1f}" if entry["conviction"] is not None else ""
+        )
         line = (
             f"conviction: {hotkey} earned={entry['earned']:.1f} staked={entry['staked']:.1f}"
-            f"{locked_part} required_lock={entry['required_lock']:.1f} "
+            f"{conviction_part} required_conviction={entry['required_conviction']:.1f} "
             f"compliant={entry['compliant']}"
         )
         if entry["compliant"]:
             bt_logging.info(line)
         else:
             bt_logging.warning(
-                f"{line} -- winner is below its required lock; its share burns this tempo "
-                f"and restores automatically once enough alpha is locked to the hotkey "
-                f"(`btcli lock add --netuid 117`, issues #141/#156)"
+                f"{line} -- winner is below its required conviction; its share burns this "
+                f"tempo and restores automatically once its conviction covers the "
+                f"requirement (`btcli lock add --netuid 117`, issues #141/#156)"
             )
     return report
 

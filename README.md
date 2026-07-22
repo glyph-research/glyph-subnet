@@ -17,7 +17,7 @@ king-of-the-hill policy:
 - **Miner Conviction** (issues #141/#156): a winner slot must keep its cumulative alpha
   earnings **chain-locked** to its hotkey (`btcli lock add --netuid 117 ...`) — the free
   (unlocked-allowed) amount is `max(20% of earned, 1000 α)`. A slot below its required
-  lock earns nothing that tempo (its share burns, never reallocated to the other winner)
+  conviction earns nothing that tempo (its share burns, never reallocated to the other winner)
   and resumes automatically at the next weight-setting once enough is locked. Measured in
   alpha on both sides; the crown itself is never affected. Plain staked-but-unlocked
   alpha does **not** count (issue #162: enforcement is live — the announced
