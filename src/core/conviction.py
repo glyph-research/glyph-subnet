@@ -124,18 +124,20 @@ def conviction_report(
     """Per-winner compliance snapshot for this weight-setting.
 
     Before ``CONVICTION_ACTIVATION_BLOCK`` every winner reports (and is) compliant --
-    ledgers warm up, nothing gates. ``compliant=False`` means the caller must move that
-    slot's weight to the remaining compliant winner slot(s) this tempo -- or to the burn
-    sink when no occupied slot is compliant (issue #166).
+    ledgers warm up, nothing gates. ``compliant=False`` means the caller must skip that
+    winner when picking payees, paying the next compliant entry down the retained history
+    instead and burning only when none qualifies (issue #170).
 
-    ``conviction_by_hotkey`` is the hotkey's decay-adjusted chain-locked alpha (its conviction, in Bittensor's own naming) (Conviction
-    v1.1, issue #156): from ``CONVICTION_LOCK_CHECK_START_BLOCK`` it replaces raw stake
-    as the gated quantity -- plain stake can be cliff-unstaked at any block, locked mass
-    cannot. ``None`` (caller's lock read unavailable) falls back to the v1 staked rule
-    for this tempo: since locked alpha is a subset of staked alpha, the fallback can
-    never gate a lock-compliant winner, and still gates a fully-unstaked one. Either
-    lock mode satisfies the gate; a decaying lock simply falls below the line as it
-    decays and gates until re-locked.
+    ``conviction_by_hotkey`` is the hotkey's decay-adjusted chain-locked alpha -- its
+    "conviction" in Bittensor's own naming (Conviction v1.1, issue #156): from
+    ``CONVICTION_LOCK_CHECK_START_BLOCK`` it replaces raw stake as the gated quantity,
+    since plain stake can be cliff-unstaked at any block and locked mass cannot. ``None``
+    -- either for the whole mapping or for a single hotkey's entry (issue #175's
+    per-hotkey read isolation) -- falls back to the v1 staked rule for exactly those
+    winners: locked alpha is a subset of staked alpha, so the fallback can never gate a
+    lock-compliant winner, and still gates a fully-unstaked one. Either lock mode
+    satisfies the gate; a decaying lock simply falls below the line as it decays and
+    gates until re-locked.
     """
 
     report: dict[str, dict] = {}
@@ -145,7 +147,9 @@ def conviction_report(
         earned = ledger.earned.get(hotkey, 0.0)
         staked = staked_by_hotkey.get(hotkey, 0.0)
         conviction = conviction_by_hotkey.get(hotkey, 0.0) if conviction_by_hotkey is not None else None
-        measured = conviction if lock_rule else staked
+        # A per-hotkey None means that hotkey's own read failed (issue #175); it falls back
+        # to the staked rule alone, while every other winner still gates on conviction.
+        measured = conviction if (lock_rule and conviction is not None) else staked
         report[hotkey] = {
             "earned": earned,
             "staked": staked,

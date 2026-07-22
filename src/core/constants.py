@@ -124,10 +124,14 @@ WINNER_LIMIT = 2  # paid slots per tempo
 # Retained winner-history depth (issue #170), deliberately deeper than the paid slots:
 # payment walks the history newest-first and pays the first WINNER_LIMIT entries that are
 # both eligible and conviction-compliant, so entries below the paid slots are the fallback
-# ladder that keeps emission flowing instead of burning. 5 is deep enough that burning
-# becomes rare, shallow enough that an ancient long-inactive winner is never paid.
+# ladder that keeps emission flowing instead of burning. Owner-set to 20 (issue #175,
+# from 5): deep enough that burning is close to a last resort. Owner-accepted consequence
+# of the depth: a fallback whose cumulative earned is below CONVICTION_FREE_ALPHA has
+# required_conviction == 0 and so is payable with nothing locked -- flowing beats burning,
+# and each such hotkey can collect at most CONVICTION_FREE_ALPHA before its own
+# requirement gates it (the ledger is permanent per hotkey).
 # Retention only -- the crown is always history[0] regardless of compliance.
-WINNER_HISTORY_DEPTH = 5
+WINNER_HISTORY_DEPTH = 20
 DEFAULT_WIN_MARGIN = 0.05  # epsilon: 5% relative ratio improvement required to dethrone
 
 # --- Codec artifact limits ------------------------------------------------------

@@ -570,21 +570,39 @@ def test_build_weights_metrics_logs_conviction_only_when_the_read_was_available(
     assert "conviction/champ/conviction" not in without
 
 
-def test_service_report_covers_every_retained_entry_not_just_the_paid_slots():
-    # issue #170: deeper entries' compliance is an input to payee selection, so the report
-    # (and the bounded chain read behind it) must span the whole retained history.
-    from core.constants import WINNER_HISTORY_DEPTH
-    from validator.service import _conviction_report_for_winners
+def _deep_state(earned_by_hotkey=None, depth=None):
+    """A retained history `depth` entries deep, with an optional per-hotkey earned ledger."""
 
+    from core.constants import WINNER_HISTORY_DEPTH
+
+    depth = depth or WINNER_HISTORY_DEPTH
     state = ValidatorState()
     state.winner_history = [
         WinnerEntry(hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4, commit_block=10)
-        for i in range(WINNER_HISTORY_DEPTH)
+        for i in range(depth)
     ]
+    state.conviction_ledger.earned.update(earned_by_hotkey or {})
     metagraph = type(
         "Metagraph", (),
-        {"hotkeys": [w.hotkey for w in state.winner_history], "alpha_stake": [0.0] * WINNER_HISTORY_DEPTH},
+        {"hotkeys": [w.hotkey for w in state.winner_history], "alpha_stake": [0.0] * depth},
     )()
+    return state, metagraph
+
+
+def test_history_depth_is_the_owner_set_twenty():
+    # Issue #175: owner deepened the fallback ladder 5 -> 20. Pinned so a silent revert
+    # fails loudly rather than only shortening the ladder in production.
+    from core.constants import WINNER_HISTORY_DEPTH
+
+    assert WINNER_HISTORY_DEPTH == 20
+
+
+def test_report_stops_reading_once_two_compliant_winners_are_found():
+    # issue #175: selection only needs WINNER_LIMIT compliant entries, so the steady state
+    # costs two chain reads no matter how deep retention goes.
+    from validator.service import _conviction_report_for_winners
+
+    state, metagraph = _deep_state()
     asked = []
 
     class _Chain:
@@ -593,5 +611,90 @@ def test_service_report_covers_every_retained_entry_not_just_the_paid_slots():
             return {hotkey: 0.0 for hotkey in hotkeys}
 
     report = _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
-    assert len(report) == WINNER_HISTORY_DEPTH
-    assert asked == [f"w{i}" for i in range(WINNER_HISTORY_DEPTH)]  # one bounded batch
+    assert asked == ["w0", "w1"]  # nothing below the two compliant winners was queried
+    assert list(report) == ["w0", "w1"]
+
+
+def test_report_walks_deeper_only_while_winners_are_gated():
+    # Three gated winners (earned above the free allowance, nothing locked) -> the walk
+    # pays for depth exactly as far as it must, then stops at the next two compliant.
+    from validator.service import _conviction_report_for_winners
+
+    state, metagraph = _deep_state({f"w{i}": 5000.0 for i in range(3)})
+    asked = []
+
+    class _Chain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            asked.extend(hotkeys)
+            return {hotkey: 0.0 for hotkey in hotkeys}
+
+    report = _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
+    assert asked == ["w0", "w1", "w2", "w3", "w4"]
+    assert [h for h, e in report.items() if not e["compliant"]] == ["w0", "w1", "w2"]
+    assert [h for h, e in report.items() if e["compliant"]] == ["w3", "w4"]
+
+
+def test_every_retained_entry_is_evaluated_when_all_are_gated():
+    from core.constants import WINNER_HISTORY_DEPTH
+    from core.weights import compute_weights
+    from validator.service import _conviction_report_for_winners
+
+    earned = {f"w{i}": 5000.0 for i in range(WINNER_HISTORY_DEPTH)}
+    state, metagraph = _deep_state(earned)
+
+    class _Chain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            return {hotkey: 0.0 for hotkey in hotkeys}
+
+    report = _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
+    assert len(report) == WINNER_HISTORY_DEPTH  # nothing compliant -> the full walk
+    gated = {hotkey for hotkey, entry in report.items() if not entry["compliant"]}
+    weights = compute_weights(
+        ["burn-sink", *metagraph.hotkeys], state.winner_history, is_burn_tempo=False,
+        gated_hotkeys=gated,
+    )
+    assert weights[0] == 1.0  # 20 gated entries and no fallback left -> burn
+
+
+def test_one_failed_lock_read_isolates_to_that_hotkey():
+    # issue #175: a single flaky query must not drop every winner to the staked rule --
+    # at depth 20 that would silently un-gate winners that genuinely have no lock.
+    from validator.service import _conviction_report_for_winners
+
+    # w0 has stake but no lock (so the staked rule would wrongly pass it), w1 is locked.
+    state, metagraph = _deep_state({"w0": 5000.0, "w1": 5000.0})
+    metagraph.alpha_stake = [9000.0] * len(metagraph.hotkeys)
+
+    class _FlakyChain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            if hotkeys == ["w1"]:
+                raise ConnectionError("runtime api hiccup")
+            return {hotkey: 0.0 for hotkey in hotkeys}
+
+    report = _conviction_report_for_winners(state, metagraph, LOCK_START, _FlakyChain())
+    assert report["w0"]["conviction"] == 0.0 and report["w0"]["compliant"] is False
+    # w1's own read failed -> staked rule for it alone (9000 staked >= 4000 required).
+    assert report["w1"]["conviction"] is None and report["w1"]["compliant"] is True
+
+
+def test_the_ladder_reaches_the_deepest_retained_entry():
+    # issue #175: with everything above it gated, the last retained entry is still paid --
+    # burning is the last resort, not the second one.
+    from core.constants import WINNER_HISTORY_DEPTH
+    from core.weights import compute_weights
+
+    history = [
+        WinnerEntry(hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4, commit_block=10)
+        for i in range(WINNER_HISTORY_DEPTH)
+    ]
+    hotkeys = ["burn-sink", *[w.hotkey for w in history]]
+    all_but_last = {f"w{i}" for i in range(WINNER_HISTORY_DEPTH - 1)}
+
+    weights = compute_weights(hotkeys, history, is_burn_tempo=False, gated_hotkeys=all_but_last)
+    assert weights[hotkeys.index(f"w{WINNER_HISTORY_DEPTH - 1}")] == 1.0
+    assert weights[0] == 0.0 and sum(weights) == 1.0
+
+    last_two = {f"w{i}" for i in range(WINNER_HISTORY_DEPTH - 2)}
+    pair = compute_weights(hotkeys, history, is_burn_tempo=False, gated_hotkeys=last_two)
+    assert pair[hotkeys.index(f"w{WINNER_HISTORY_DEPTH - 2}")] == 0.7
+    assert pair[hotkeys.index(f"w{WINNER_HISTORY_DEPTH - 1}")] == 0.3

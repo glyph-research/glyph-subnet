@@ -47,6 +47,7 @@ from core.constants import (
     THROUGHPUT_FLOOR_BPS,
     WINDOW_ANCHOR_BLOCK,
     WINNER_HISTORY_DEPTH,
+    WINNER_LIMIT,
 )
 from core.log_config import add_logging_args
 from core.conviction import conviction_report, ledger_catchup, ledger_grid
@@ -682,11 +683,22 @@ def _update_conviction_ledger(state: ValidatorState, chain: BittensorChain, bloc
 def _conviction_report_for_winners(
     state: ValidatorState, metagraph, block: int, chain: BittensorChain | None = None
 ) -> dict[str, dict]:
-    """Compliance snapshot for the current winner slots, logged every weight-setting."""
+    """Compliance snapshot for the winners this weight-setting actually needs, logged as
+    it goes.
 
-    # Every RETAINED entry, not just the paid slots (issue #170): compliance of the deeper
-    # fallback entries is an input to payee selection, so it must be evaluated here.
-    winners = [w.hotkey for w in state.winner_history[:WINNER_HISTORY_DEPTH]]
+    Walks the retained history newest-first exactly as payee selection does and stops as
+    soon as ``WINNER_LIMIT`` compliant winners have been found (issue #175): the entries
+    below them cannot be paid this tempo, so evaluating them would buy nothing. That keeps
+    the steady state at two chain reads no matter how deep the fallback ladder is, and
+    only pays for depth in the tempos where winners are actually gated. Entries not
+    reached are absent from the report, hence not in the caller's gated set -- which is
+    consistent, since selection stops at the same place.
+    """
+
+    # Ineligible entries (deregistered/excluded) are skipped without a chain read: they
+    # can never be paid, exactly as in select_payees. The burn sink needs no special case
+    # here -- compute_weights excludes it from payees regardless of what this reports.
+    eligible = set(metagraph.hotkeys)
     # The lock is alpha-only by design: on dTAO metagraphs S is the consensus stake weight
     # (alpha + tao-weighted root stake), so a winner could otherwise satisfy part of the
     # lock with root TAO. Prefer the pure per-hotkey alpha; S only as a fallback.
@@ -698,24 +710,40 @@ def _conviction_report_for_winners(
         if stakes is not None
         else {}
     )
-    # Conviction v1.1 (issue #156): read the winners' chain-locked alpha whenever the
-    # chain supports it -- also before CONVICTION_LOCK_CHECK_START_BLOCK, so operators
-    # can watch winners lock up during the grace window. Best-effort: on failure the
-    # report falls back to the v1 staked rule for this tempo (locked <= staked always,
-    # so a lock-compliant winner can never be wrongly gated by the fallback).
-    locked = None
     read_locked = getattr(chain, "locked_alpha_by_hotkey", None)
-    if winners and read_locked is not None:
-        try:
-            locked = read_locked(winners)
-        except Exception as exc:  # noqa: BLE001 - never block weight-setting
-            bt_logging.warning(
-                f"conviction: lock query failed -- gating on staked alpha this tempo "
-                f"(v1 rule): {exc}"
+
+    report: dict[str, dict] = {}
+    compliant_found = 0
+    for entry in state.winner_history[:WINNER_HISTORY_DEPTH]:
+        if entry.hotkey in report or entry.hotkey not in eligible:
+            continue
+        # Conviction v1.1 (issue #156): read this winner's chain-locked alpha whenever the
+        # chain supports it. Best-effort per hotkey (issue #175): a failed read leaves this
+        # one winner on the v1 staked rule (locked <= staked always, so the fallback can
+        # never wrongly gate a lock-compliant winner) without disturbing the others.
+        locked = None
+        if read_locked is not None:
+            try:
+                locked = read_locked([entry.hotkey])
+            except Exception as exc:  # noqa: BLE001 - never block weight-setting
+                bt_logging.warning(
+                    f"conviction: lock query failed for {entry.hotkey} -- gating it on "
+                    f"staked alpha this tempo (v1 rule): {exc}"
+                )
+        report.update(
+            conviction_report(
+                state.conviction_ledger,
+                [entry.hotkey],
+                staked,
+                block=block,
+                conviction_by_hotkey=locked,
             )
-    report = conviction_report(
-        state.conviction_ledger, winners, staked, block=block, conviction_by_hotkey=locked
-    )
+        )
+        if report[entry.hotkey]["compliant"]:
+            compliant_found += 1
+            if compliant_found == WINNER_LIMIT:
+                break
+
     for hotkey, entry in report.items():
         conviction_part = (
             f" conviction={entry['conviction']:.1f}" if entry["conviction"] is not None else ""
