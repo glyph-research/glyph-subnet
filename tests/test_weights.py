@@ -57,10 +57,16 @@ def test_rank_key_prefers_lower_ratio_then_earlier_block():
 
 # --- history compaction ----------------------------------------------------------
 
-def test_compact_history_dedup_and_limit_two():
+def test_compact_history_dedups_and_retains_to_the_history_depth():
+    # Issue #170: retention depth is deliberately deeper than the two paid slots -- the
+    # entries past them are the fallback ladder payment walks when a winner is gated.
+    from core.constants import WINNER_HISTORY_DEPTH
+
     history = [entry("a", 0.8), entry("a", 0.81), entry("b", 0.82), entry("c", 0.83)]
-    compacted = compact_history(history)
-    assert [e.hotkey for e in compacted] == ["a", "b"]
+    assert [e.hotkey for e in compact_history(history)] == ["a", "b", "c"]
+
+    deep = [entry(hotkey, 0.8) for hotkey in "abcdefg"]
+    assert len(compact_history(deep)) == WINNER_HISTORY_DEPTH == 5
 
 
 def test_promote_winner_pushes_previous_down():

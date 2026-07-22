@@ -1,9 +1,9 @@
 """issue #141: Miner Conviction -- winners must keep earnings staked to receive incentive.
 
 Covers the lock formula's boundaries, deterministic ledger accounting (gap backfill ==
-uninterrupted live tracking), gating semantics (reallocate to the compliant slot, burn
-only when every occupied slot fails -- issue #166; reversible; crown untouched),
-activation gating, persistence, and observability.
+uninterrupted live tracking), gating semantics (pay the two most recent compliant winners
+in the retained history, burn only when none qualifies -- issue #170; reversible; crown
+untouched), activation gating, persistence, and observability.
 """
 
 from core.constants import (
@@ -156,7 +156,7 @@ def test_report_covers_both_winner_slots_independently():
     assert report["prev"]["compliant"] is False
 
 
-# --- weights: gated share reallocates to the compliant slot, burns only when both fail ---
+# --- weights: pay the two most recent compliant winners, burn only if none qualify -------
 
 
 HOTKEYS = ["burn-sink", "champ", "prev", "bystander"]
@@ -166,27 +166,87 @@ HISTORY = [
 ]
 
 
-def test_gated_slot_share_reallocates_and_burns_only_when_both_fail():
-    # The issue #166 waterfall table, pinned exactly.
+def test_two_slot_history_pays_the_compliant_ones_and_burns_only_when_none_qualify():
+    # With exactly two retained entries the ladder degenerates to the #166 table.
     ungated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False)
-    assert ungated == [0.0, 0.7, 0.3, 0.0]  # (yes, yes): 0.7 / 0.3
+    assert ungated == [0.0, 0.7, 0.3, 0.0]
 
     prev_gated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"prev"})
-    assert prev_gated == [0.0, 1.0, 0.0, 0.0]  # (yes, no): champ takes the whole pot
+    assert prev_gated == [0.0, 1.0, 0.0, 0.0]  # champ is the only qualifier -> whole pot
 
     champ_gated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"champ"})
-    assert champ_gated == [0.0, 0.0, 1.0, 0.0]  # (no, yes): prev takes the whole pot
+    assert champ_gated == [0.0, 0.0, 1.0, 0.0]  # ladder shifts up: prev takes 1.0
 
     both = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"champ", "prev"})
-    assert both == [1.0, 0.0, 0.0, 0.0]  # (no, no): only now does the pot burn
+    assert both == [1.0, 0.0, 0.0, 0.0]  # nothing retained qualifies -> burn
 
 
-def test_single_occupied_slot_waterfall():
+LADDER_HOTKEYS = ["burn-sink", "w0", "w1", "w2", "w3", "bystander"]
+LADDER = [
+    WinnerEntry(hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4 + i / 100, commit_block=100 - i)
+    for i in range(4)
+]
+
+
+def test_the_ladder_walks_past_gated_winners_to_the_next_compliant_pair():
+    # issue #170: a gated current winner shifts the WHOLE ladder up rather than handing
+    # its share to the slot beside it.
+    assert compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False) == [0.0, 0.7, 0.3, 0.0, 0.0, 0.0]
+
+    top_gated = compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w0"})
+    assert top_gated == [0.0, 0.0, 0.7, 0.3, 0.0, 0.0]  # w1 -> 0.7, w2 -> 0.3
+
+    two_gated = compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w0", "w1"})
+    assert two_gated == [0.0, 0.0, 0.0, 0.7, 0.3, 0.0]  # w2 -> 0.7, w3 -> 0.3
+
+    # A gap in the middle is skipped, not collapsed onto one payee.
+    middle_gated = compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w1"})
+    assert middle_gated == [0.0, 0.7, 0.0, 0.3, 0.0, 0.0]
+
+    all_gated = compute_weights(
+        LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w0", "w1", "w2", "w3"}
+    )
+    assert all_gated == [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # only now does the pot burn
+
+
+def test_deregistered_fallback_entries_are_never_paid():
+    # Eligibility does real work here: a retained winner absent from the metagraph (or
+    # excluded) must be skipped exactly like a gated one, never selected as a payee.
+    without_w1 = ["burn-sink", "w0", "w2", "w3", "bystander"]
+    weights = compute_weights(without_w1, LADDER, is_burn_tempo=False, gated_hotkeys={"w0"})
+    assert weights == [0.0, 0.0, 0.7, 0.3, 0.0]  # w1 gone -> w2/w3 paid
+
+
+def test_every_payout_row_sums_to_exactly_one():
+    rows = [
+        compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False),
+        compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w0"}),
+        compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w0", "w1", "w2"}),
+        compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=True),
+        compute_weights(LADDER_HOTKEYS, [], is_burn_tempo=False),
+    ]
+    for row in rows:
+        assert sum(row) == 1.0  # exact, not approx: validators must agree bit-for-bit
+
+
+def test_single_retained_winner_takes_the_pot_or_burns():
     solo = [HISTORY[0]]
     compliant = compute_weights(HOTKEYS, solo, is_burn_tempo=False, gated_hotkeys=set())
-    assert compliant == [0.0, 1.0, 0.0, 0.0]  # full pot, as today
+    assert compliant == [0.0, 1.0, 0.0, 0.0]
     gated = compute_weights(HOTKEYS, solo, is_burn_tempo=False, gated_hotkeys={"champ"})
-    assert gated == [1.0, 0.0, 0.0, 0.0]  # no other slot to reallocate to -> burn
+    assert gated == [1.0, 0.0, 0.0, 0.0]  # nothing further down the ladder -> burn
+
+
+def test_a_dethroned_but_locked_winner_keeps_earning():
+    # The intended incentive (issue #170): staying compliant keeps paying you after you
+    # lose the crown -- w3 sits at the bottom of the ladder and is paid the moment the
+    # more recent winners lapse.
+    idle = compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False)
+    assert idle[4] == 0.0  # w3 earns nothing while the top of the ladder is compliant
+    lapsed = compute_weights(
+        LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w0", "w1", "w2"}
+    )
+    assert lapsed[4] == 1.0  # ... and takes the whole pot once they all lapse
 
 
 def test_gating_is_reversible_and_never_touches_the_crown():
@@ -508,3 +568,30 @@ def test_build_weights_metrics_logs_conviction_only_when_the_read_was_available(
         conviction={"champ": dict(entry, conviction=None)},
     )
     assert "conviction/champ/conviction" not in without
+
+
+def test_service_report_covers_every_retained_entry_not_just_the_paid_slots():
+    # issue #170: deeper entries' compliance is an input to payee selection, so the report
+    # (and the bounded chain read behind it) must span the whole retained history.
+    from core.constants import WINNER_HISTORY_DEPTH
+    from validator.service import _conviction_report_for_winners
+
+    state = ValidatorState()
+    state.winner_history = [
+        WinnerEntry(hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4, commit_block=10)
+        for i in range(WINNER_HISTORY_DEPTH)
+    ]
+    metagraph = type(
+        "Metagraph", (),
+        {"hotkeys": [w.hotkey for w in state.winner_history], "alpha_stake": [0.0] * WINNER_HISTORY_DEPTH},
+    )()
+    asked = []
+
+    class _Chain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            asked.extend(hotkeys)
+            return {hotkey: 0.0 for hotkey in hotkeys}
+
+    report = _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
+    assert len(report) == WINNER_HISTORY_DEPTH
+    assert asked == [f"w{i}" for i in range(WINNER_HISTORY_DEPTH)]  # one bounded batch

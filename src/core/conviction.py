@@ -3,10 +3,10 @@
 41% of daily alpha flows to the two winner slots, and nothing else stops a long-reigning
 champion from market-selling the whole position at once (king-dump-and-exit). The gate:
 a winner hotkey whose total staked alpha falls below ``required_conviction(earned)`` receives no
-incentive that tempo -- its share reallocates to the compliant winner slot, burning only
-when no occupied slot meets its requirement (issue #166 superseded v1's burn-on-any-failure:
-neither slot has a lever over the other's conviction, so reallocation is not an attack
-surface). Reversible, not a verdict:
+incentive that tempo -- the pot goes to the two most recent compliant winners in the
+retained history and burns only when none of them qualifies (issue #170, generalizing
+#166's two-slot reallocation: no winner has a lever over another's conviction, so paying
+down the ladder is not an attack surface). Reversible, not a verdict:
 restaking above the line restores incentive at the next weight-setting, and the crown
 itself is never affected.
 
