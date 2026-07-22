@@ -118,7 +118,7 @@ BLOCKMACHINE_RPC_ENDPOINT = "wss://rpc.blockmachine.io"
 
 # --- Rolling-winner policy -----------------------------------------------------
 # current winner / previous winner. Effective split after the temporal burn is
-# 52.5% / 22.5% / 25% burned (see burn_schedule).
+# 63% / 27% / 10% burned (see burn_schedule; issue #168 widened the window 4 -> 10).
 WINNER_WEIGHTS = (0.70, 0.30)
 WINNER_LIMIT = 2
 DEFAULT_WIN_MARGIN = 0.05  # epsilon: 5% relative ratio improvement required to dethrone
@@ -197,15 +197,17 @@ COMPRESS_BUDGET_SECS = 450.0
 BASELINE_LEVEL = 19  # zstd -19: the vacant-crown floor a codec must beat
 
 # --- Temporal burn schedule ------------------------------------------------------
-# 25% daily burn applied temporally: 1 unpredictable tempo per 4-tempo window
-# sets weights 100% to BURN_UID.
-BURN_WINDOW_TEMPOS = 4
+# 10% daily burn applied temporally: 1 unpredictable tempo per 10-tempo window
+# sets weights 100% to BURN_UID (issue #168: owner reduced the cadence from 1-in-4;
+# a weight-copier is still guaranteed wrong once per window at an unpredictable
+# position -- detection is less frequent, each hit costs the same).
+BURN_WINDOW_TEMPOS = 10
 BURN_UID = 0
 # Network-wide on/off switch for the temporal burn feature. Disabled at launch (issue #43),
 # re-enabled (issue #88) after a live weight-copier (mirroring the validator's exact weight
 # vector without running the real evaluation) was observed on netuid 117 -- the burn-tempo
 # schedule is exactly the anti-copy signal that punishes this. With this True, the burn
-# position each window (H(S || window) mod 4, see burn_schedule.py) sets weights 100% to
+# position each window (H(S || window) mod BURN_WINDOW_TEMPOS, see burn_schedule.py) sets weights 100% to
 # BURN_UID; a copier that never evaluates cannot compute S and diverges maximally on the
 # tempos it gets wrong. Burn-tempo alignment feeds consensus, so -- same rationale as
 # WINDOW_ANCHOR_BLOCK -- this MUST be identical on every validator and is a committed

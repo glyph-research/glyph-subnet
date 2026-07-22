@@ -463,7 +463,9 @@ def test_reveal_without_observed_commit_phase_falls_back_to_current_block(monkey
 # --- temporal burn weights ------------------------------------------------------
 
 def _window_blocks():
-    return [i * TEMPO for i in range(4)]
+    from core.constants import BURN_WINDOW_TEMPOS
+
+    return [i * TEMPO for i in range(BURN_WINDOW_TEMPOS)]
 
 
 def test_burn_enabled_by_default_gives_exactly_one_burn_tempo_per_window():

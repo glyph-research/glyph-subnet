@@ -1198,8 +1198,10 @@ def run_offline_demo(args: argparse.Namespace) -> None:
 
     last_round_outputs = outcomes[history[0].hotkey].burn_outputs() if history else []
     bt_logging.info(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in history]}")
-    bt_logging.info("temporal burn schedule (two 4-tempo windows):")
-    for tempo_idx in range(8):
+    from core.constants import BURN_WINDOW_TEMPOS
+
+    bt_logging.info(f"temporal burn schedule (two {BURN_WINDOW_TEMPOS}-tempo windows):")
+    for tempo_idx in range(2 * BURN_WINDOW_TEMPOS):
         block = tempo_idx * 360
         weights, burn = decide_weights(
             hotkeys, history, block=block, tempo=360, last_round_outputs=last_round_outputs, anchor=0

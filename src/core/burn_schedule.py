@@ -1,7 +1,7 @@
 """Temporal burn schedule.
 
-25% daily burn, applied temporally rather than as a static weight carve-out: tempos are
-grouped into windows of ``BURN_WINDOW_TEMPOS`` (4). Exactly one tempo per window is a
+10% daily burn, applied temporally rather than as a static weight carve-out: tempos are
+grouped into windows of ``BURN_WINDOW_TEMPOS`` (10). Exactly one tempo per window is a
 burn tempo at an unpredictable position derived from a seed ``S`` that comes from the
 most recent challenge round's evaluation outputs -- so only validators that actually ran
 (or replayed) the jobs can compute the schedule. Combined with native commit-reveal
