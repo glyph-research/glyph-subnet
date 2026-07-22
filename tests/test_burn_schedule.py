@@ -43,7 +43,7 @@ def test_tempo_and_window_index():
     assert tempo_index(TEMPO, TEMPO, ANCHOR) == 1
     assert tempo_index(5 * TEMPO, TEMPO, ANCHOR) == 5
     assert window_index(0, TEMPO, ANCHOR) == 0
-    assert window_index(4 * TEMPO, TEMPO, ANCHOR) == 1
+    assert window_index(BURN_WINDOW_TEMPOS * TEMPO, TEMPO, ANCHOR) == 1
 
 
 def test_burn_position_in_range():
@@ -78,3 +78,9 @@ def test_different_seed_diverges_somewhere():
     sched_true = [is_burn_tempo(b, TEMPO, seed_true, ANCHOR) for b in blocks]
     sched_guess = [is_burn_tempo(b, TEMPO, seed_guess, ANCHOR) for b in blocks]
     assert sched_true != sched_guess
+
+
+def test_burn_window_is_the_owner_set_ten_tempo_window():
+    # Issue #168: owner widened the window from 4 to 10 (25% -> 10% effective burn).
+    # Pinned so a silent revert fails loudly, not just arithmetically.
+    assert BURN_WINDOW_TEMPOS == 10

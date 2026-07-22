@@ -10,7 +10,7 @@ secondary path — see [docs/VALIDATING.md](docs/VALIDATING.md)), and set weight
 king-of-the-hill policy:
 
 - current winner: `70%` · previous winner: `30%`
-- plus a `25%` **temporal burn** (one unpredictable tempo per 4-tempo window → UID 0) that
+- plus a `10%` **temporal burn** (one unpredictable tempo per 10-tempo window → UID 0) that
   makes copy-cat validation strictly losing. **Currently enabled** network-wide
   (`core.constants.BURN_ENABLED = True`, issue #88) — see
   [docs/reign-and-burn.md](docs/reign-and-burn.md) for the current state and how to disable.
