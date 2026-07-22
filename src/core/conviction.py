@@ -3,8 +3,10 @@
 41% of daily alpha flows to the two winner slots, and nothing else stops a long-reigning
 champion from market-selling the whole position at once (king-dump-and-exit). The gate:
 a winner hotkey whose total staked alpha falls below ``required_conviction(earned)`` receives no
-incentive that tempo -- its share goes to the burn sink (owner-confirmed: never reallocated
-to the other winner, which would pay A for B's non-compliance). Reversible, not a verdict:
+incentive that tempo -- its share reallocates to the compliant winner slot, burning only
+when no occupied slot meets its requirement (issue #166 superseded v1's burn-on-any-failure:
+neither slot has a lever over the other's conviction, so reallocation is not an attack
+surface). Reversible, not a verdict:
 restaking above the line restores incentive at the next weight-setting, and the crown
 itself is never affected.
 
@@ -12,7 +14,7 @@ Conviction v1.1 (issue #156): from ``CONVICTION_LOCK_CHECK_START_BLOCK`` the gat
 quantity is the hotkey's chain-locked alpha (``btcli lock add``) instead of raw stake,
 closing the cliff-exit v1 left open (stake could be fully unstaked at any block, so a
 dethroned winner lost only future emission by dumping). The formula, both-slot gating,
-burn-not-reallocate, and per-tempo reversibility are all unchanged -- only the measured
+gating waterfall, and per-tempo reversibility are all unchanged -- only the measured
 quantity is.
 
 Everything here is pure and unit-tested; consensus safety comes from every validator
@@ -123,7 +125,8 @@ def conviction_report(
 
     Before ``CONVICTION_ACTIVATION_BLOCK`` every winner reports (and is) compliant --
     ledgers warm up, nothing gates. ``compliant=False`` means the caller must move that
-    slot's weight to the burn sink this tempo.
+    slot's weight to the remaining compliant winner slot(s) this tempo -- or to the burn
+    sink when no occupied slot is compliant (issue #166).
 
     ``conviction_by_hotkey`` is the hotkey's decay-adjusted chain-locked alpha (its conviction, in Bittensor's own naming) (Conviction
     v1.1, issue #156): from ``CONVICTION_LOCK_CHECK_START_BLOCK`` it replaces raw stake

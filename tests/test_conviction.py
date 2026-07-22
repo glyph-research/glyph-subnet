@@ -1,8 +1,9 @@
 """issue #141: Miner Conviction -- winners must keep earnings staked to receive incentive.
 
 Covers the lock formula's boundaries, deterministic ledger accounting (gap backfill ==
-uninterrupted live tracking), gating semantics (burned, never reallocated; reversible;
-crown untouched), activation gating, persistence, and observability.
+uninterrupted live tracking), gating semantics (reallocate to the compliant slot, burn
+only when every occupied slot fails -- issue #166; reversible; crown untouched),
+activation gating, persistence, and observability.
 """
 
 from core.constants import (
@@ -155,7 +156,7 @@ def test_report_covers_both_winner_slots_independently():
     assert report["prev"]["compliant"] is False
 
 
-# --- weights: gated share burns, never reallocates; reversible; crown untouched ----------
+# --- weights: gated share reallocates to the compliant slot, burns only when both fail ---
 
 
 HOTKEYS = ["burn-sink", "champ", "prev", "bystander"]
@@ -165,15 +166,27 @@ HISTORY = [
 ]
 
 
-def test_gated_winner_share_burns_and_the_other_winner_is_unchanged():
+def test_gated_slot_share_reallocates_and_burns_only_when_both_fail():
+    # The issue #166 waterfall table, pinned exactly.
     ungated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False)
-    assert ungated == [0.0, 0.7, 0.3, 0.0]
+    assert ungated == [0.0, 0.7, 0.3, 0.0]  # (yes, yes): 0.7 / 0.3
 
-    gated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"prev"})
-    assert gated == [0.3, 0.7, 0.0, 0.0]  # prev's share burned, champ NOT paid extra
+    prev_gated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"prev"})
+    assert prev_gated == [0.0, 1.0, 0.0, 0.0]  # (yes, no): champ takes the whole pot
+
+    champ_gated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"champ"})
+    assert champ_gated == [0.0, 0.0, 1.0, 0.0]  # (no, yes): prev takes the whole pot
 
     both = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"champ", "prev"})
-    assert both == [1.0, 0.0, 0.0, 0.0]
+    assert both == [1.0, 0.0, 0.0, 0.0]  # (no, no): only now does the pot burn
+
+
+def test_single_occupied_slot_waterfall():
+    solo = [HISTORY[0]]
+    compliant = compute_weights(HOTKEYS, solo, is_burn_tempo=False, gated_hotkeys=set())
+    assert compliant == [0.0, 1.0, 0.0, 0.0]  # full pot, as today
+    gated = compute_weights(HOTKEYS, solo, is_burn_tempo=False, gated_hotkeys={"champ"})
+    assert gated == [1.0, 0.0, 0.0, 0.0]  # no other slot to reallocate to -> burn
 
 
 def test_gating_is_reversible_and_never_touches_the_crown():

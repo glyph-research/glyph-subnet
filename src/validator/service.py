@@ -727,9 +727,10 @@ def _conviction_report_for_winners(
             bt_logging.info(line)
         else:
             bt_logging.warning(
-                f"{line} -- winner is below its required conviction; its share burns this "
-                f"tempo and restores automatically once its conviction covers the "
-                f"requirement (`btcli lock add --netuid 117`, issues #141/#156)"
+                f"{line} -- winner is below its required conviction; its share goes to the "
+                f"other winner slot this tempo (or burns if no slot meets its conviction) "
+                f"and restores automatically once its conviction covers the requirement "
+                f"(`btcli lock add --netuid 117`, issues #141/#166)"
             )
     return report
 
@@ -1053,8 +1054,9 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
                 "(owner emergency override: on-chain force_burn=true) -- burning 100% this tempo"
             )
 
-        # Miner Conviction (issue #141): advance the earnings ledger, then gate any winner
-        # whose staked alpha is below its required lock -- its share burns this tempo.
+        # Miner Conviction (issues #141/#166): advance the earnings ledger, then gate any
+        # winner below its required conviction -- its share goes to the compliant winner
+        # slot(s), burning only when all occupied slots are gated.
         _update_conviction_ledger(state, chain, block, tempo)
         conviction = _conviction_report_for_winners(state, metagraph, block, chain)
         gated = {hotkey for hotkey, entry in conviction.items() if not entry["compliant"]}
