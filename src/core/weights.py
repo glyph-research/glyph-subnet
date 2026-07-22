@@ -125,11 +125,14 @@ def compute_weights(
     weight follows the rolling 70/30 winners; if there is no eligible winner yet the
     emission is burned rather than spread arbitrarily.
 
-    ``gated_hotkeys`` (Miner Conviction, issue #141): winners whose staked alpha is below
-    their required lock this tempo. A gated slot's share moves to the burn sink -- never to
-    the other winner, which would pay A for B's non-compliance and create an incentive to
-    keep a rival gated. Reversible by construction: the slot itself is untouched, so a
-    restaked winner earns again at the next weight-setting.
+    ``gated_hotkeys`` (Miner Conviction, issues #141/#166): winners whose conviction is
+    below the requirement this tempo. A gated slot's share reallocates to the remaining
+    compliant winner slot(s), renormalized over them; only when every occupied slot is
+    gated does the whole winner pot burn (owner decision, issue #166: neither slot has
+    any lever over the other's conviction -- compliance is purely the other party's own
+    lock -- so reallocation is not an attack surface, and emission keeps flowing to
+    compliant winners instead of burning). Reversible by construction: the slot itself is
+    untouched, so a winner earns again at the next weight-setting after locking.
     """
 
     if not 0 <= burn_uid < len(hotkeys):
@@ -154,8 +157,16 @@ def compute_weights(
         return weights
     weights = [weight / total for weight in weights]
     if gated_hotkeys:
+        gated_mass = 0.0
         for index, hotkey in enumerate(hotkeys):
             if hotkey in gated_hotkeys and index != burn_uid and weights[index] > 0:
-                weights[burn_uid] += weights[index]
+                gated_mass += weights[index]
                 weights[index] = 0.0
+        if gated_mass > 0:
+            remaining = sum(w for i, w in enumerate(weights) if i != burn_uid)
+            if remaining > 0:
+                scale = (remaining + gated_mass) / remaining
+                weights = [w * scale if i != burn_uid else w for i, w in enumerate(weights)]
+            else:
+                weights[burn_uid] += gated_mass
     return weights

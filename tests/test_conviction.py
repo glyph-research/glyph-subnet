@@ -1,12 +1,14 @@
 """issue #141: Miner Conviction -- winners must keep earnings staked to receive incentive.
 
 Covers the lock formula's boundaries, deterministic ledger accounting (gap backfill ==
-uninterrupted live tracking), gating semantics (burned, never reallocated; reversible;
-crown untouched), activation gating, persistence, and observability.
+uninterrupted live tracking), gating semantics (reallocate to the compliant slot, burn
+only when every occupied slot fails -- issue #166; reversible; crown untouched),
+activation gating, persistence, and observability.
 """
 
 from core.constants import (
     CONVICTION_ACTIVATION_BLOCK,
+    CONVICTION_LOCK_CHECK_START_BLOCK,
     CONVICTION_TRACKING_START_BLOCK,
     SCORING_VERSION,
 )
@@ -16,7 +18,7 @@ from core.conviction import (
     is_compliant,
     ledger_catchup,
     ledger_grid,
-    required_lock,
+    required_conviction,
 )
 from core.state import ValidatorState, load_state, save_state
 from core.wandb_logger import build_weights_metrics
@@ -27,18 +29,26 @@ START = CONVICTION_TRACKING_START_BLOCK
 TEMPO = 360
 
 
-# --- required_lock boundaries (the 1000 / 10000 regimes) --------------------------------
+# --- required_conviction boundaries (the 1000 / 5000 regimes) --------------------------------
 
 
-def test_required_lock_regimes_and_exact_boundaries():
-    assert required_lock(0) == 0.0
-    assert required_lock(999) == 0.0  # young reign: everything liquid
-    assert required_lock(1000) == 0.0  # exact boundary: still nothing locked
-    assert required_lock(1001) == 1.0  # flat 1000-free plateau begins
-    assert required_lock(5000) == 4000.0
-    assert required_lock(10000) == 9000.0  # regimes meet exactly: 0.9*10000 == 10000-1000
-    assert required_lock(20000) == 18000.0  # 10% allowance: 2000 free, growing with reign
-    assert required_lock(100000) == 90000.0
+def test_required_conviction_regimes_and_exact_boundaries():
+    assert required_conviction(0) == 0.0
+    assert required_conviction(999) == 0.0  # young reign: everything liquid
+    assert required_conviction(1000) == 0.0  # exact boundary: still nothing locked
+    assert required_conviction(1001) == 1.0  # flat 1000-free plateau begins
+    assert required_conviction(5000) == 4000.0  # regimes meet exactly: 0.8*5000 == 5000-1000
+    assert required_conviction(10000) == 8000.0  # 20% allowance: 2000 free, growing with reign
+    assert required_conviction(20000) == 16000.0
+    assert required_conviction(100000) == 80000.0
+
+
+def test_free_fraction_is_the_owner_set_80_20_split():
+    # Issue #158: owner reduced the lock requirement from 90% to 80% of earned. Pinned so
+    # a silent revert of CONVICTION_FREE_FRACTION fails loudly, not just numerically.
+    from core.constants import CONVICTION_FREE_FRACTION
+
+    assert CONVICTION_FREE_FRACTION == 0.20
 
 
 def test_is_compliant_is_alpha_vs_alpha():
@@ -132,7 +142,7 @@ def test_report_gates_only_after_the_activation_block():
 
     before = conviction_report(ledger, ["champ"], staked, block=CONVICTION_ACTIVATION_BLOCK - 1)
     assert before["champ"]["compliant"] is True  # tracking only, no gating yet
-    assert before["champ"]["required_lock"] == 4000.0  # ledger already warm and reported
+    assert before["champ"]["required_conviction"] == 4000.0  # ledger already warm and reported
 
     after = conviction_report(ledger, ["champ"], staked, block=CONVICTION_ACTIVATION_BLOCK)
     assert after["champ"]["compliant"] is False
@@ -140,13 +150,13 @@ def test_report_gates_only_after_the_activation_block():
 
 def test_report_covers_both_winner_slots_independently():
     ledger = ConvictionLedger(earned={"champ": 20000.0, "prev": 20000.0})
-    staked = {"champ": 18000.0, "prev": 17999.0}
+    staked = {"champ": 16000.0, "prev": 15999.0}
     report = conviction_report(ledger, ["champ", "prev"], staked, block=CONVICTION_ACTIVATION_BLOCK)
     assert report["champ"]["compliant"] is True
     assert report["prev"]["compliant"] is False
 
 
-# --- weights: gated share burns, never reallocates; reversible; crown untouched ----------
+# --- weights: gated share reallocates to the compliant slot, burns only when both fail ---
 
 
 HOTKEYS = ["burn-sink", "champ", "prev", "bystander"]
@@ -156,15 +166,27 @@ HISTORY = [
 ]
 
 
-def test_gated_winner_share_burns_and_the_other_winner_is_unchanged():
+def test_gated_slot_share_reallocates_and_burns_only_when_both_fail():
+    # The issue #166 waterfall table, pinned exactly.
     ungated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False)
-    assert ungated == [0.0, 0.7, 0.3, 0.0]
+    assert ungated == [0.0, 0.7, 0.3, 0.0]  # (yes, yes): 0.7 / 0.3
 
-    gated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"prev"})
-    assert gated == [0.3, 0.7, 0.0, 0.0]  # prev's share burned, champ NOT paid extra
+    prev_gated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"prev"})
+    assert prev_gated == [0.0, 1.0, 0.0, 0.0]  # (yes, no): champ takes the whole pot
+
+    champ_gated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"champ"})
+    assert champ_gated == [0.0, 0.0, 1.0, 0.0]  # (no, yes): prev takes the whole pot
 
     both = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"champ", "prev"})
-    assert both == [1.0, 0.0, 0.0, 0.0]
+    assert both == [1.0, 0.0, 0.0, 0.0]  # (no, no): only now does the pot burn
+
+
+def test_single_occupied_slot_waterfall():
+    solo = [HISTORY[0]]
+    compliant = compute_weights(HOTKEYS, solo, is_burn_tempo=False, gated_hotkeys=set())
+    assert compliant == [0.0, 1.0, 0.0, 0.0]  # full pot, as today
+    gated = compute_weights(HOTKEYS, solo, is_burn_tempo=False, gated_hotkeys={"champ"})
+    assert gated == [1.0, 0.0, 0.0, 0.0]  # no other slot to reallocate to -> burn
 
 
 def test_gating_is_reversible_and_never_touches_the_crown():
@@ -195,7 +217,7 @@ def test_burn_tempo_and_no_winner_paths_are_unaffected_by_gating():
 
 def test_build_weights_metrics_flattens_the_conviction_report():
     conviction = {
-        "champ": {"earned": 5000.0, "staked": 100.0, "required_lock": 4000.0, "compliant": False},
+        "champ": {"earned": 5000.0, "staked": 100.0, "required_conviction": 4000.0, "compliant": False},
     }
     metrics = build_weights_metrics(
         block=1, tempo=TEMPO, is_burn_tempo=False, uids=[0, 1], weights=[1.0, 0.0],
@@ -203,7 +225,7 @@ def test_build_weights_metrics_flattens_the_conviction_report():
     )
     assert metrics["conviction/champ/earned"] == 5000.0
     assert metrics["conviction/champ/staked"] == 100.0
-    assert metrics["conviction/champ/required_lock"] == 4000.0
+    assert metrics["conviction/champ/required_conviction"] == 4000.0
     assert metrics["conviction/champ/compliant"] is False
     # And without a report the metric shape is exactly the pre-#141 one.
     bare = build_weights_metrics(block=1, tempo=TEMPO, is_burn_tempo=False, uids=[0], weights=[1.0])
@@ -338,3 +360,151 @@ def test_scoring_version_is_untouched_by_conviction():
     # bumped SCORING_VERSION (persisted scores/exclusions stay valid). 3 is issue #136's
     # commit-order-gauntlet bump, which landed independently of conviction.
     assert SCORING_VERSION == 3
+
+
+# --- backfill progress logging (issue #154) ----------------------------------------------
+
+
+def _progress_chain(*, key=None, emissions=None):
+    class _Chain:
+        config = type("Config", (), {"blockmachine_api_key": key})()
+
+        def emissions_by_hotkey(self, block):
+            return emissions or {}
+
+        def archive_emissions_by_hotkey(self, block):
+            return emissions or {}
+
+    return _Chain()
+
+
+def _run_catchup(state, chain, *, samples, caplog):
+    from bittensor.utils.btlogging import logging as bt_logging
+    from validator.service import _update_conviction_ledger
+
+    bt_logging.set_info()
+    state.conviction_ledger.last_block = START
+    _update_conviction_ledger(state, chain, START + samples * TEMPO, TEMPO)
+    return caplog.text
+
+
+def test_backfill_announces_source_and_logs_each_20_percent(caplog):
+    out = _run_catchup(ValidatorState(), _progress_chain(), samples=90, caplog=caplog)
+
+    assert out.count("backfilling ledger") == 1  # exactly one start line
+    assert f"from block {START:,} to {START + 90 * TEMPO:,} (90 tempo samples) via public archive node" in out
+    for pct, done in ((20, 18), (40, 36), (60, 54), (80, 72), (100, 90)):
+        assert f"backfill {pct}% ({done}/90 samples, at block {START + done * TEMPO:,}," in out
+    assert out.count("backfill ") == 5  # five progress lines, no more
+
+
+def test_backfill_start_line_names_blockmachine_and_never_the_key(caplog):
+    out = _run_catchup(ValidatorState(), _progress_chain(key="sekrit-key"), samples=10, caplog=caplog)
+
+    assert "via blockmachine RPC" in out
+    assert "sekrit-key" not in out
+
+
+def test_steady_state_single_sample_catchup_stays_quiet(caplog):
+    out = _run_catchup(ValidatorState(), _progress_chain(), samples=1, caplog=caplog)
+
+    assert "backfilling ledger" not in out
+    assert "backfill " not in out.replace("backfilling", "")
+    assert "ledger advanced 1 tempo(s)" in out  # the existing completion line is enough
+
+
+# --- v1.1: gate on chain-locked alpha, not raw stake (issue #156) ------------------------
+
+
+LOCK_START = CONVICTION_LOCK_CHECK_START_BLOCK
+
+
+def test_lock_rule_pays_a_locked_winner_and_gates_staked_but_unlocked():
+    ledger = ConvictionLedger(earned={"champ": 5000.0, "prev": 5000.0})
+    staked = {"champ": 5000.0, "prev": 5000.0}  # both would satisfy v1's staked rule
+    locked = {"champ": 4000.0, "prev": 0.0}  # but only champ actually locked
+    report = conviction_report(
+        ledger, ["champ", "prev"], staked, block=LOCK_START, conviction_by_hotkey=locked
+    )
+    assert report["champ"]["compliant"] is True
+    # The v1 cliff-exit hole, pinned: fully staked but unlocked no longer satisfies the
+    # gate -- stake can be dumped at any block, locked mass cannot.
+    assert report["prev"]["compliant"] is False
+
+
+def test_decaying_lock_gates_below_the_line_until_relocked():
+    ledger = ConvictionLedger(earned={"champ": 5000.0})
+    staked = {"champ": 5000.0}
+    decayed = conviction_report(
+        ledger, ["champ"], staked, block=LOCK_START, conviction_by_hotkey={"champ": 3999.99}
+    )
+    assert decayed["champ"]["compliant"] is False
+    relocked = conviction_report(
+        ledger, ["champ"], staked, block=LOCK_START, conviction_by_hotkey={"champ": 4000.0}
+    )
+    assert relocked["champ"]["compliant"] is True  # per-tempo re-check, reversible as ever
+
+
+def test_staked_rule_applies_before_the_lock_check_start_block():
+    # Post-activation but pre-switch (the announced grace window): v1's staked rule still
+    # decides, while the lock is already reported so operators can watch winners lock up.
+    ledger = ConvictionLedger(earned={"champ": 5000.0})
+    report = conviction_report(
+        ledger, ["champ"], {"champ": 4000.0}, block=LOCK_START - 1, conviction_by_hotkey={"champ": 0.0}
+    )
+    assert report["champ"]["compliant"] is True
+    assert report["champ"]["conviction"] == 0.0
+
+
+def test_lock_read_unavailable_falls_back_to_the_staked_rule():
+    # locked <= staked always (locking requires the stake), so the fallback can never gate
+    # a lock-compliant winner -- and it still gates a fully-unstaked dumper.
+    ledger = ConvictionLedger(earned={"champ": 5000.0, "prev": 5000.0})
+    staked = {"champ": 4000.0, "prev": 0.0}
+    report = conviction_report(
+        ledger, ["champ", "prev"], staked, block=LOCK_START, conviction_by_hotkey=None
+    )
+    assert report["champ"]["compliant"] is True
+    assert report["prev"]["compliant"] is False
+    assert report["champ"]["conviction"] is None  # honestly absent, not fabricated as 0
+
+
+def test_service_report_reads_locks_from_the_chain_and_survives_a_failed_read():
+    from validator.service import _conviction_report_for_winners
+
+    state = ValidatorState()
+    state.winner_history = [
+        WinnerEntry(hotkey="champ", repo="c/r", revision="rev1", ratio=0.4, commit_block=10)
+    ]
+    state.conviction_ledger.earned["champ"] = 5000.0
+    metagraph = type("Metagraph", (), {"hotkeys": ["champ"], "alpha_stake": [5000.0]})()
+
+    class _Chain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            return {hotkey: 4000.0 for hotkey in hotkeys}
+
+    report = _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
+    assert report["champ"]["conviction"] == 4000.0
+    assert report["champ"]["compliant"] is True
+
+    class _Broken:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            raise ConnectionError("runtime api unavailable")
+
+    fallback = _conviction_report_for_winners(state, metagraph, LOCK_START, _Broken())
+    assert fallback["champ"]["conviction"] is None
+    assert fallback["champ"]["compliant"] is True  # staked-rule fallback, staked 5000 >= 4000
+
+
+def test_build_weights_metrics_logs_conviction_only_when_the_read_was_available():
+    entry = {"earned": 5000.0, "staked": 5000.0, "required_conviction": 4000.0, "compliant": True}
+    with_lock = build_weights_metrics(
+        block=1, tempo=TEMPO, is_burn_tempo=False, uids=[0], weights=[1.0],
+        conviction={"champ": dict(entry, conviction=4000.0)},
+    )
+    assert with_lock["conviction/champ/conviction"] == 4000.0
+    without = build_weights_metrics(
+        block=1, tempo=TEMPO, is_burn_tempo=False, uids=[0], weights=[1.0],
+        conviction={"champ": dict(entry, conviction=None)},
+    )
+    assert "conviction/champ/conviction" not in without

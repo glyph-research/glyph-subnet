@@ -60,9 +60,9 @@ def decide_weights(
     ``BURN_ENABLED``/the schedule -- an emergency, owner-controlled kill switch, additive
     only (can force a burn tempo, never suppress one).
 
-    ``gated_hotkeys`` (Miner Conviction, issue #141) is the caller's already-computed set
-    of winners below their required stake lock this tempo; their share burns (see
-    ``compute_weights``).
+    ``gated_hotkeys`` (Miner Conviction, issues #141/#166) is the caller's already-computed
+    set of winners below their required conviction this tempo; their share reallocates to
+    the compliant winner slot(s), burning only when all are gated (see ``compute_weights``).
     """
 
     seed = derive_burn_seed(last_round_outputs)
@@ -172,7 +172,7 @@ def run(args: argparse.Namespace) -> None:
     from validator.service import _conviction_report_for_winners, _update_conviction_ledger
 
     _update_conviction_ledger(state, chain, block, tempo)
-    conviction = _conviction_report_for_winners(state, metagraph, block)
+    conviction = _conviction_report_for_winners(state, metagraph, block, chain)
     gated = {hotkey for hotkey, entry in conviction.items() if not entry["compliant"]}
 
     weights, burn = decide_weights(

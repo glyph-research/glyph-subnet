@@ -10,15 +10,23 @@ secondary path — see [docs/VALIDATING.md](docs/VALIDATING.md)), and set weight
 king-of-the-hill policy:
 
 - current winner: `70%` · previous winner: `30%`
-- plus a `25%` **temporal burn** (one unpredictable tempo per 4-tempo window → UID 0) that
+- plus a `10%` **temporal burn** (one unpredictable tempo per 10-tempo window → UID 0) that
   makes copy-cat validation strictly losing. **Currently enabled** network-wide
   (`core.constants.BURN_ENABLED = True`, issue #88) — see
   [docs/reign-and-burn.md](docs/reign-and-burn.md) for the current state and how to disable.
-- **Miner Conviction** (issue #141): a winner slot must keep its cumulative alpha earnings
-  staked to its hotkey — the free (unstaked-allowed) amount is `max(10% of earned, 1000 α)`.
-  A slot below its required lock earns nothing that tempo (its share burns, never
-  reallocated to the other winner) and resumes automatically at the next weight-setting
-  once restaked. Measured in alpha on both sides; the crown itself is never affected.
+- **Miner Conviction** (issues #141/#156): a winner slot must keep its cumulative alpha
+  earnings **chain-locked** to its hotkey (`btcli lock add --netuid 117 ...`) — the free
+  (unlocked-allowed) amount is `max(20% of earned, 1000 α)`. A slot below its required
+  conviction earns nothing that tempo — its share goes to the other winner slot, and it
+  burns only when no occupied slot meets its conviction (issue #166) — and resumes
+  automatically at the next weight-setting once enough is locked. Measured in
+  alpha on both sides; the crown itself is never affected. Plain staked-but-unlocked
+  alpha does **not** count (issue #162: enforcement is live — the announced
+  `CONVICTION_LOCK_CHECK_START_BLOCK` is behind the chain head): locked mass is
+  chain-enforced unstakeable, so exit follows the lock's decay schedule (or a deliberate
+  perpetual→decaying switch), never a cliff. Either lock mode satisfies the gate —
+  perpetual is the low-maintenance choice; a decaying lock gates again as it decays below
+  the line until re-locked.
 
 Score = compression ratio (compressed ÷ raw, lower is better) with a hard **bit-exact
 round-trip** gate. A challenger takes the crown only by beating the incumbent by `ε`

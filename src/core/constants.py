@@ -74,10 +74,12 @@ REPO_NOT_FOUND_EXCLUDE_STREAK = 12
 
 # --- Miner Conviction (issue #141) ----------------------------------------------
 # Winners must keep (most of) their cumulative alpha earnings staked to their hotkey to
-# receive incentive; the free allowance is max(10% x earned, 1000 alpha). See
+# receive incentive; the free allowance is max(20% x earned, 1000 alpha) (issue #158:
+# owner reduced the lock requirement from 90% to 80% of earned -- a pure relaxation, so
+# it takes effect with the release that carries it, no announced start block). See
 # core/conviction.py for the mechanism.
 CONVICTION_FREE_ALPHA = 1000.0
-CONVICTION_FREE_FRACTION = 0.10
+CONVICTION_FREE_FRACTION = 0.20
 # Earnings ledgers accumulate from this block -- the tempo at which the current champion
 # (UID 122, putty77/glyph-qwen14) took the crown on 2026-07-16 (verified via archive
 # binary search: its incentive first became nonzero in (8631680, 8631711]). A single
@@ -90,6 +92,18 @@ CONVICTION_TRACKING_START_BLOCK = 8_631_680
 # deploys: winners whose staked alpha is below their required lock stop receiving
 # incentive at the next weight-setting until they restake.
 CONVICTION_ACTIVATION_BLOCK = 8_615_836
+# Conviction v1.1 (issue #156): from this block the gated quantity is the hotkey's
+# chain-locked alpha (`btcli lock add`; SubtensorModule.lock_stake), not raw staked
+# alpha. Raw stake can be cliff-unstaked at any block -- observed live on 2026-07-21 when
+# the dethroned previous winner unstaked to zero and sold, losing only the 30% tail it no
+# longer valued. Locked mass is chain-enforced unstakeable; the only exits are its decay
+# schedule or a deliberate perpetual->decaying switch, never a cliff. Owner-set at the
+# then-current block (issue #162, same pattern as CONVICTION_ACTIVATION_BLOCK above): the
+# lock requirement was already announced to miners, so enforcement is live from the first
+# weight-setting on this code -- no future switch block. v1's staked-alpha rule stays the
+# per-tempo fallback if a validator's lock query fails (locked <= staked always, so the
+# fallback can never gate a lock-compliant winner and still gates a fully-unstaked one).
+CONVICTION_LOCK_CHECK_START_BLOCK = 8_669_000
 # Deterministic backfill source for ledger gaps (validator downtime / fresh start).
 # Historical chain state is objective -- any honest archive returns identical data -- so
 # which endpoint an operator uses is purely a local preference, never consensus-relevant.
@@ -104,7 +118,7 @@ BLOCKMACHINE_RPC_ENDPOINT = "wss://rpc.blockmachine.io"
 
 # --- Rolling-winner policy -----------------------------------------------------
 # current winner / previous winner. Effective split after the temporal burn is
-# 52.5% / 22.5% / 25% burned (see burn_schedule).
+# 63% / 27% / 10% burned (see burn_schedule; issue #168 widened the window 4 -> 10).
 WINNER_WEIGHTS = (0.70, 0.30)
 WINNER_LIMIT = 2
 DEFAULT_WIN_MARGIN = 0.05  # epsilon: 5% relative ratio improvement required to dethrone
@@ -183,15 +197,17 @@ COMPRESS_BUDGET_SECS = 450.0
 BASELINE_LEVEL = 19  # zstd -19: the vacant-crown floor a codec must beat
 
 # --- Temporal burn schedule ------------------------------------------------------
-# 25% daily burn applied temporally: 1 unpredictable tempo per 4-tempo window
-# sets weights 100% to BURN_UID.
-BURN_WINDOW_TEMPOS = 4
+# 10% daily burn applied temporally: 1 unpredictable tempo per 10-tempo window
+# sets weights 100% to BURN_UID (issue #168: owner reduced the cadence from 1-in-4;
+# a weight-copier is still guaranteed wrong once per window at an unpredictable
+# position -- detection is less frequent, each hit costs the same).
+BURN_WINDOW_TEMPOS = 10
 BURN_UID = 0
 # Network-wide on/off switch for the temporal burn feature. Disabled at launch (issue #43),
 # re-enabled (issue #88) after a live weight-copier (mirroring the validator's exact weight
 # vector without running the real evaluation) was observed on netuid 117 -- the burn-tempo
 # schedule is exactly the anti-copy signal that punishes this. With this True, the burn
-# position each window (H(S || window) mod 4, see burn_schedule.py) sets weights 100% to
+# position each window (H(S || window) mod BURN_WINDOW_TEMPOS, see burn_schedule.py) sets weights 100% to
 # BURN_UID; a copier that never evaluates cannot compute S and diverges maximally on the
 # tempos it gets wrong. Burn-tempo alignment feeds consensus, so -- same rationale as
 # WINDOW_ANCHOR_BLOCK -- this MUST be identical on every validator and is a committed

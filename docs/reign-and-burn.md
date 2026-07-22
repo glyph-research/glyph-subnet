@@ -36,19 +36,22 @@ re-enabled (issue #88) after a live weight-copier was observed on netuid 117 -- 
 mirroring the validator's exact weight vector each round without running the real
 evaluation, exactly the attack this schedule exists to punish.
 
-A 25% daily burn is applied *in time*, not as a static carve-out:
+A 10% daily burn is applied *in time*, not as a static carve-out (issue #168 reduced the
+cadence from 25% / windows of 4):
 
-- Tempos are grouped into windows of 4. Exactly one tempo per window is a **burn tempo**:
+- Tempos are grouped into windows of 10. Exactly one tempo per window is a **burn tempo**:
   weights go 100% to UID 0.
-- The burn position is `H(S ‖ window) mod 4`, where the seed `S` is derived from the most
+- The burn position is `H(S ‖ window) mod 10`, where the seed `S` is derived from the most
   recent challenge round's per-stream outputs (sizes + blob hashes). Only validators that
   actually ran (or replayed) the evaluation can compute `S`.
 - Combined with native **commit-reveal** weights, a copy-cat validator that never evaluates
-  cannot reproduce the schedule: it guesses the burn position wrong 3 windows out of 4 (or
+  cannot reproduce the schedule: it guesses the burn position wrong 9 windows out of 10 (or
   copies stale reveals), diverging maximally on the tempos it gets wrong — which Yuma
-  bonding punishes hard.
+  bonding punishes hard. Detection is less frequent than at windows of 4, but every window
+  still contains a guaranteed-wrong tempo at an unpredictable position, and each hit costs
+  the copier the same.
 
-Effective time-averaged split: **52.5% winner / 22.5% previous / 25% burned**. The burn also
+Effective time-averaged split: **63% winner / 27% previous / 10% burned**. The burn also
 reduces continuous alpha sell pressure during long reigns.
 
 To disable (or re-enable after disabling): flip `BURN_ENABLED` in `src/core/constants.py` and

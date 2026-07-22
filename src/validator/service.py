@@ -31,6 +31,7 @@ from core.constants import (
     COMMIT_PHASE_MAX_AGE_BLOCKS,
     COMMIT_POLL_INTERVAL_SECS,
     COMPRESS_BUDGET_SECS,
+    CONVICTION_TRACKING_START_BLOCK,
     DEFAULT_MAX_ARTIFACT_BYTES,
     DEFAULT_NETUID,
     DEFAULT_WIN_MARGIN,
@@ -48,7 +49,7 @@ from core.constants import (
     WINNER_LIMIT,
 )
 from core.log_config import add_logging_args
-from core.conviction import conviction_report, ledger_catchup
+from core.conviction import conviction_report, ledger_catchup, ledger_grid
 from core.state import (
     CommitmentState,
     ValidatorState,
@@ -638,8 +639,33 @@ def _update_conviction_ledger(state: ValidatorState, chain: BittensorChain, bloc
         return chain.archive_emissions_by_hotkey(grid_block)
 
     try:
+        # Backfill visibility (issue #154): a fresh sync is 40+ minutes of otherwise total
+        # silence on the public archive node -- announce it (preferred endpoint first, key
+        # never logged; per-query fallbacks already warn via #152) and log each 20% of the
+        # grid. The normal 1-sample steady-state catchup stays quiet.
+        grid = ledger_grid(state.conviction_ledger.last_block, block, tempo)
+        started = time.monotonic()
+        on_applied = None
+        if len(grid) > 1:
+            key = getattr(getattr(chain, "config", None), "blockmachine_api_key", None)
+            source = "blockmachine RPC" if key else "public archive node"
+            from_block = max(state.conviction_ledger.last_block, CONVICTION_TRACKING_START_BLOCK)
+            bt_logging.info(
+                f"conviction: backfilling ledger from block {from_block:,} to {grid[-1]:,} "
+                f"({len(grid)} tempo samples) via {source}"
+            )
+
+            def on_applied(done: int, total: int, grid_block: int) -> None:
+                fifths_now, fifths_before = done * 5 // total, (done - 1) * 5 // total
+                if fifths_now > fifths_before:
+                    bt_logging.info(
+                        f"conviction: backfill {fifths_now * 20}% ({done}/{total} samples, "
+                        f"at block {grid_block:,}, elapsed {int(time.monotonic() - started)}s)"
+                    )
+
         applied = ledger_catchup(
-            state.conviction_ledger, current_block=block, tempo=tempo, emissions_at=emissions_at
+            state.conviction_ledger, current_block=block, tempo=tempo,
+            emissions_at=emissions_at, on_applied=on_applied,
         )
         if applied:
             bt_logging.info(
@@ -653,7 +679,9 @@ def _update_conviction_ledger(state: ValidatorState, chain: BittensorChain, bloc
         )
 
 
-def _conviction_report_for_winners(state: ValidatorState, metagraph, block: int) -> dict[str, dict]:
+def _conviction_report_for_winners(
+    state: ValidatorState, metagraph, block: int, chain: BittensorChain | None = None
+) -> dict[str, dict]:
     """Compliance snapshot for the current winner slots, logged every weight-setting."""
 
     winners = [w.hotkey for w in state.winner_history[:WINNER_LIMIT]]
@@ -668,18 +696,41 @@ def _conviction_report_for_winners(state: ValidatorState, metagraph, block: int)
         if stakes is not None
         else {}
     )
-    report = conviction_report(state.conviction_ledger, winners, staked, block=block)
+    # Conviction v1.1 (issue #156): read the winners' chain-locked alpha whenever the
+    # chain supports it -- also before CONVICTION_LOCK_CHECK_START_BLOCK, so operators
+    # can watch winners lock up during the grace window. Best-effort: on failure the
+    # report falls back to the v1 staked rule for this tempo (locked <= staked always,
+    # so a lock-compliant winner can never be wrongly gated by the fallback).
+    locked = None
+    read_locked = getattr(chain, "locked_alpha_by_hotkey", None)
+    if winners and read_locked is not None:
+        try:
+            locked = read_locked(winners)
+        except Exception as exc:  # noqa: BLE001 - never block weight-setting
+            bt_logging.warning(
+                f"conviction: lock query failed -- gating on staked alpha this tempo "
+                f"(v1 rule): {exc}"
+            )
+    report = conviction_report(
+        state.conviction_ledger, winners, staked, block=block, conviction_by_hotkey=locked
+    )
     for hotkey, entry in report.items():
+        conviction_part = (
+            f" conviction={entry['conviction']:.1f}" if entry["conviction"] is not None else ""
+        )
         line = (
-            f"conviction: {hotkey} earned={entry['earned']:.1f} staked={entry['staked']:.1f} "
-            f"required_lock={entry['required_lock']:.1f} compliant={entry['compliant']}"
+            f"conviction: {hotkey} earned={entry['earned']:.1f} staked={entry['staked']:.1f}"
+            f"{conviction_part} required_conviction={entry['required_conviction']:.1f} "
+            f"compliant={entry['compliant']}"
         )
         if entry["compliant"]:
             bt_logging.info(line)
         else:
             bt_logging.warning(
-                f"{line} -- winner is below its required stake lock; its share burns this "
-                f"tempo and restores automatically once restaked (issue #141)"
+                f"{line} -- winner is below its required conviction; its share goes to the "
+                f"other winner slot this tempo (or burns if no slot meets its conviction) "
+                f"and restores automatically once its conviction covers the requirement "
+                f"(`btcli lock add --netuid 117`, issues #141/#166)"
             )
     return report
 
@@ -1003,10 +1054,11 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
                 "(owner emergency override: on-chain force_burn=true) -- burning 100% this tempo"
             )
 
-        # Miner Conviction (issue #141): advance the earnings ledger, then gate any winner
-        # whose staked alpha is below its required lock -- its share burns this tempo.
+        # Miner Conviction (issues #141/#166): advance the earnings ledger, then gate any
+        # winner below its required conviction -- its share goes to the compliant winner
+        # slot(s), burning only when all occupied slots are gated.
         _update_conviction_ledger(state, chain, block, tempo)
-        conviction = _conviction_report_for_winners(state, metagraph, block)
+        conviction = _conviction_report_for_winners(state, metagraph, block, chain)
         gated = {hotkey for hotkey, entry in conviction.items() if not entry["compliant"]}
 
         weights, burn = decide_weights(
@@ -1146,8 +1198,10 @@ def run_offline_demo(args: argparse.Namespace) -> None:
 
     last_round_outputs = outcomes[history[0].hotkey].burn_outputs() if history else []
     bt_logging.info(f"winner history = {[(w.hotkey, round(w.ratio, 4)) for w in history]}")
-    bt_logging.info("temporal burn schedule (two 4-tempo windows):")
-    for tempo_idx in range(8):
+    from core.constants import BURN_WINDOW_TEMPOS
+
+    bt_logging.info(f"temporal burn schedule (two {BURN_WINDOW_TEMPOS}-tempo windows):")
+    for tempo_idx in range(2 * BURN_WINDOW_TEMPOS):
         block = tempo_idx * 360
         weights, burn = decide_weights(
             hotkeys, history, block=block, tempo=360, last_round_outputs=last_round_outputs, anchor=0
