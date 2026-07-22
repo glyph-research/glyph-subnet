@@ -17,6 +17,16 @@ beacon-seeded streams (paired comparison kills sampling variance). Rules:
 
 Weights for the two live slots: **current winner 70% / previous winner 30%**.
 
+Those two slots are filled by the two most recent **conviction-compliant** winners in the
+retained history (issue #170): weight-setting walks the history newest-first, skipping any
+entry that is no longer eligible (deregistered/excluded) or below its required conviction,
+and pays the first two it finds — `0.7` and `0.3`, or `1.0` if only one qualifies, or a
+full burn if none does. Retention keeps `WINNER_HISTORY_DEPTH = 5` entries so there is a
+fallback ladder below the paid slots; the crown itself is always `history[0]` regardless of
+compliance, so scoring, dethroning, and the commit-order gauntlet are untouched by any of
+this. A dethroned winner that keeps its conviction locked stays in the queue and earns
+again whenever a more recent winner falls out of compliance.
+
 ### On-chain winner commitment (observability only, issue #103)
 
 Whenever the crown changes, the validator publishes a small record — `{hotkey, repo, rev,

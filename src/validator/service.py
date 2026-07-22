@@ -46,7 +46,7 @@ from core.constants import (
     SCORING_VERSION,
     THROUGHPUT_FLOOR_BPS,
     WINDOW_ANCHOR_BLOCK,
-    WINNER_LIMIT,
+    WINNER_HISTORY_DEPTH,
 )
 from core.log_config import add_logging_args
 from core.conviction import conviction_report, ledger_catchup, ledger_grid
@@ -684,7 +684,9 @@ def _conviction_report_for_winners(
 ) -> dict[str, dict]:
     """Compliance snapshot for the current winner slots, logged every weight-setting."""
 
-    winners = [w.hotkey for w in state.winner_history[:WINNER_LIMIT]]
+    # Every RETAINED entry, not just the paid slots (issue #170): compliance of the deeper
+    # fallback entries is an input to payee selection, so it must be evaluated here.
+    winners = [w.hotkey for w in state.winner_history[:WINNER_HISTORY_DEPTH]]
     # The lock is alpha-only by design: on dTAO metagraphs S is the consensus stake weight
     # (alpha + tao-weighted root stake), so a winner could otherwise satisfy part of the
     # lock with root TAO. Prefer the pure per-hotkey alpha; S only as a fallback.
@@ -727,10 +729,11 @@ def _conviction_report_for_winners(
             bt_logging.info(line)
         else:
             bt_logging.warning(
-                f"{line} -- winner is below its required conviction; its share goes to the "
-                f"other winner slot this tempo (or burns if no slot meets its conviction) "
-                f"and restores automatically once its conviction covers the requirement "
-                f"(`btcli lock add --netuid 117`, issues #141/#166)"
+                f"{line} -- winner is below its required conviction; it is skipped this "
+                f"tempo in favour of the next compliant winner in history (the pot burns "
+                f"only if none qualifies) and is paid again automatically once its "
+                f"conviction covers the requirement (`btcli lock add --netuid 117`, "
+                f"issues #141/#170)"
             )
     return report
 

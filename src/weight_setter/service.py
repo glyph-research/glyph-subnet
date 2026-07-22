@@ -60,9 +60,10 @@ def decide_weights(
     ``BURN_ENABLED``/the schedule -- an emergency, owner-controlled kill switch, additive
     only (can force a burn tempo, never suppress one).
 
-    ``gated_hotkeys`` (Miner Conviction, issues #141/#166) is the caller's already-computed
-    set of winners below their required conviction this tempo; their share reallocates to
-    the compliant winner slot(s), burning only when all are gated (see ``compute_weights``).
+    ``gated_hotkeys`` (Miner Conviction, issues #141/#170) is the caller's already-computed
+    set of winners below their required conviction this tempo; they are skipped when
+    picking payees, so the pot goes to the two most recent compliant winners in the
+    retained history and burns only when none qualifies (see ``compute_weights``).
     """
 
     seed = derive_burn_seed(last_round_outputs)

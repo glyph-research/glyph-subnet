@@ -120,7 +120,14 @@ BLOCKMACHINE_RPC_ENDPOINT = "wss://rpc.blockmachine.io"
 # current winner / previous winner. Effective split after the temporal burn is
 # 63% / 27% / 10% burned (see burn_schedule; issue #168 widened the window 4 -> 10).
 WINNER_WEIGHTS = (0.70, 0.30)
-WINNER_LIMIT = 2
+WINNER_LIMIT = 2  # paid slots per tempo
+# Retained winner-history depth (issue #170), deliberately deeper than the paid slots:
+# payment walks the history newest-first and pays the first WINNER_LIMIT entries that are
+# both eligible and conviction-compliant, so entries below the paid slots are the fallback
+# ladder that keeps emission flowing instead of burning. 5 is deep enough that burning
+# becomes rare, shallow enough that an ancient long-inactive winner is never paid.
+# Retention only -- the crown is always history[0] regardless of compliance.
+WINNER_HISTORY_DEPTH = 5
 DEFAULT_WIN_MARGIN = 0.05  # epsilon: 5% relative ratio improvement required to dethrone
 
 # --- Codec artifact limits ------------------------------------------------------
