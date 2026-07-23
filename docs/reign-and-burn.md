@@ -7,34 +7,66 @@ beacon-seeded streams (paired comparison kills sampling variance). Rules:
 
 - Score = compressed ÷ raw bytes (lower is better), gated on bit-exact round-trip on every
   stream, a 10 KiB/s decompress floor, and the compress budget.
-- A challenger takes the crown only by beating the incumbent's ratio by **ε = 5%**
-  (relative; launch setting `win_margin = 0.05`). Ties go to the **earliest commit block**,
-  so copying a public codec is worthless.
+- A challenger takes the crown only by beating the incumbent's ratio by **ε = 1%**
+  (relative; `win_margin = 0.01`, lowered from 5% in issue #177 now that emission is
+  proportional to improvement — a marginal win earns a marginal share instead of being
+  refused). Ties go to the **earliest commit block**, so copying a public codec is
+  worthless.
 - A challenger that does not win is **excluded forever** (one shot). The registration burn
   is therefore the spam-proof submission fee.
 - The previous winner is a hot standby: if the incumbent's artifact vanishes or fails
   re-evaluation, it is promoted back.
 
-Weights for the two live slots: **current winner 70% / previous winner 30%**.
+### Emission follows improvement (issue #177)
 
-Those two slots are filled by the two most recent **conviction-compliant** winners in the
-retained history (issue #170): weight-setting walks the history newest-first, skipping any
-entry that is no longer eligible (deregistered/excluded) or below its required conviction,
-and pays the first two it finds — `0.7` and `0.3`, or `1.0` if only one qualifies, or a
-full burn if none does. Retention keeps `WINNER_HISTORY_DEPTH = 20` entries so there is a
-deep fallback ladder below the paid slots (issue #175), making a burn close to a last
-resort; the crown itself is always `history[0]` regardless of
-compliance, so scoring, dethroning, and the commit-order gauntlet are untouched by any of
-this. A dethroned winner that keeps its conviction locked stays in the queue and earns
+There are no fixed 70/30 slots any more. Each winner earns a share of the pot for **how
+much it moved the frontier**:
+
+    share = 25% (top payee only) + 15% x (percent improvement over the winner it dethroned)
+
+Improvement is measured and recorded **at promotion time** — challenger vs the incumbent it
+beat, on identical streams, the only moment the comparison is meaningful — and is never
+recomputed later. A winner that took a vacant crown improved on nothing and records `0`,
+earning the base while it is top of the ladder and nothing once it is deeper.
+
+Shares are assigned newest-first, each capped by whatever is left of the pot, so:
+
+- a **≥5% jump** computes to ≥100% and takes the entire pot — prior winners earn nothing
+  that tempo. There is deliberately no per-winner ceiling.
+- a run of **small wins** spreads the pot: at the 1% minimum the top payee earns 40% and
+  each one below 15%, so five winners are paid before it runs out.
+- if the shares **under-subscribe** the pot they are scaled up to fill it, so emission
+  always reaches winners; the pot burns only when nobody qualifies at all.
+
+Because the margin is only 1%, a miner holding a large improvement could release it in ~1%
+slices across several hotkeys. Measured, that is **exactly neutral for the slicer** — the
+share formula is linear in improvement, so `25 + 15x3` pays the same whether the 3% arrives
+as one entry or three — and it is weakly *unfavourable to everyone else*, since the extra
+rungs push older winners down and can displace one off the bottom of the pot. What limits
+it is that the **base is paid once, to the top payee**, so it cannot be collected per
+slice (the original concern); plus the registration cost of each extra hotkey and each
+slice having to satisfy its own conviction requirement. Every promotion logs its
+improvement, so the distribution over time makes slicing visible — worth watching in the
+data rather than pre-emptively penalising honest small wins.
+
+Payees are the **conviction-compliant** winners in the retained history (issue #170):
+weight-setting walks the history newest-first, skipping any entry that is no longer
+eligible (deregistered/excluded) or below its required conviction, and allocates to the
+ones it finds until the pot is gone — or burns if none qualifies. Retention keeps
+`WINNER_HISTORY_DEPTH = 20` entries so there is a deep fallback ladder (issue #175),
+making a burn close to a last resort; the crown itself is always `history[0]` regardless
+of compliance, so scoring, dethroning, and the commit-order gauntlet are untouched by all
+of this. A dethroned winner that keeps its conviction locked stays in the queue and earns
 again whenever a more recent winner falls out of compliance. Note the accepted consequence
 of a deep ladder: an entry whose cumulative earnings are below the `1000 α` free allowance
 requires *zero* conviction and so can be paid with nothing locked — flowing beats burning,
 and it can collect at most that allowance before its own requirement gates it.
 
-Compliance is evaluated lazily down the ladder: weight-setting stops reading once it has
-found the two winners it will pay, so the steady-state cost is two chain queries per tempo
-however deep retention goes, and each query is isolated — one failed read falls back to the
-staked rule for that hotkey alone.
+Compliance is evaluated lazily down the ladder: weight-setting stops reading once the pot
+is exhausted, so the per-tempo chain cost tracks how many winners actually get paid (one
+read when a big improvement takes everything, five at the 1% minimum) rather than the
+retained depth. Each query is isolated — one failed read falls back to the staked rule for
+that hotkey alone.
 
 ### On-chain winner commitment (observability only, issue #103)
 
@@ -70,15 +102,16 @@ cadence from 25% / windows of 4):
   still contains a guaranteed-wrong tempo at an unpredictable position, and each hit costs
   the copier the same.
 
-Effective time-averaged split: **63% winner / 27% previous / 10% burned**. The burn also
-reduces continuous alpha sell pressure during long reigns.
+Effective time averages: **90% of emission to winners, 10% burned**, with the winner
+portion split by improvement (see above) rather than by fixed slots. The burn also reduces
+continuous alpha sell pressure during long reigns.
 
 To disable (or re-enable after disabling): flip `BURN_ENABLED` in `src/core/constants.py` and
 ship that source change to every validator together (this is consensus-critical and must
 never be a per-operator runtime override -- see the constant's own comment and the module
 header note in `core/constants.py`). With it disabled, no tempo is ever a burn tempo,
 `weight_setter.decide_weights` always short-circuits `burn` to `False`, all emission flows to
-the normal rolling-winner distribution (70% / 30%) every tempo, and a weight-copying
+the normal improvement-proportional winner distribution every tempo, and a weight-copying
 validator is no longer penalised by burn-tempo divergence specifically (commit-reveal and the
 earliest-commit winner tie-break still apply).
 

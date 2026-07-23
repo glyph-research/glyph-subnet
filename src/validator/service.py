@@ -47,7 +47,6 @@ from core.constants import (
     THROUGHPUT_FLOOR_BPS,
     WINDOW_ANCHOR_BLOCK,
     WINNER_HISTORY_DEPTH,
-    WINNER_LIMIT,
 )
 from core.log_config import add_logging_args
 from core.conviction import conviction_report, ledger_catchup, ledger_grid
@@ -60,7 +59,14 @@ from core.state import (
 )
 from core.version import assert_weights_version_matches, local_version_key
 from core.wandb_logger import WandbLogger, build_round_metrics, build_weights_metrics, make_wandb_logger
-from core.weights import WinnerEntry, compact_history, promote_winner, rank_key, should_promote
+from core.weights import (
+    WinnerEntry,
+    compact_history,
+    promote_winner,
+    rank_key,
+    should_promote,
+    winner_share,
+)
 from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
 from eval.live_bench import (
@@ -690,13 +696,13 @@ def _conviction_report_for_winners(
     """Compliance snapshot for the winners this weight-setting actually needs, logged as
     it goes.
 
-    Walks the retained history newest-first exactly as payee selection does and stops as
-    soon as ``WINNER_LIMIT`` compliant winners have been found (issue #175): the entries
-    below them cannot be paid this tempo, so evaluating them would buy nothing. That keeps
-    the steady state at two chain reads no matter how deep the fallback ladder is, and
-    only pays for depth in the tempos where winners are actually gated. Entries not
-    reached are absent from the report, hence not in the caller's gated set -- which is
-    consistent, since selection stops at the same place.
+    Walks the retained history newest-first exactly as payment does and stops as soon as
+    the pot is exhausted (issues #175/#177): the entries below that point cannot be paid
+    this tempo, so evaluating them would buy nothing. The cost therefore tracks how many
+    winners actually get paid -- one read when a big improvement takes the whole pot, more
+    as shares get smaller -- rather than the retained depth. Entries not reached are absent
+    from the report, hence not in the caller's gated set, which is consistent because
+    payee selection stops in the same place.
     """
 
     # Skipped without a chain read, because select_payees skips them too and this walk's
@@ -724,7 +730,8 @@ def _conviction_report_for_winners(
     read_locked = getattr(chain, "locked_alpha_by_hotkey", None)
 
     report: dict[str, dict] = {}
-    compliant_found = 0
+    pot_left = 1.0
+    paid_any = False
     for entry in state.winner_history[:WINNER_HISTORY_DEPTH]:
         if entry.hotkey in report or entry.hotkey not in eligible:
             continue
@@ -751,8 +758,14 @@ def _conviction_report_for_winners(
             )
         )
         if report[entry.hotkey]["compliant"]:
-            compliant_found += 1
-            if compliant_found == WINNER_LIMIT:
+            # Mirror allocate_pot's walk: the first compliant winner takes the base share,
+            # and once the pot is gone nothing below it can be paid, so nothing below it
+            # needs a chain read. (When the shares under-subscribe the pot instead, every
+            # compliant entry is paid a scaled-up share, so the walk runs to full depth --
+            # which is exactly when those reads are needed.)
+            pot_left -= min(winner_share(entry, is_top_payee=not paid_any), pot_left)
+            paid_any = True
+            if pot_left <= 0.0:
                 break
 
     for hotkey, entry in report.items():

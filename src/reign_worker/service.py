@@ -16,7 +16,13 @@ from eval.runner import ArtifactRef, LocalSubprocessRunner, ResourceCaps
 from core.artifact import local_snapshot_dir
 from core.constants import SCORING_VERSION
 from core.state import CommitmentState, ScoreState, ValidatorState
-from core.weights import WinnerEntry, commit_order_key, promote_winner, should_promote
+from core.weights import (
+    WinnerEntry,
+    commit_order_key,
+    promote_winner,
+    should_promote,
+    winner_share,
+)
 
 
 def find_winner_commitment(state: ValidatorState, winner: WinnerEntry) -> CommitmentState | None:
@@ -174,14 +180,26 @@ def run_round(
         challenger_ratio = state.scores[challenger.key].ratio
         beats_baseline = baseline_ratio is None or challenger_ratio < baseline_ratio
         if should_promote(challenger_ratio, current_ratio, margin) and beats_baseline:
+            # current_ratio is still the ratio this challenger just beat -- the only moment
+            # the improvement behind its emission share can be measured (issue #177).
             state.winner_history = promote_winner(
                 state.winner_history,
                 state.scores[challenger.key].as_winner(),
                 eligible_hotkeys=eligible_hotkeys,
+                dethroned_ratio=current_ratio,
             )
+            improvement = state.winner_history[0].improvement
             current_ratio = challenger_ratio
             winner_outputs = outcomes[challenger.hotkey].burn_outputs()
-            bt_logging.info(f"new winner: {challenger.hotkey} ratio={challenger_ratio:.4f}")
+            # The improvement is logged on every promotion by design (issue #177): it is
+            # what the winner is paid for, and the distribution over time is the signal
+            # that would expose a large gain being released in ~1% slices across hotkeys.
+            bt_logging.info(
+                f"new winner: {challenger.hotkey} ratio={challenger_ratio:.4f} "
+                f"improvement={improvement * 100:.3f}% (earns "
+                f"{winner_share(state.winner_history[0], is_top_payee=True) * 100:.1f}% "
+                f"of the pot as top payee)"
+            )
         else:
             # Challenged and lost -> one shot, excluded from future rounds.
             state.excluded_hotkeys.add(challenger.hotkey)
