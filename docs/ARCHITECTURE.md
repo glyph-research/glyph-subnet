@@ -26,7 +26,7 @@ reign_worker.run_round: paired eval on eval runner (Chutes) ──▶ scores ─
                                                         │
 state.winner_history + last_round_outputs ─────────────┘
                                                         ▼
-weight_setter.decide_weights (70/30 ± temporal burn) ──▶ chain.set_weights (commit-reveal)
+weight_setter.decide_weights (improvement shares ± temporal burn) ─▶ chain.set_weights (commit-reveal)
 ```
 
 ## Deployment

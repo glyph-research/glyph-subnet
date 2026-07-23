@@ -9,7 +9,12 @@ local Docker on an RTX 4090 (Chutes (SN64) serverless GPU is available as an opt
 secondary path — see [docs/VALIDATING.md](docs/VALIDATING.md)), and set weights with a
 king-of-the-hill policy:
 
-- current winner: `70%` · previous winner: `30%`
+- **emission follows improvement, not slot** (issue #177): each winner earns
+  `15%` of the pot per `1%` of ratio improvement it achieved over the winner it dethroned,
+  plus a one-off `25%` base for whoever is currently top of the ladder. Shares are assigned
+  newest-first until the pot runs out, so a `5%` jump takes the whole pot and a run of small
+  wins spreads it across several winners; if the shares under-subscribe the pot they scale
+  up to fill it. Improvement is recorded when the crown changes and never recomputed.
 - plus a `10%` **temporal burn** (one unpredictable tempo per 10-tempo window → UID 0) that
   makes copy-cat validation strictly losing. **Currently enabled** network-wide
   (`core.constants.BURN_ENABLED = True`, issue #88) — see
@@ -17,9 +22,9 @@ king-of-the-hill policy:
 - **Miner Conviction** (issues #141/#156): a winner slot must keep its cumulative alpha
   earnings **chain-locked** to its hotkey (`btcli lock add --netuid 117 ...`) — the free
   (unlocked-allowed) amount is `max(20% of earned, 1000 α)`. A slot below its required
-  conviction earns nothing that tempo: the `70/30` pot goes to the two most recent
-  **compliant** winners in the retained history (depth `20`), walking past anyone gated or
-  no longer eligible, and burns only when none of them qualifies (issue #170). So staying
+  conviction earns nothing that tempo: the pot is allocated among the **compliant**
+  winners in the retained history (depth `20`), walking past anyone gated or no longer
+  eligible, and burns only when none of them qualifies (issues #170/#177). So staying
   locked keeps paying you after you lose the crown — and a winner that locks is paid again
   at the very next weight-setting. Measured in
   alpha on both sides; the crown itself is never affected. Plain staked-but-unlocked
@@ -32,7 +37,8 @@ king-of-the-hill policy:
 
 Score = compression ratio (compressed ÷ raw, lower is better) with a hard **bit-exact
 round-trip** gate. A challenger takes the crown only by beating the incumbent by `ε`
-(default `5%`). When several challengers land in the same round they run as a **sequential
+(default `1%`, lowered from `5%` in issue #177 — a marginal win now earns a marginal
+share rather than being refused outright). When several challengers land in the same round they run as a **sequential
 gauntlet in commit order** (issue #136): the earliest commit challenges first, and each
 later challenger must beat the *current* — possibly just-crowned — winner by the full `ε`,
 so a later-committed marginal tweak of someone else's round can't steal it; identical
