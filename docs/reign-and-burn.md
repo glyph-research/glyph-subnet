@@ -38,11 +38,16 @@ Shares are assigned newest-first, each capped by whatever is left of the pot, so
 - if the shares **under-subscribe** the pot they are scaled up to fill it, so emission
   always reaches winners; the pot burns only when nobody qualifies at all.
 
-Because the margin is only 1%, a miner holding a large improvement could in principle
-release it in ~1% slices across several hotkeys to collect the base share repeatedly. Two
-things push back: one big jump pays more than the slices would (no ceiling), and every
-promotion logs its improvement, so the distribution over time makes slicing visible. Worth
-watching in the data rather than pre-emptively penalising honest small wins.
+Because the margin is only 1%, a miner holding a large improvement could release it in ~1%
+slices across several hotkeys. Measured, that is **exactly neutral for the slicer** — the
+share formula is linear in improvement, so `25 + 15x3` pays the same whether the 3% arrives
+as one entry or three — and it is weakly *unfavourable to everyone else*, since the extra
+rungs push older winners down and can displace one off the bottom of the pot. What limits
+it is that the **base is paid once, to the top payee**, so it cannot be collected per
+slice (the original concern); plus the registration cost of each extra hotkey and each
+slice having to satisfy its own conviction requirement. Every promotion logs its
+improvement, so the distribution over time makes slicing visible — worth watching in the
+data rather than pre-emptively penalising honest small wins.
 
 Payees are the **conviction-compliant** winners in the retained history (issue #170):
 weight-setting walks the history newest-first, skipping any entry that is no longer

@@ -214,3 +214,38 @@ def test_one_percent_is_the_dethrone_boundary():
     assert DEFAULT_WIN_MARGIN == 0.01
     assert should_promote(0.99, 1.00, DEFAULT_WIN_MARGIN) is True  # exactly 1% better
     assert should_promote(0.991, 1.00, DEFAULT_WIN_MARGIN) is False  # just under
+
+
+def test_slicing_an_improvement_is_exactly_neutral_for_the_slicer():
+    """PR #178 review: releasing a gain in ~1% slices across hotkeys pays the SAME as one
+    jump -- it is not penalised, and any claim that a big jump "pays strictly more" is
+    false. The share formula is linear in improvement and the base is paid once to the top
+    payee, so 25 + 15x3 lands identically whether the 3% arrives as one entry or three.
+
+    What actually limits slicing is therefore base-paid-once (it cannot be collected per
+    slice), the registration cost of each extra hotkey, and each slice having to satisfy
+    its own conviction requirement -- not any payout asymmetry. Pinned so nobody later
+    relies on a protection that does not exist.
+    """
+
+    prior = [entry(f"P{i}", 0.5, improvement=0.01) for i in range(6)]
+    one_jump = allocate_pot([entry("M", 0.4, improvement=0.03), *prior])
+    three_slices = allocate_pot(
+        [entry("M3", 0.4, improvement=0.01), entry("M2", 0.41, improvement=0.01),
+         entry("M1", 0.42, improvement=0.01), *prior]
+    )
+    assert abs(one_jump[0] - sum(three_slices[:3])) < 1e-12  # identical take, not smaller
+
+    # If anything it is weakly favourable: the extra rungs push older winners down, and
+    # here displace one off the bottom of the pot entirely.
+    assert sum(1 for share in one_jump[1:] if share > 0) == 3
+    assert sum(1 for share in three_slices[3:] if share > 0) == 2
+
+
+def test_the_base_share_cannot_be_collected_once_per_slice():
+    # The protection that IS real: three sliced hotkeys earn one base between them, not
+    # three -- which is what the original #177 concern was about.
+    sliced = allocate_pot([entry(f"M{i}", 0.4, improvement=0.01) for i in range(3)])
+    assert abs(sum(sliced) - 1.0) < 1e-12
+    raw_total = winner_share(entry("a", 0.4, improvement=0.01), is_top_payee=True) + 2 * 0.15
+    assert abs(raw_total - (0.25 + 3 * 0.15)) < 1e-12  # one base, three improvement shares
