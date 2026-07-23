@@ -21,11 +21,20 @@ Those two slots are filled by the two most recent **conviction-compliant** winne
 retained history (issue #170): weight-setting walks the history newest-first, skipping any
 entry that is no longer eligible (deregistered/excluded) or below its required conviction,
 and pays the first two it finds — `0.7` and `0.3`, or `1.0` if only one qualifies, or a
-full burn if none does. Retention keeps `WINNER_HISTORY_DEPTH = 5` entries so there is a
-fallback ladder below the paid slots; the crown itself is always `history[0]` regardless of
+full burn if none does. Retention keeps `WINNER_HISTORY_DEPTH = 20` entries so there is a
+deep fallback ladder below the paid slots (issue #175), making a burn close to a last
+resort; the crown itself is always `history[0]` regardless of
 compliance, so scoring, dethroning, and the commit-order gauntlet are untouched by any of
 this. A dethroned winner that keeps its conviction locked stays in the queue and earns
-again whenever a more recent winner falls out of compliance.
+again whenever a more recent winner falls out of compliance. Note the accepted consequence
+of a deep ladder: an entry whose cumulative earnings are below the `1000 α` free allowance
+requires *zero* conviction and so can be paid with nothing locked — flowing beats burning,
+and it can collect at most that allowance before its own requirement gates it.
+
+Compliance is evaluated lazily down the ladder: weight-setting stops reading once it has
+found the two winners it will pay, so the steady-state cost is two chain queries per tempo
+however deep retention goes, and each query is isolated — one failed read falls back to the
+staked rule for that hotkey alone.
 
 ### On-chain winner commitment (observability only, issue #103)
 

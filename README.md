@@ -18,7 +18,7 @@ king-of-the-hill policy:
   earnings **chain-locked** to its hotkey (`btcli lock add --netuid 117 ...`) — the free
   (unlocked-allowed) amount is `max(20% of earned, 1000 α)`. A slot below its required
   conviction earns nothing that tempo: the `70/30` pot goes to the two most recent
-  **compliant** winners in the retained history (depth `5`), walking past anyone gated or
+  **compliant** winners in the retained history (depth `20`), walking past anyone gated or
   no longer eligible, and burns only when none of them qualifies (issue #170). So staying
   locked keeps paying you after you lose the crown — and a winner that locks is paid again
   at the very next weight-setting. Measured in

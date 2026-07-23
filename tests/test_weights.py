@@ -65,8 +65,8 @@ def test_compact_history_dedups_and_retains_to_the_history_depth():
     history = [entry("a", 0.8), entry("a", 0.81), entry("b", 0.82), entry("c", 0.83)]
     assert [e.hotkey for e in compact_history(history)] == ["a", "b", "c"]
 
-    deep = [entry(hotkey, 0.8) for hotkey in "abcdefg"]
-    assert len(compact_history(deep)) == WINNER_HISTORY_DEPTH == 5
+    deeper_than_retention = [entry(f"hk{i}", 0.8) for i in range(WINNER_HISTORY_DEPTH + 3)]
+    assert len(compact_history(deeper_than_retention)) == WINNER_HISTORY_DEPTH
 
 
 def test_promote_winner_pushes_previous_down():
