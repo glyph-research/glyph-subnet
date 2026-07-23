@@ -537,7 +537,9 @@ def test_service_report_reads_locks_from_the_chain_and_survives_a_failed_read():
         WinnerEntry(hotkey="champ", repo="c/r", revision="rev1", ratio=0.4, commit_block=10)
     ]
     state.conviction_ledger.earned["champ"] = 5000.0
-    metagraph = type("Metagraph", (), {"hotkeys": ["champ"], "alpha_stake": [5000.0]})()
+    metagraph = type(
+        "Metagraph", (), {"hotkeys": ["burn-sink", "champ"], "alpha_stake": [0.0, 5000.0]}
+    )()
 
     class _Chain:
         def locked_alpha_by_hotkey(self, hotkeys):
@@ -582,9 +584,12 @@ def _deep_state(earned_by_hotkey=None, depth=None):
         for i in range(depth)
     ]
     state.conviction_ledger.earned.update(earned_by_hotkey or {})
+    # The burn sink occupies BURN_UID (index 0) on a real metagraph, as compute_weights
+    # assumes -- a fixture without it would let the report walk treat the top winner as
+    # the burn hotkey (or miss that the burn hotkey must be skipped at all).
+    hotkeys = ["burn-sink", *[w.hotkey for w in state.winner_history]]
     metagraph = type(
-        "Metagraph", (),
-        {"hotkeys": [w.hotkey for w in state.winner_history], "alpha_stake": [0.0] * depth},
+        "Metagraph", (), {"hotkeys": hotkeys, "alpha_stake": [0.0] * len(hotkeys)},
     )()
     return state, metagraph
 
@@ -698,3 +703,41 @@ def test_the_ladder_reaches_the_deepest_retained_entry():
     pair = compute_weights(hotkeys, history, is_burn_tempo=False, gated_hotkeys=last_two)
     assert pair[hotkeys.index(f"w{WINNER_HISTORY_DEPTH - 2}")] == 0.7
     assert pair[hotkeys.index(f"w{WINNER_HISTORY_DEPTH - 1}")] == 0.3
+
+
+def test_a_burn_hotkey_in_history_never_consumes_a_compliant_slot():
+    """Regression, PR #176 review: the lazy walk's stopping point is only sound while it
+    skips exactly what select_payees skips. compute_weights gates the burn hotkey, so if
+    this walk counted it as a compliant winner it would stop one entry early -- leaving
+    the next winner unevaluated, absent from the gated set, and paid with no conviction
+    check at all.
+    """
+
+    from core.constants import BURN_UID
+    from core.weights import compute_weights
+    from validator.service import _conviction_report_for_winners
+
+    # burn-sink and w0 are trivially compliant (nothing earned); w1..w4 each earned 5000
+    # with nothing locked, so every one of them must be gated.
+    state, metagraph = _deep_state({f"w{i}": 5000.0 for i in range(1, 5)}, depth=5)
+    state.winner_history.insert(0, WinnerEntry(
+        hotkey=metagraph.hotkeys[BURN_UID], repo="b/c", revision="revb", ratio=0.4, commit_block=1
+    ))
+
+    class _Chain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            return {hotkey: 0.0 for hotkey in hotkeys}
+
+    report = _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
+    assert metagraph.hotkeys[BURN_UID] not in report  # never read, never counted
+
+    gated = {hotkey for hotkey, entry in report.items() if not entry["compliant"]}
+    weights = compute_weights(
+        metagraph.hotkeys, state.winner_history, is_burn_tempo=False, gated_hotkeys=gated
+    )
+    paid = {hotkey: w for hotkey, w in zip(metagraph.hotkeys, weights) if w > 0}
+
+    # Every hotkey that gets paid must be one the report actually cleared.
+    for hotkey in paid:
+        assert report[hotkey]["compliant"] is True
+    assert paid == {"w0": 1.0}  # w1..w4 all gated -> w0 is the only qualifier

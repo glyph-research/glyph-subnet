@@ -681,7 +681,11 @@ def _update_conviction_ledger(state: ValidatorState, chain: BittensorChain, bloc
 
 
 def _conviction_report_for_winners(
-    state: ValidatorState, metagraph, block: int, chain: BittensorChain | None = None
+    state: ValidatorState,
+    metagraph,
+    block: int,
+    chain: BittensorChain | None = None,
+    burn_uid: int = BURN_UID,
 ) -> dict[str, dict]:
     """Compliance snapshot for the winners this weight-setting actually needs, logged as
     it goes.
@@ -695,10 +699,17 @@ def _conviction_report_for_winners(
     consistent, since selection stops at the same place.
     """
 
-    # Ineligible entries (deregistered/excluded) are skipped without a chain read: they
-    # can never be paid, exactly as in select_payees. The burn sink needs no special case
-    # here -- compute_weights excludes it from payees regardless of what this reports.
+    # Skipped without a chain read, because select_payees skips them too and this walk's
+    # stopping point is only sound while the two skip exactly the same entries:
+    #   * ineligible entries (deregistered/excluded) -- they can never be paid;
+    #   * the burn sink, which compute_weights unions into its gated set. If it sat in the
+    #     retained history and were counted here, it would consume a compliant slot, stop
+    #     this walk one entry early, and leave the next winner unevaluated -- absent from
+    #     the report, therefore absent from the caller's gated set, therefore paid with no
+    #     conviction check at all (PR #176 review).
     eligible = set(metagraph.hotkeys)
+    if 0 <= burn_uid < len(metagraph.hotkeys):
+        eligible.discard(metagraph.hotkeys[burn_uid])
     # The lock is alpha-only by design: on dTAO metagraphs S is the consensus stake weight
     # (alpha + tao-weighted root stake), so a winner could otherwise satisfy part of the
     # lock with root TAO. Prefer the pure per-hotkey alpha; S only as a fallback.
@@ -1089,7 +1100,9 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         # winner below its required conviction -- its share goes to the compliant winner
         # slot(s), burning only when all occupied slots are gated.
         _update_conviction_ledger(state, chain, block, tempo)
-        conviction = _conviction_report_for_winners(state, metagraph, block, chain)
+        conviction = _conviction_report_for_winners(
+            state, metagraph, block, chain, burn_uid=args.burn_uid
+        )
         gated = {hotkey for hotkey, entry in conviction.items() if not entry["compliant"]}
 
         weights, burn = decide_weights(
