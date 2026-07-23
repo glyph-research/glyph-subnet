@@ -173,7 +173,9 @@ def run(args: argparse.Namespace) -> None:
     from validator.service import _conviction_report_for_winners, _update_conviction_ledger
 
     _update_conviction_ledger(state, chain, block, tempo)
-    conviction = _conviction_report_for_winners(state, metagraph, block, chain)
+    conviction = _conviction_report_for_winners(
+        state, metagraph, block, chain, burn_uid=args.burn_uid
+    )
     gated = {hotkey for hotkey, entry in conviction.items() if not entry["compliant"]}
 
     weights, burn = decide_weights(
