@@ -1,9 +1,9 @@
 """issue #141: Miner Conviction -- winners must keep earnings staked to receive incentive.
 
 Covers the lock formula's boundaries, deterministic ledger accounting (gap backfill ==
-uninterrupted live tracking), gating semantics (reallocate to the compliant slot, burn
-only when every occupied slot fails -- issue #166; reversible; crown untouched),
-activation gating, persistence, and observability.
+uninterrupted live tracking), gating semantics (pay the two most recent compliant winners
+in the retained history, burn only when none qualifies -- issue #170; reversible; crown
+untouched), activation gating, persistence, and observability.
 """
 
 from core.constants import (
@@ -156,37 +156,120 @@ def test_report_covers_both_winner_slots_independently():
     assert report["prev"]["compliant"] is False
 
 
-# --- weights: gated share reallocates to the compliant slot, burns only when both fail ---
+# --- weights: pay the two most recent compliant winners, burn only if none qualify -------
 
 
 HOTKEYS = ["burn-sink", "champ", "prev", "bystander"]
+# Explicit improvements: these fixtures exercise the conviction ladder, so they pin their
+# own economics rather than inheriting whatever WinnerEntry's default happens to be (which
+# issue #180 set to 0.0 -- unstamped entries earn the base at most).
 HISTORY = [
-    WinnerEntry(hotkey="champ", repo="c/r", revision="rev1", ratio=0.4, commit_block=10),
-    WinnerEntry(hotkey="prev", repo="p/r", revision="rev2", ratio=0.5, commit_block=5),
+    WinnerEntry(hotkey="champ", repo="c/r", revision="rev1", ratio=0.4, commit_block=10, improvement=0.02),
+    WinnerEntry(hotkey="prev", repo="p/r", revision="rev2", ratio=0.5, commit_block=5, improvement=0.01),
 ]
 
 
-def test_gated_slot_share_reallocates_and_burns_only_when_both_fail():
-    # The issue #166 waterfall table, pinned exactly.
+def test_two_slot_history_pays_the_compliant_ones_and_burns_only_when_none_qualify():
     ungated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False)
-    assert ungated == [0.0, 0.7, 0.3, 0.0]  # (yes, yes): 0.7 / 0.3
+    assert ungated[1] > ungated[2] > 0.0  # champ improved more, so it earns more
+    assert sum(ungated) == 1.0
 
     prev_gated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"prev"})
-    assert prev_gated == [0.0, 1.0, 0.0, 0.0]  # (yes, no): champ takes the whole pot
+    assert prev_gated == [0.0, 1.0, 0.0, 0.0]  # champ is the only qualifier -> whole pot
 
     champ_gated = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"champ"})
-    assert champ_gated == [0.0, 0.0, 1.0, 0.0]  # (no, yes): prev takes the whole pot
+    assert champ_gated == [0.0, 0.0, 1.0, 0.0]  # ladder shifts up: prev takes 1.0
 
     both = compute_weights(HOTKEYS, HISTORY, is_burn_tempo=False, gated_hotkeys={"champ", "prev"})
-    assert both == [1.0, 0.0, 0.0, 0.0]  # (no, no): only now does the pot burn
+    assert both == [1.0, 0.0, 0.0, 0.0]  # nothing retained qualifies -> burn
 
 
-def test_single_occupied_slot_waterfall():
+LADDER_HOTKEYS = ["burn-sink", "w0", "w1", "w2", "w3", "bystander"]
+LADDER = [
+    WinnerEntry(
+        hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4 + i / 100,
+        commit_block=100 - i, improvement=0.01,
+    )
+    for i in range(4)
+]
+
+
+def _paid(weights, hotkeys):
+    """{hotkey: share} for everyone actually paid -- the ladder's semantics, independent
+    of the exact improvement-proportional split (that is pinned in test_weights.py)."""
+
+    return {hotkey: w for hotkey, w in zip(hotkeys, weights) if w > 0}
+
+
+def test_gated_winners_are_skipped_and_everyone_below_moves_up_a_rung():
+    # issue #170 + #177: a gated winner is skipped entirely -- it never hands its share
+    # sideways -- and the winners below it inherit the larger shares, the base included.
+    ungated = _paid(compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False), LADDER_HOTKEYS)
+    assert set(ungated) == {"w0", "w1", "w2", "w3"}  # small improvements -> all are paid
+    assert ungated["w0"] > ungated["w1"]  # only w0 earns the base share
+
+    top_gated = _paid(
+        compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w0"}),
+        LADDER_HOTKEYS,
+    )
+    assert "w0" not in top_gated
+    # w1 moved up into the top payee position and now earns the base share too. (Its exact
+    # share also rises because the scale-up denominator shrinks with one fewer payee.)
+    assert top_gated["w1"] > ungated["w1"]
+
+    # A gap in the middle is skipped, not collapsed onto one payee.
+    middle_gated = _paid(
+        compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w1"}),
+        LADDER_HOTKEYS,
+    )
+    assert set(middle_gated) == {"w0", "w2", "w3"}
+    assert middle_gated["w0"] > ungated["w0"]  # w0 keeps the top slot; the gap frees pot
+
+    all_gated = compute_weights(
+        LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w0", "w1", "w2", "w3"}
+    )
+    assert all_gated == [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # only now does the pot burn
+
+
+def test_deregistered_fallback_entries_are_never_paid():
+    # Eligibility does real work here: a retained winner absent from the metagraph (or
+    # excluded) must be skipped exactly like a gated one, never selected as a payee.
+    without_w1 = ["burn-sink", "w0", "w2", "w3", "bystander"]
+    weights = compute_weights(without_w1, LADDER, is_burn_tempo=False, gated_hotkeys={"w0"})
+    assert set(_paid(weights, without_w1)) == {"w2", "w3"}  # w1 gone -> w2/w3 paid
+    assert sum(weights) == 1.0
+
+
+def test_every_payout_row_sums_to_exactly_one():
+    rows = [
+        compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False),
+        compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w0"}),
+        compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w0", "w1", "w2"}),
+        compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=True),
+        compute_weights(LADDER_HOTKEYS, [], is_burn_tempo=False),
+    ]
+    for row in rows:
+        assert sum(row) == 1.0  # exact, not approx: validators must agree bit-for-bit
+
+
+def test_single_retained_winner_takes_the_pot_or_burns():
     solo = [HISTORY[0]]
     compliant = compute_weights(HOTKEYS, solo, is_burn_tempo=False, gated_hotkeys=set())
-    assert compliant == [0.0, 1.0, 0.0, 0.0]  # full pot, as today
+    assert compliant == [0.0, 1.0, 0.0, 0.0]
     gated = compute_weights(HOTKEYS, solo, is_burn_tempo=False, gated_hotkeys={"champ"})
-    assert gated == [1.0, 0.0, 0.0, 0.0]  # no other slot to reallocate to -> burn
+    assert gated == [1.0, 0.0, 0.0, 0.0]  # nothing further down the ladder -> burn
+
+
+def test_a_dethroned_but_locked_winner_keeps_earning():
+    # The intended incentive (issue #170): staying compliant keeps paying you after you
+    # lose the crown -- w3 sits at the bottom of the ladder and is paid the moment the
+    # more recent winners lapse.
+    idle = compute_weights(LADDER_HOTKEYS, LADDER, is_burn_tempo=False)
+    lapsed = compute_weights(
+        LADDER_HOTKEYS, LADDER, is_burn_tempo=False, gated_hotkeys={"w0", "w1", "w2"}
+    )
+    assert lapsed[4] > idle[4] > 0.0  # w3 earns while queued, and much more once they lapse
+    assert lapsed[4] == 1.0  # ... in fact the whole pot, as the only qualifier left
 
 
 def test_gating_is_reversible_and_never_touches_the_crown():
@@ -355,11 +438,15 @@ def test_run_once_does_not_gate_before_activation(monkeypatch, tmp_path):
     assert captured["gated"] == set()
 
 
-def test_scoring_version_is_untouched_by_conviction():
-    # Conviction gates weights only; it is not a scoring-rule change and must not have
-    # bumped SCORING_VERSION (persisted scores/exclusions stay valid). 3 is issue #136's
-    # commit-order-gauntlet bump, which landed independently of conviction.
-    assert SCORING_VERSION == 3
+def test_scoring_version_bumps_stay_score_compatible():
+    # Conviction gates weights only and never bumped SCORING_VERSION at all. The bumps
+    # that did happen -- v3 (commit-order gauntlet, #136) and v4 (improvement-proportional
+    # payment, #177) -- both changed policy, never a scoring surface, so each MUST carry a
+    # start-block entry or the deploy would wipe every persisted score and exclusion.
+    from core.constants import SCORING_VERSION_START_BLOCKS
+
+    assert SCORING_VERSION == 4
+    assert set(SCORING_VERSION_START_BLOCKS) == {3, 4}
 
 
 # --- backfill progress logging (issue #154) ----------------------------------------------
@@ -477,7 +564,9 @@ def test_service_report_reads_locks_from_the_chain_and_survives_a_failed_read():
         WinnerEntry(hotkey="champ", repo="c/r", revision="rev1", ratio=0.4, commit_block=10)
     ]
     state.conviction_ledger.earned["champ"] = 5000.0
-    metagraph = type("Metagraph", (), {"hotkeys": ["champ"], "alpha_stake": [5000.0]})()
+    metagraph = type(
+        "Metagraph", (), {"hotkeys": ["burn-sink", "champ"], "alpha_stake": [0.0, 5000.0]}
+    )()
 
     class _Chain:
         def locked_alpha_by_hotkey(self, hotkeys):
@@ -508,3 +597,219 @@ def test_build_weights_metrics_logs_conviction_only_when_the_read_was_available(
         conviction={"champ": dict(entry, conviction=None)},
     )
     assert "conviction/champ/conviction" not in without
+
+
+def _deep_state(earned_by_hotkey=None, depth=None):
+    """A retained history `depth` entries deep, with an optional per-hotkey earned ledger."""
+
+    from core.constants import WINNER_HISTORY_DEPTH
+
+    depth = depth or WINNER_HISTORY_DEPTH
+    state = ValidatorState()
+    state.winner_history = [
+        WinnerEntry(
+            hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4,
+            commit_block=10, improvement=0.01,
+        )
+        for i in range(depth)
+    ]
+    state.conviction_ledger.earned.update(earned_by_hotkey or {})
+    # The burn sink occupies BURN_UID (index 0) on a real metagraph, as compute_weights
+    # assumes -- a fixture without it would let the report walk treat the top winner as
+    # the burn hotkey (or miss that the burn hotkey must be skipped at all).
+    hotkeys = ["burn-sink", *[w.hotkey for w in state.winner_history]]
+    metagraph = type(
+        "Metagraph", (), {"hotkeys": hotkeys, "alpha_stake": [0.0] * len(hotkeys)},
+    )()
+    return state, metagraph
+
+
+def test_history_depth_is_the_owner_set_twenty():
+    # Issue #175: owner deepened the fallback ladder 5 -> 20. Pinned so a silent revert
+    # fails loudly rather than only shortening the ladder in production.
+    from core.constants import WINNER_HISTORY_DEPTH
+
+    assert WINNER_HISTORY_DEPTH == 20
+
+
+def test_report_stops_reading_once_the_pot_is_exhausted():
+    # issues #175/#177: the walk stops where payment stops, so cost tracks the number of
+    # winners actually paid rather than the retained depth. A >=5% improvement takes the
+    # whole pot, so exactly one winner is read however deep retention goes.
+    from core.weights import WinnerEntry as WE
+    from validator.service import _conviction_report_for_winners
+
+    state, metagraph = _deep_state()
+    state.winner_history[0] = WE(
+        hotkey="w0", repo="r0/c", revision="rev0", ratio=0.4, commit_block=10, improvement=0.05
+    )
+    asked = []
+
+    class _Chain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            asked.extend(hotkeys)
+            return {hotkey: 0.0 for hotkey in hotkeys}
+
+    report = _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
+    assert asked == ["w0"]  # pot exhausted by the first winner -> one chain read
+    assert list(report) == ["w0"]
+
+
+def test_report_walks_past_gated_winners_to_reach_the_ones_that_get_paid():
+    # Three gated winners (earned above the free allowance, nothing locked): the walk must
+    # read past them, and the first compliant winner below inherits the pot-exhausting
+    # share, so the read stops right there.
+    from core.weights import WinnerEntry as WE
+    from validator.service import _conviction_report_for_winners
+
+    state, metagraph = _deep_state({f"w{i}": 5000.0 for i in range(3)})
+    state.winner_history[3] = WE(
+        hotkey="w3", repo="r3/c", revision="rev3", ratio=0.4, commit_block=10, improvement=0.05
+    )
+    asked = []
+
+    class _Chain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            asked.extend(hotkeys)
+            return {hotkey: 0.0 for hotkey in hotkeys}
+
+    report = _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
+    assert asked == ["w0", "w1", "w2", "w3"]  # gated entries still cost a read each
+    assert [h for h, e in report.items() if not e["compliant"]] == ["w0", "w1", "w2"]
+    assert [h for h, e in report.items() if e["compliant"]] == ["w3"]
+
+
+def test_small_improvements_spread_the_pot_over_the_top_of_the_ladder():
+    # The other side of #177: at the minimum 1% improvement a winner earns 15% (the top
+    # payee 25 + 15 = 40%), so the pot runs out after five of them -- 0.40 + 4 x 0.15 =
+    # 1.00 exactly. Deep retention costs neither reads nor emission beyond that point.
+    from core.weights import compute_weights
+    from validator.service import _conviction_report_for_winners
+
+    state, metagraph = _deep_state()
+    asked = []
+
+    class _Chain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            asked.extend(hotkeys)
+            return {hotkey: 0.0 for hotkey in hotkeys}
+
+    _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
+    assert asked == [f"w{i}" for i in range(5)]
+
+    weights = compute_weights(
+        ["burn-sink", *metagraph.hotkeys], state.winner_history, is_burn_tempo=False
+    )
+    paid = [w for w in weights if w > 0]
+    assert len(paid) == 5
+    assert paid[0] == 0.4 and all(abs(w - 0.15) < 1e-12 for w in paid[1:])
+    assert sum(weights) == 1.0
+
+
+def test_every_retained_entry_is_evaluated_when_all_are_gated():
+    from core.constants import WINNER_HISTORY_DEPTH
+    from core.weights import compute_weights
+    from validator.service import _conviction_report_for_winners
+
+    earned = {f"w{i}": 5000.0 for i in range(WINNER_HISTORY_DEPTH)}
+    state, metagraph = _deep_state(earned)
+
+    class _Chain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            return {hotkey: 0.0 for hotkey in hotkeys}
+
+    report = _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
+    assert len(report) == WINNER_HISTORY_DEPTH  # nothing compliant -> the full walk
+    gated = {hotkey for hotkey, entry in report.items() if not entry["compliant"]}
+    weights = compute_weights(
+        ["burn-sink", *metagraph.hotkeys], state.winner_history, is_burn_tempo=False,
+        gated_hotkeys=gated,
+    )
+    assert weights[0] == 1.0  # 20 gated entries and no fallback left -> burn
+
+
+def test_one_failed_lock_read_isolates_to_that_hotkey():
+    # issue #175: a single flaky query must not drop every winner to the staked rule --
+    # at depth 20 that would silently un-gate winners that genuinely have no lock.
+    from validator.service import _conviction_report_for_winners
+
+    # w0 has stake but no lock (so the staked rule would wrongly pass it), w1 is locked.
+    state, metagraph = _deep_state({"w0": 5000.0, "w1": 5000.0})
+    metagraph.alpha_stake = [9000.0] * len(metagraph.hotkeys)
+
+    class _FlakyChain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            if hotkeys == ["w1"]:
+                raise ConnectionError("runtime api hiccup")
+            return {hotkey: 0.0 for hotkey in hotkeys}
+
+    report = _conviction_report_for_winners(state, metagraph, LOCK_START, _FlakyChain())
+    assert report["w0"]["conviction"] == 0.0 and report["w0"]["compliant"] is False
+    # w1's own read failed -> staked rule for it alone (9000 staked >= 4000 required).
+    assert report["w1"]["conviction"] is None and report["w1"]["compliant"] is True
+
+
+def test_the_ladder_reaches_the_deepest_retained_entry():
+    # issue #175: with everything above it gated, the last retained entry is still paid --
+    # burning is the last resort, not the second one.
+    from core.constants import WINNER_HISTORY_DEPTH
+    from core.weights import compute_weights
+
+    history = [
+        WinnerEntry(
+            hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4,
+            commit_block=10, improvement=0.01,
+        )
+        for i in range(WINNER_HISTORY_DEPTH)
+    ]
+    hotkeys = ["burn-sink", *[w.hotkey for w in history]]
+    all_but_last = {f"w{i}" for i in range(WINNER_HISTORY_DEPTH - 1)}
+
+    weights = compute_weights(hotkeys, history, is_burn_tempo=False, gated_hotkeys=all_but_last)
+    assert weights[hotkeys.index(f"w{WINNER_HISTORY_DEPTH - 1}")] == 1.0
+    assert weights[0] == 0.0 and sum(weights) == 1.0
+
+    all_but_last_two = {f"w{i}" for i in range(WINNER_HISTORY_DEPTH - 2)}
+    pair = compute_weights(hotkeys, history, is_burn_tempo=False, gated_hotkeys=all_but_last_two)
+    top = pair[hotkeys.index(f"w{WINNER_HISTORY_DEPTH - 2}")]
+    below = pair[hotkeys.index(f"w{WINNER_HISTORY_DEPTH - 1}")]
+    assert top > below > 0.0  # the top payee of the pair earns the base share on top
+    assert sum(pair) == 1.0
+
+
+def test_a_burn_hotkey_in_history_never_consumes_a_compliant_slot():
+    """Regression, PR #176 review: the lazy walk's stopping point is only sound while it
+    skips exactly what select_payees skips. compute_weights gates the burn hotkey, so if
+    this walk counted it as a compliant winner it would stop one entry early -- leaving
+    the next winner unevaluated, absent from the gated set, and paid with no conviction
+    check at all.
+    """
+
+    from core.constants import BURN_UID
+    from core.weights import compute_weights
+    from validator.service import _conviction_report_for_winners
+
+    # burn-sink and w0 are trivially compliant (nothing earned); w1..w4 each earned 5000
+    # with nothing locked, so every one of them must be gated.
+    state, metagraph = _deep_state({f"w{i}": 5000.0 for i in range(1, 5)}, depth=5)
+    state.winner_history.insert(0, WinnerEntry(
+        hotkey=metagraph.hotkeys[BURN_UID], repo="b/c", revision="revb", ratio=0.4, commit_block=1
+    ))
+
+    class _Chain:
+        def locked_alpha_by_hotkey(self, hotkeys):
+            return {hotkey: 0.0 for hotkey in hotkeys}
+
+    report = _conviction_report_for_winners(state, metagraph, LOCK_START, _Chain())
+    assert metagraph.hotkeys[BURN_UID] not in report  # never read, never counted
+
+    gated = {hotkey for hotkey, entry in report.items() if not entry["compliant"]}
+    weights = compute_weights(
+        metagraph.hotkeys, state.winner_history, is_burn_tempo=False, gated_hotkeys=gated
+    )
+    paid = {hotkey: w for hotkey, w in zip(metagraph.hotkeys, weights) if w > 0}
+
+    # Every hotkey that gets paid must be one the report actually cleared.
+    for hotkey in paid:
+        assert report[hotkey]["compliant"] is True
+    assert paid == {"w0": 1.0}  # w1..w4 all gated -> w0 is the only qualifier

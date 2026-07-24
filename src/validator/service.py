@@ -46,7 +46,7 @@ from core.constants import (
     SCORING_VERSION,
     THROUGHPUT_FLOOR_BPS,
     WINDOW_ANCHOR_BLOCK,
-    WINNER_LIMIT,
+    WINNER_HISTORY_DEPTH,
 )
 from core.log_config import add_logging_args
 from core.conviction import conviction_report, ledger_catchup, ledger_grid
@@ -59,7 +59,14 @@ from core.state import (
 )
 from core.version import assert_weights_version_matches, local_version_key
 from core.wandb_logger import WandbLogger, build_round_metrics, build_weights_metrics, make_wandb_logger
-from core.weights import WinnerEntry, compact_history, promote_winner, rank_key, should_promote
+from core.weights import (
+    WinnerEntry,
+    compact_history,
+    promote_winner,
+    rank_key,
+    should_promote,
+    winner_share,
+)
 from eval.corpus import StaticLocalProvider
 from eval.evaluator import paired_eval
 from eval.live_bench import (
@@ -680,11 +687,35 @@ def _update_conviction_ledger(state: ValidatorState, chain: BittensorChain, bloc
 
 
 def _conviction_report_for_winners(
-    state: ValidatorState, metagraph, block: int, chain: BittensorChain | None = None
+    state: ValidatorState,
+    metagraph,
+    block: int,
+    chain: BittensorChain | None = None,
+    burn_uid: int = BURN_UID,
 ) -> dict[str, dict]:
-    """Compliance snapshot for the current winner slots, logged every weight-setting."""
+    """Compliance snapshot for the winners this weight-setting actually needs, logged as
+    it goes.
 
-    winners = [w.hotkey for w in state.winner_history[:WINNER_LIMIT]]
+    Walks the retained history newest-first exactly as payment does and stops as soon as
+    the pot is exhausted (issues #175/#177): the entries below that point cannot be paid
+    this tempo, so evaluating them would buy nothing. The cost therefore tracks how many
+    winners actually get paid -- one read when a big improvement takes the whole pot, more
+    as shares get smaller -- rather than the retained depth. Entries not reached are absent
+    from the report, hence not in the caller's gated set, which is consistent because
+    payee selection stops in the same place.
+    """
+
+    # Skipped without a chain read, because select_payees skips them too and this walk's
+    # stopping point is only sound while the two skip exactly the same entries:
+    #   * ineligible entries (deregistered/excluded) -- they can never be paid;
+    #   * the burn sink, which compute_weights unions into its gated set. If it sat in the
+    #     retained history and were counted here, it would consume a compliant slot, stop
+    #     this walk one entry early, and leave the next winner unevaluated -- absent from
+    #     the report, therefore absent from the caller's gated set, therefore paid with no
+    #     conviction check at all (PR #176 review).
+    eligible = set(metagraph.hotkeys)
+    if 0 <= burn_uid < len(metagraph.hotkeys):
+        eligible.discard(metagraph.hotkeys[burn_uid])
     # The lock is alpha-only by design: on dTAO metagraphs S is the consensus stake weight
     # (alpha + tao-weighted root stake), so a winner could otherwise satisfy part of the
     # lock with root TAO. Prefer the pure per-hotkey alpha; S only as a fallback.
@@ -696,24 +727,47 @@ def _conviction_report_for_winners(
         if stakes is not None
         else {}
     )
-    # Conviction v1.1 (issue #156): read the winners' chain-locked alpha whenever the
-    # chain supports it -- also before CONVICTION_LOCK_CHECK_START_BLOCK, so operators
-    # can watch winners lock up during the grace window. Best-effort: on failure the
-    # report falls back to the v1 staked rule for this tempo (locked <= staked always,
-    # so a lock-compliant winner can never be wrongly gated by the fallback).
-    locked = None
     read_locked = getattr(chain, "locked_alpha_by_hotkey", None)
-    if winners and read_locked is not None:
-        try:
-            locked = read_locked(winners)
-        except Exception as exc:  # noqa: BLE001 - never block weight-setting
-            bt_logging.warning(
-                f"conviction: lock query failed -- gating on staked alpha this tempo "
-                f"(v1 rule): {exc}"
+
+    report: dict[str, dict] = {}
+    pot_left = 1.0
+    paid_any = False
+    for entry in state.winner_history[:WINNER_HISTORY_DEPTH]:
+        if entry.hotkey in report or entry.hotkey not in eligible:
+            continue
+        # Conviction v1.1 (issue #156): read this winner's chain-locked alpha whenever the
+        # chain supports it. Best-effort per hotkey (issue #175): a failed read leaves this
+        # one winner on the v1 staked rule (locked <= staked always, so the fallback can
+        # never wrongly gate a lock-compliant winner) without disturbing the others.
+        locked = None
+        if read_locked is not None:
+            try:
+                locked = read_locked([entry.hotkey])
+            except Exception as exc:  # noqa: BLE001 - never block weight-setting
+                bt_logging.warning(
+                    f"conviction: lock query failed for {entry.hotkey} -- gating it on "
+                    f"staked alpha this tempo (v1 rule): {exc}"
+                )
+        report.update(
+            conviction_report(
+                state.conviction_ledger,
+                [entry.hotkey],
+                staked,
+                block=block,
+                conviction_by_hotkey=locked,
             )
-    report = conviction_report(
-        state.conviction_ledger, winners, staked, block=block, conviction_by_hotkey=locked
-    )
+        )
+        if report[entry.hotkey]["compliant"]:
+            # Mirror allocate_pot's walk: the first compliant winner takes the base share,
+            # and once the pot is gone nothing below it can be paid, so nothing below it
+            # needs a chain read. (When the shares under-subscribe the pot instead, every
+            # compliant entry is paid a scaled-up share, so the walk runs to full depth --
+            # which is exactly when those reads are needed.)
+            pot_left -= min(winner_share(entry, is_top_payee=not paid_any), pot_left)
+            paid_any = True
+            if pot_left <= 0.0:
+                break
+
     for hotkey, entry in report.items():
         conviction_part = (
             f" conviction={entry['conviction']:.1f}" if entry["conviction"] is not None else ""
@@ -727,10 +781,11 @@ def _conviction_report_for_winners(
             bt_logging.info(line)
         else:
             bt_logging.warning(
-                f"{line} -- winner is below its required conviction; its share goes to the "
-                f"other winner slot this tempo (or burns if no slot meets its conviction) "
-                f"and restores automatically once its conviction covers the requirement "
-                f"(`btcli lock add --netuid 117`, issues #141/#166)"
+                f"{line} -- winner is below its required conviction; it is skipped this "
+                f"tempo in favour of the next compliant winner in history (the pot burns "
+                f"only if none qualifies) and is paid again automatically once its "
+                f"conviction covers the requirement (`btcli lock add --netuid 117`, "
+                f"issues #141/#170)"
             )
     return report
 
@@ -1058,7 +1113,9 @@ def run_once(args: argparse.Namespace, wandb_logger: WandbLogger | None = None) 
         # winner below its required conviction -- its share goes to the compliant winner
         # slot(s), burning only when all occupied slots are gated.
         _update_conviction_ledger(state, chain, block, tempo)
-        conviction = _conviction_report_for_winners(state, metagraph, block, chain)
+        conviction = _conviction_report_for_winners(
+            state, metagraph, block, chain, burn_uid=args.burn_uid
+        )
         gated = {hotkey for hotkey, entry in conviction.items() if not entry["compliant"]}
 
         weights, burn = decide_weights(

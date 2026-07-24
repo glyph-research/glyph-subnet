@@ -260,3 +260,22 @@ def test_locked_alpha_by_hotkey_aggregates_per_hotkey_and_converts_rao_to_alpha(
         "hk-a": 27_681.451239434,
         "hk-b": 0.0,
     }
+
+
+def test_locked_alpha_isolates_a_failing_hotkey_from_the_rest():
+    # issue #175: one flaky runtime call must not blank the whole batch -- only the hotkey
+    # that failed reports None (its caller then falls back to the staked rule for it alone).
+    chain = object.__new__(BittensorChain)
+    chain.config = type("Config", (), {"netuid": 117, "blockmachine_api_key": None})()
+
+    class _Subtensor:
+        def get_hotkey_conviction(self, hotkey, netuid):
+            if hotkey == "hk-flaky":
+                raise ConnectionError("runtime api unavailable")
+            return 27_681_451_239_434.0
+
+    chain.subtensor = _Subtensor()
+    locked = chain.locked_alpha_by_hotkey(["hk-a", "hk-flaky", "hk-b"])
+    assert locked["hk-a"] == 27_681.451239434
+    assert locked["hk-b"] == 27_681.451239434
+    assert locked["hk-flaky"] is None

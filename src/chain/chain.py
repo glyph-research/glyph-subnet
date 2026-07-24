@@ -74,7 +74,7 @@ class BittensorChain:
         mg = self.subtensor.metagraph(netuid=self.config.netuid, block=block)
         return {hotkey: float(e) for hotkey, e in zip(mg.hotkeys, mg.emission)}
 
-    def locked_alpha_by_hotkey(self, hotkeys: list[str]) -> dict[str, float]:
+    def locked_alpha_by_hotkey(self, hotkeys: list[str]) -> dict[str, float | None]:
         """Decay-adjusted alpha locked on each hotkey (``btcli lock add`` /
         ``SubtensorModule.lock_stake``) -- Conviction v1.1's gated quantity (issue #156).
 
@@ -82,14 +82,30 @@ class BittensorChain:
         all locking coldkeys (consistent with v1's any-coldkey stake rule), so no coldkey
         enumeration is needed. It returns the decayed lock mass in rao (verified live on
         netuid 117: exactly equal to the lock's stored ``locked_mass``), deterministic at
-        a given block, so every validator measures the same value. Only ever called for
-        the (at most two) winner slots per weight-setting.
+        a given block, so every validator measures the same value.
+
+        Each hotkey's query is isolated (issue #175): a failed read yields ``None`` for
+        that hotkey alone -- which the caller reads as "no measurement", falling back to
+        the staked rule for that one winner -- instead of dropping every winner in the
+        batch to the fallback because one RPC hiccuped. That matters as the fallback
+        ladder deepens: one flaky query per tempo is likely across 20 entries, and a
+        wholesale fallback would silently un-gate winners that genuinely have no lock.
         """
 
-        return {
-            hotkey: float(self.subtensor.get_hotkey_conviction(hotkey, self.config.netuid)) / 1e9
-            for hotkey in hotkeys
-        }
+        from bittensor.utils.btlogging import logging as bt_logging
+
+        locked: dict[str, float | None] = {}
+        for hotkey in hotkeys:
+            try:
+                raw = self.subtensor.get_hotkey_conviction(hotkey, self.config.netuid)
+                locked[hotkey] = float(raw) / 1e9
+            except Exception as exc:  # noqa: BLE001 - isolate to this hotkey
+                bt_logging.warning(
+                    f"conviction query failed for {hotkey}, using the staked rule for it "
+                    f"this tempo: {self._redact_key(str(exc))}"
+                )
+                locked[hotkey] = None
+        return locked
 
     def _archive_endpoints(self) -> list[str]:
         """Ordered archive candidates for historical queries (issue #151): blockmachine

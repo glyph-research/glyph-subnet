@@ -119,9 +119,35 @@ BLOCKMACHINE_RPC_ENDPOINT = "wss://rpc.blockmachine.io"
 # --- Rolling-winner policy -----------------------------------------------------
 # current winner / previous winner. Effective split after the temporal burn is
 # 63% / 27% / 10% burned (see burn_schedule; issue #168 widened the window 4 -> 10).
-WINNER_WEIGHTS = (0.70, 0.30)
-WINNER_LIMIT = 2
-DEFAULT_WIN_MARGIN = 0.05  # epsilon: 5% relative ratio improvement required to dethrone
+# Dynamic reward distribution (issue #177) replaced the fixed 70/30 slot split: emission is
+# earned by how much a winner moved the frontier, not by which slot it occupies. Each
+# winner's computed share is
+#     WINNER_BASE_SHARE (top payee only) + WINNER_IMPROVEMENT_MULTIPLIER x improvement
+# where ``improvement`` is the fractional ratio gain it achieved over the winner it
+# dethroned, recorded at promotion time. 15.0 x a fraction == 15% of the pot per 1%
+# improvement, linear in fractional percents (1.5% -> 22.5%). Owner decisions, all pinned
+# by tests: the base is paid ONCE, to the top payee only; there is NO per-winner ceiling
+# (a >=5% jump computes to >=100% and takes the whole pot); shares are allocated top-down
+# with a remainder cap, and if they under-subscribe the pot the paid shares are scaled up
+# to fill it (so the pot always goes to winners unless nobody qualifies at all).
+WINNER_BASE_SHARE = 0.25
+WINNER_IMPROVEMENT_MULTIPLIER = 15.0
+# Retained winner-history depth (issue #170), deliberately deeper than the paid slots:
+# payment walks the history newest-first and pays the first WINNER_LIMIT entries that are
+# both eligible and conviction-compliant, so entries below the paid slots are the fallback
+# ladder that keeps emission flowing instead of burning. Owner-set to 20 (issue #175,
+# from 5): deep enough that burning is close to a last resort. Owner-accepted consequence
+# of the depth: a fallback whose cumulative earned is below CONVICTION_FREE_ALPHA has
+# required_conviction == 0 and so is payable with nothing locked -- flowing beats burning,
+# and each such hotkey can collect at most CONVICTION_FREE_ALPHA before its own
+# requirement gates it (the ledger is permanent per hotkey).
+# Retention only -- the crown is always history[0] regardless of compliance.
+WINNER_HISTORY_DEPTH = 20
+# epsilon: relative ratio improvement required to dethrone. Owner-set to 1% (issue #177,
+# from 5%): with emission now proportional to improvement, the margin no longer has to
+# carry the "is this worth a crown change" judgement on its own -- a marginal win earns a
+# marginal share. Consensus-critical and miner-facing: changing it changes the competition.
+DEFAULT_WIN_MARGIN = 0.01
 
 # --- Codec artifact limits ------------------------------------------------------
 DEFAULT_MAX_ARTIFACT_BYTES = 10 * 2**30  # 10 GiB
@@ -151,7 +177,7 @@ MAX_CHALLENGERS_PER_ROUND = 32
 # best-of-round -- who wins a multi-challenger round changes, so scores and one-shot
 # exclusions decided under the old ordering must not carry across the transition (validators
 # that evaluated the same round under different policies would otherwise disagree forever).
-SCORING_VERSION = 3
+SCORING_VERSION = 4
 
 # Score-preserving version transitions (issue #143). An entry here declares "this bump is
 # score-compatible: ordering/policy only, ratio semantics unchanged" -- older-version scores
@@ -169,6 +195,12 @@ SCORING_VERSION_START_BLOCKS: dict[int, int] = {
     # v2 -> v3 changed only contested-round promotion ordering (commit-order gauntlet,
     # issue #136); scoring surfaces are byte-identical to v2. Block = implementation time.
     3: 8_645_052,
+    # v3 -> v4 changed how the pot is SPLIT among winners and the dethrone margin (issue
+    # #177), not how a codec is scored: same corpus sources and sampling, same aggregation,
+    # same validity gates, same BASELINE_LEVEL. Persisted ratios therefore still mean
+    # exactly what they meant under v3, so they stay valid and the deploy costs no
+    # re-evaluation storm (#143/#144). Block = implementation time.
+    4: 8_683_515,
 }
 
 # --- Per-source evaluation (issue #10; remixed by issue #112) -------------------

@@ -516,7 +516,12 @@ def test_idle_empty_history_burns_on_normal_tempo():
 
 
 def test_two_winner_split_on_normal_tempo():
-    history = [WinnerEntry("hkA", "a/c", "rev123456", 0.4, 1), WinnerEntry("hkB", "b/c", "rev654321", 0.5, 2)]
+    # issue #177: the split follows each winner's recorded improvement, not slot position.
+    # hkA +2% -> 25 + 30 = 55%, hkB +1% -> 15%; 70% total, scaled up to fill the pot.
+    history = [
+        WinnerEntry("hkA", "a/c", "rev123456", 0.4, 1, improvement=0.02),
+        WinnerEntry("hkB", "b/c", "rev654321", 0.5, 2, improvement=0.01),
+    ]
     outputs = [("s0", 100, "h")]
     # find a non-burn tempo
     for block in _window_blocks():
@@ -524,8 +529,9 @@ def test_two_winner_split_on_normal_tempo():
             HOTKEYS, history, block=block, tempo=TEMPO, last_round_outputs=outputs, anchor=ANCHOR
         )
         if not burn:
-            assert weights[1] == pytest.approx(0.70)
-            assert weights[2] == pytest.approx(0.30)
+            assert weights[1] == pytest.approx(0.55 / 0.70)
+            assert weights[2] == pytest.approx(0.15 / 0.70)
+            assert sum(weights) == 1.0
             break
 
 
