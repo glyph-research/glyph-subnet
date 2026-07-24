@@ -183,12 +183,14 @@ def test_a_vacant_crown_winner_earns_the_base_and_nothing_deeper():
     assert deeper[1] == 0.0
 
 
-def test_pre_177_entries_migrate_to_the_minimum_margin():
-    # Persisted entries have no improvement field; the default must be the smallest
-    # nonzero margin so they earn a small share rather than nothing or an invented one.
-    legacy = WinnerEntry(hotkey="old", repo="o/c", revision="rev123456", ratio=0.5)
-    assert legacy.improvement == DEFAULT_WIN_MARGIN == 0.01
-    assert winner_share(legacy, is_top_payee=False) == 0.15
+def test_an_unstamped_entry_earns_the_base_at_most():
+    # Issue #180 made the field default 0.0 rather than a nonzero fallback: a value that
+    # goes missing can then never silently pay out a base-plus-15% share. Pre-#177 entries
+    # get their real improvement recomputed at load time instead (see test_state.py).
+    unstamped = WinnerEntry(hotkey="old", repo="o/c", revision="rev123456", ratio=0.5)
+    assert unstamped.improvement == 0.0
+    assert winner_share(unstamped, is_top_payee=False) == 0.0
+    assert winner_share(unstamped, is_top_payee=True) == 0.25
 
 
 def test_promotion_records_the_improvement_it_earned():

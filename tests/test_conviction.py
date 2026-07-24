@@ -160,9 +160,12 @@ def test_report_covers_both_winner_slots_independently():
 
 
 HOTKEYS = ["burn-sink", "champ", "prev", "bystander"]
+# Explicit improvements: these fixtures exercise the conviction ladder, so they pin their
+# own economics rather than inheriting whatever WinnerEntry's default happens to be (which
+# issue #180 set to 0.0 -- unstamped entries earn the base at most).
 HISTORY = [
-    WinnerEntry(hotkey="champ", repo="c/r", revision="rev1", ratio=0.4, commit_block=10),
-    WinnerEntry(hotkey="prev", repo="p/r", revision="rev2", ratio=0.5, commit_block=5),
+    WinnerEntry(hotkey="champ", repo="c/r", revision="rev1", ratio=0.4, commit_block=10, improvement=0.02),
+    WinnerEntry(hotkey="prev", repo="p/r", revision="rev2", ratio=0.5, commit_block=5, improvement=0.01),
 ]
 
 
@@ -183,7 +186,10 @@ def test_two_slot_history_pays_the_compliant_ones_and_burns_only_when_none_quali
 
 LADDER_HOTKEYS = ["burn-sink", "w0", "w1", "w2", "w3", "bystander"]
 LADDER = [
-    WinnerEntry(hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4 + i / 100, commit_block=100 - i)
+    WinnerEntry(
+        hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4 + i / 100,
+        commit_block=100 - i, improvement=0.01,
+    )
     for i in range(4)
 ]
 
@@ -601,7 +607,10 @@ def _deep_state(earned_by_hotkey=None, depth=None):
     depth = depth or WINNER_HISTORY_DEPTH
     state = ValidatorState()
     state.winner_history = [
-        WinnerEntry(hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4, commit_block=10)
+        WinnerEntry(
+            hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4,
+            commit_block=10, improvement=0.01,
+        )
         for i in range(depth)
     ]
     state.conviction_ledger.earned.update(earned_by_hotkey or {})
@@ -747,7 +756,10 @@ def test_the_ladder_reaches_the_deepest_retained_entry():
     from core.weights import compute_weights
 
     history = [
-        WinnerEntry(hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4, commit_block=10)
+        WinnerEntry(
+            hotkey=f"w{i}", repo=f"r{i}/c", revision=f"rev{i}", ratio=0.4,
+            commit_block=10, improvement=0.01,
+        )
         for i in range(WINNER_HISTORY_DEPTH)
     ]
     hotkeys = ["burn-sink", *[w.hotkey for w in history]]

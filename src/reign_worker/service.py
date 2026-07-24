@@ -9,6 +9,8 @@ runnable as its own PM2 process.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from bittensor.utils.btlogging import logging as bt_logging
 
 from eval.evaluator import paired_eval
@@ -141,7 +143,14 @@ def run_round(
         inc_outcome = outcomes[incumbent_commitment.hotkey]
         if inc_outcome.score.valid:
             current_ratio = inc_outcome.score.ratio
-            state.winner_history[0] = state.scores[incumbent_commitment.key].as_winner()
+            # Refresh the incumbent's ratio, but keep the improvement it earned when it
+            # took the crown (issue #180): as_winner() builds a fresh entry with the field
+            # default, so assigning it straight in would erase that improvement every
+            # single round and quietly collapse the champion's share to the base.
+            state.winner_history[0] = replace(
+                state.scores[incumbent_commitment.key].as_winner(),
+                improvement=state.winner_history[0].improvement,
+            )
         else:
             # Incumbent failed its own re-evaluation -> actually vacate the crown (issue #67).
             # rolling_weights_for_hotkeys only looks at winner_history's presence, never

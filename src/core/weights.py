@@ -12,7 +12,6 @@ from dataclasses import dataclass, replace
 
 from core.constants import (
     BURN_UID,
-    DEFAULT_WIN_MARGIN,
     WINNER_BASE_SHARE,
     WINNER_HISTORY_DEPTH,
     WINNER_IMPROVEMENT_MULTIPLIER,
@@ -32,10 +31,13 @@ class WinnerEntry:
     # same-round (challenger vs the incumbent it beat, on identical streams), and the
     # opponent may not even exist by the time weights are set. 0.0 for a vacant crown
     # (nothing was dethroned) -- such a winner earns the base share and no more.
-    # The default is the migration value for entries persisted before #177: the minimum
-    # possible margin, so they earn the smallest nonzero improvement share rather than
-    # nothing or an invented large number.
-    improvement: float = DEFAULT_WIN_MARGIN
+    # The default is deliberately 0.0 rather than a nonzero fallback (issue #180): an
+    # unstamped entry then earns the base share at most, so a value that goes missing can
+    # never silently pay out a base-plus-15% share. Entries persisted before #177 get
+    # their real improvement recomputed from adjacent ratios at load time
+    # (``core.state.backfill_improvements``), which is where the one genuine fallback
+    # lives -- the oldest retained entry, whose opponent is no longer retained.
+    improvement: float = 0.0
 
     @property
     def key(self) -> str:
