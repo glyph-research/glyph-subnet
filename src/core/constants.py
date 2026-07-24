@@ -203,6 +203,14 @@ SCORING_VERSION_START_BLOCKS: dict[int, int] = {
     4: 8_683_515,
 }
 
+# --- Validator state persistence (issue #187) ------------------------------------
+# Rolling backups kept alongside validator_state.json, written after each successful save.
+# Purely operator-local durability -- never consensus-relevant, so this is safe to differ
+# per operator. 3 covers the realistic failure (a restart mid-write) with ~90 KB of disk;
+# the incident that motivated it found the newest unrelated backup was 7 days old, which
+# would have cost a week of scores and exclusions. 0 disables backups entirely.
+STATE_BACKUP_COUNT = 3
+
 # --- Per-source evaluation (issue #10; remixed by issue #112) -------------------
 # Score each miner on three 4 MiB windows: two random fineweb-edu windows and one pile
 # window, each stream weighted equally in the final score (flat average -- see

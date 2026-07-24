@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from core.constants import DEFAULT_WIN_MARGIN
+from core.constants import DEFAULT_WIN_MARGIN, STATE_BACKUP_COUNT
 from core.conviction import ConvictionLedger
 from core.weights import WinnerEntry
 
@@ -204,11 +206,69 @@ def backfill_improvements(state: ValidatorState, unstamped: list[bool]) -> None:
         history[index] = replace(entry, improvement=improvement)
 
 
-def load_state(path: Path) -> ValidatorState:
-    if not path.exists():
-        return ValidatorState()
-    raw = path.read_text()
-    state = ValidatorState.model_validate_json(raw)
+STATE_BACKUP_SUFFIX = ".bak-"
+
+
+def _log(message: str, *, level: str = "warning") -> None:
+    """Log through bittensor's logger, imported lazily so ``core.state`` stays importable
+    (and cheap) without the SDK. Indirected through one function so tests can capture what
+    an operator would actually see on a recovery."""
+
+    from bittensor.utils.btlogging import logging as bt_logging
+
+    getattr(bt_logging, level)(message)
+
+
+def _backup_paths(path: Path) -> list[Path]:
+    """Existing rotated backups of ``path``, newest first.
+
+    Ordered by filename: the stamp is fixed-width UTC, so lexicographic order is
+    chronological order, and unlike mtime it survives an operator copying files around.
+    """
+
+    return sorted(path.parent.glob(f"{path.name}{STATE_BACKUP_SUFFIX}*"), reverse=True)
+
+
+def _rotate_backups(path: Path, payload: str) -> None:
+    """Keep the newest ``STATE_BACKUP_COUNT`` snapshots of successful saves (issue #187).
+
+    Written from the payload just committed, so every backup is a known-good save rather
+    than a copy of whatever happened to be on disk. A backup is a convenience, never a
+    correctness requirement: failing to write or prune one must not fail the save that
+    already succeeded, so this only logs.
+    """
+
+    if STATE_BACKUP_COUNT <= 0:
+        return
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    backup = path.with_name(f"{path.name}{STATE_BACKUP_SUFFIX}{stamp}")
+    try:
+        backup.write_text(payload)
+        for stale in _backup_paths(path)[STATE_BACKUP_COUNT:]:
+            stale.unlink()
+    except OSError as exc:
+        _log(f"could not write/prune state backup {backup.name}: {exc}")
+
+
+def _load_from(path: Path) -> ValidatorState | None:
+    """Parse one state file, or ``None`` if it is unreadable, empty, or corrupt.
+
+    Returning ``None`` rather than raising is what lets ``load_state`` walk to the next
+    candidate: an empty file is exactly the corruption #187 hit, and it must be survivable.
+    """
+
+    try:
+        raw = path.read_text()
+    except OSError:
+        return None
+    if not raw.strip():
+        return None
+    try:
+        # pydantic's ValidationError subclasses ValueError, so this covers both a malformed
+        # document and a well-formed one that isn't a ValidatorState.
+        state = ValidatorState.model_validate_json(raw)
+    except ValueError:
+        return None
     # Which winner entries predate #177's improvement field, as written on disk -- pydantic
     # has already filled the default in by the time we see the model, so absence can only
     # be observed in the raw JSON (issue #180).
@@ -223,6 +283,71 @@ def load_state(path: Path) -> ValidatorState:
     return state
 
 
+def load_state(path: Path) -> ValidatorState:
+    """Load validator state, degrading rather than crashing on a damaged file (issue #187).
+
+    A validator that starts with a loud warning beats one that cannot start at all: the
+    production incident was a 0-byte state file after an auto-update restart, which raised
+    out of here and crash-looped every round and every commit-phase poll. Note the asymmetry
+    that fix removes -- a *missing* file has always started fine, so the more likely
+    corruption must not be the less survivable one.
+
+    Order of preference: the state file, then the newest usable rotated backup, then a fresh
+    ``ValidatorState``. Every fallback is logged at ERROR, because each one means real lost
+    work (scores, exclusions, commitments) that an operator needs to know about -- the
+    conviction ledger is the one part that always rebuilds deterministically from the
+    archive.
+    """
+
+    if not path.exists():
+        return ValidatorState()
+    state = _load_from(path)
+    if state is not None:
+        return state
+
+    _log(f"validator state at {path} is empty or corrupt -- trying rotated backups", level="error")
+    for backup in _backup_paths(path):
+        recovered = _load_from(backup)
+        if recovered is not None:
+            _log(
+                f"recovered validator state from backup {backup.name} -- anything scored "
+                f"since that backup was written is lost and will be re-earned",
+                level="error",
+            )
+            return recovered
+    _log(
+        "no usable validator state backup found -- starting from empty state; scores, "
+        "exclusions and commitments will be rebuilt from scratch (the conviction ledger "
+        "rebuilds deterministically from the archive)",
+        level="error",
+    )
+    return ValidatorState()
+
+
 def save_state(path: Path, state: ValidatorState) -> None:
+    """Persist ``state`` atomically, then refresh the rolling backups (issue #187).
+
+    This used to be a bare ``Path.write_text``, which truncates the file to zero and *then*
+    writes: any process death inside that window left a 0-byte state file behind. The
+    auto-updater restarting the validator on a version bump is exactly such an event, so
+    every operator was exposed on every release -- a fleet-wide hazard on a timer rather
+    than bad luck.
+
+    Writing a sibling temp file and ``os.replace``-ing it into place is atomic on POSIX
+    within a filesystem: a restart sees either the complete old file or the complete new
+    one, never an empty one. The temp file is a sibling deliberately -- ``os.replace``
+    across filesystems is not atomic.
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state.model_dump(mode="json"), indent=2, sort_keys=True))
+    payload = json.dumps(state.model_dump(mode="json"), indent=2, sort_keys=True)
+    tmp = path.with_name(f"{path.name}.tmp")
+    with tmp.open("w") as handle:
+        handle.write(payload)
+        handle.flush()
+        # replace() orders the rename, it does not guarantee the bytes reached disk first;
+        # fsync buys durability against machine-level power loss too, not just the process
+        # death that actually bit us.
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    _rotate_backups(path, payload)
