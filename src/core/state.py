@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from core.constants import DEFAULT_WIN_MARGIN
 from core.conviction import ConvictionLedger
 from core.weights import WinnerEntry
 
@@ -175,10 +177,48 @@ def score_is_comparable(score: ScoreState) -> bool:
     return start_block is not None and (score.evaluated_at_block or 0) < start_block
 
 
+def backfill_improvements(state: ValidatorState, unstamped: list[bool]) -> None:
+    """Recover ``improvement`` for winner entries persisted before #177 (issue #180).
+
+    Each entry dethroned the next one down the retained history, so its real improvement is
+    ``(next.ratio - this.ratio) / next.ratio`` -- both ratios are already persisted, so this
+    is a read of existing state, never a re-evaluation. Every validator holds the same
+    ratios and runs the same arithmetic, so the result is identical fleet-wide.
+
+    ``unstamped[i]`` marks entries whose JSON carried no ``improvement`` field at all. That
+    distinction matters: once #177 is live every promotion stamps a value, and a genuine 1%
+    dethrone must never be "corrected" into something else. The oldest retained entry is the
+    one case with no successor to compare against -- it dethroned a winner we no longer
+    retain -- so it keeps ``DEFAULT_WIN_MARGIN`` as the only real fallback in the system.
+    """
+
+    history = state.winner_history
+    for index, entry in enumerate(history):
+        if index >= len(unstamped) or not unstamped[index]:
+            continue
+        if index + 1 < len(history):
+            dethroned = history[index + 1].ratio
+            improvement = max(0.0, (dethroned - entry.ratio) / dethroned) if dethroned > 0 else 0.0
+        else:
+            improvement = DEFAULT_WIN_MARGIN
+        history[index] = replace(entry, improvement=improvement)
+
+
 def load_state(path: Path) -> ValidatorState:
     if not path.exists():
         return ValidatorState()
-    state = ValidatorState.model_validate_json(path.read_text())
+    raw = path.read_text()
+    state = ValidatorState.model_validate_json(raw)
+    # Which winner entries predate #177's improvement field, as written on disk -- pydantic
+    # has already filled the default in by the time we see the model, so absence can only
+    # be observed in the raw JSON (issue #180).
+    try:
+        persisted = json.loads(raw).get("winner_history") or []
+    except (ValueError, AttributeError):
+        persisted = []
+    backfill_improvements(
+        state, [isinstance(e, dict) and "improvement" not in e for e in persisted]
+    )
     _invalidate_stale_scores(state)
     return state
 
